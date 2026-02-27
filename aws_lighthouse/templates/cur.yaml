@@ -1,0 +1,1615 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  IMPORTANT: Deploy this stack in your AWS Organization Management (root) account in the us-east-1 region only.
+
+  SUMMARY: This template enables Lighthouse to perform comprehensive cost analysis and optimization execution across your organization.
+
+  ACTIONS (in order of execution):
+  1. Enables AWS Organizations trusted access for Cost Optimization Hub and Compute Optimizer via Lambda function.
+  2. Creates an S3 bucket (lighthouse-cur-data-{AccountId}) with encryption, versioning, and lifecycle policies.
+  3. Configures CUR 2.0 export with hourly granularity in Parquet format to S3.
+  4. Starts cost allocation tag backfill for the past 12 months.
+  5. Deploys LighthouseExecutionRole to all member accounts via StackSet for organization-wide optimization.
+  6. Creates LighthouseExecutionRole in management account with permissions for Savings Plans/RIs, Budgets, EventBridge, CloudWatch, Cost Optimization Hub, and AWS Organizations management.
+  7. Creates EventBridge rule to notify Lighthouse upon stack completion.
+
+Metadata:
+  TemplateVersion: "0.1.26" # x-release-please-version
+
+Mappings:
+  TemplateConfig:
+    Constants:
+      Version: "0.1.26" # x-release-please-version
+
+Rules:
+  EnforceUsEast1:
+    Assertions:
+      - Assert:
+          Fn::Equals:
+            - !Ref AWS::Region
+            - us-east-1
+        AssertDescription: "You must deploy to region us-east-1 only. Since Data exports is only available in us-east-1"
+
+  EnforceManagementAccount:
+    Assertions:
+      - Assert:
+          Fn::Or:
+            - Fn::Equals:
+                - !Ref AWS::AccountId
+                - "{{MANAGEMENT_ACCOUNT_ID}}"
+            - Fn::Equals:
+                - "{{MANAGEMENT_ACCOUNT_ID}}"
+                - "SKIP"
+        AssertDescription: "This stack must be deployed in the AWS Organization management account only. The current account does not match the expected management account."
+
+Conditions:
+  EnableCostAllocationBackfill:
+    !Equals ["{{ENABLE_COST_ALLOCATION_BACKFILL}}", "true"]
+
+Resources:
+  LighthouseOnboardingLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: "LighthouseOnboardingLambdaRole-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}"
+      Description: "Used by Lighthouse to enable organization services. Must remain in place for Lighthouse to function correctly. Email support@aws-lighthouse.local for assistance."
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Tags:
+        - Key: OwnedBy
+          Value: Lighthouse
+        - Key: Purpose
+          Value: Onboarding
+      Policies:
+        - PolicyName: LighthouseOnboardingLambdaPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ce:StartCostAllocationTagBackfill
+                  - ce:UpdateCostAllocationTagsStatus
+                  - ce:ListCostAllocationTagBackfillHistory
+                  - ce:ListCostAllocationTags
+                  - cost-optimization-hub:UpdateEnrollmentStatus
+                  - cost-optimization-hub:ListEnrollmentStatuses
+                  - compute-optimizer:UpdateEnrollmentStatus
+                Resource: "*"
+              # Service-Linked Role creation for Cost Optimization Hub and Compute Optimizer
+              - Effect: Allow
+                Action:
+                  - iam:CreateServiceLinkedRole
+                Resource:
+                  - "arn:aws:iam::*:role/aws-service-role/cost-optimization-hub.bcm.amazonaws.com/AWSServiceRoleForCostOptimizationHub"
+                  - "arn:aws:iam::*:role/aws-service-role/compute-optimizer.amazonaws.com/AWSServiceRoleForComputeOptimizer"
+                Condition:
+                  StringLike:
+                    "iam:AWSServiceName":
+                      - "cost-optimization-hub.bcm.amazonaws.com"
+                      - "compute-optimizer.amazonaws.com"
+              - Effect: Allow
+                Action:
+                  - organizations:DescribeOrganization
+                  - organizations:EnableAWSServiceAccess
+                  - organizations:EnablePolicyType
+                  - organizations:ListRoots
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: "*"
+              # Permissions for deleting Step 1 stack
+              - Effect: Allow
+                Action:
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeStacks
+                Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/lighthouse-customer-step-1-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}/*"
+              # Permissions to delete Step 1 StackSet
+              - Effect: Allow
+                Action:
+                  - cloudformation:DeleteStackSet
+                  - cloudformation:DeleteStackInstances
+                  - cloudformation:DescribeStackSet
+                  - cloudformation:DescribeStackSetOperation
+                  - cloudformation:ListStackInstances
+                Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stackset/Lighthouse-CostEstimations-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}:*"
+              - Effect: Allow
+                Action:
+                  - cloudformation:DeleteStackInstances
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:cloudformation::${AWS::AccountId}:stackset-target/Lighthouse-CostEstimations-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}:*"
+                  - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}::type/resource/AWS-IAM-ManagedPolicy"
+                  - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}::type/resource/AWS-IAM-Role"
+              # Permissions to delete Step 1 EventBridge rule
+              - Effect: Allow
+                Action:
+                  - events:DeleteRule
+                  - events:RemoveTargets
+                  - events:DescribeRule
+                  - events:ListTargetsByRule
+                Resource: !Sub "arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/NotifyLighthouseStep1Complete-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}"
+              # Permissions to delete Step 1 IAM resources
+              - Effect: Allow
+                Action:
+                  - iam:DeleteRole
+                  - iam:DeleteRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                  - iam:GetRole
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/LighthouseEstimationsReadRole-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}"
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/LighthouseEstimationsNotifierRole-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}"
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/EnableStackSetsLambdaRole-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}"
+              - Effect: Allow
+                Action:
+                  - iam:DeletePolicy
+                  - iam:GetPolicy
+                  - iam:ListPolicyVersions
+                  - iam:DeletePolicyVersion
+                  - iam:ListEntitiesForPolicy
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/LighthouseSavingsEstimationReadOnlyPolicy-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}"
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/LighthouseEstimationsDataProtectionPolicy-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}"
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/LighthouseEstimationsCustomReadPolicy-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}"
+              # Permissions to delete Step 1 Lambda
+              - Effect: Allow
+                Action:
+                  - lambda:DeleteFunction
+                  - lambda:GetFunction
+                  - lambda:InvokeFunction
+                Resource: !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:EnableStackSets-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}"
+
+  EnableOrgServicesLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: "Lambda function to enable Organization services access (enables SCPs, Cost Optimization Hub, Compute Optimizer)"
+      FunctionName: EnableOrgServices-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}
+      Runtime: python3.11
+      Handler: index.handler
+      Role: !GetAtt LighthouseOnboardingLambdaRole.Arn
+      Timeout: 900
+      Architectures:
+        - arm64
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          import time
+          from botocore.exceptions import ClientError
+
+          def enable_coh(orgs, max_retries=3):
+              # 1. Enable Service Access
+              try:
+                  orgs.enable_aws_service_access(ServicePrincipal='cost-optimization-hub.bcm.amazonaws.com')
+                  print("Enabled AWS Organizations Service Access for Cost Optimization Hub")
+                  time.sleep(5)
+              except ClientError as e:
+                  print(f"Skipped enabling AWS Organizations Service Access for Cost Optimization Hub: {e}")
+
+              # 2. Update Enrollment with retry logic
+              cost_hub = boto3.client("cost-optimization-hub")
+              last_error = None
+              for attempt in range(max_retries):
+                  try:
+                      cost_hub.update_enrollment_status(status='Active', includeMemberAccounts=True)
+                      print("Enabled Cost Optimization Hub Enrollment (Opt-In)")
+                      return
+                  except Exception as e:
+                      last_error = e
+                      print(f"Attempt {attempt + 1}/{max_retries} failed to enable Cost Optimization Hub: {e}")
+                      if attempt < max_retries - 1:
+                          sleep_time = 5 * (attempt + 1)
+                          print(f"Retrying in {sleep_time} seconds...")
+                          time.sleep(sleep_time)
+              print(f"Failed to enable Cost Optimization Hub after {max_retries} attempts")
+              raise last_error
+
+          def enable_compute_optimizer(orgs, max_retries=3):
+              # 1. Enable Service Access
+              try:
+                  orgs.enable_aws_service_access(ServicePrincipal='compute-optimizer.amazonaws.com')
+                  print("Enabled AWS Organizations Service Access for Compute Optimizer")
+                  time.sleep(5)
+              except ClientError as e:
+                  print(f"Skipped enabling AWS Organizations Service Access for Compute Optimizer: {e}")
+
+              # 2. Update Enrollment with retry logic
+              co_client = boto3.client("compute-optimizer")
+              last_error = None
+              for attempt in range(max_retries):
+                  try:
+                      co_client.update_enrollment_status(status='Active', includeMemberAccounts=True)
+                      print("Enabled Compute Optimizer Enrollment (Opt-In)")
+                      return
+                  except Exception as e:
+                      last_error = e
+                      print(f"Attempt {attempt + 1}/{max_retries} failed to enable Compute Optimizer: {e}")
+                      if attempt < max_retries - 1:
+                          sleep_time = 5 * (attempt + 1)
+                          print(f"Retrying in {sleep_time} seconds...")
+                          time.sleep(sleep_time)
+              print(f"Failed to enable Compute Optimizer after {max_retries} attempts")
+              raise last_error
+
+          def enable_scps(orgs, root_id, max_attempts=3):
+              """Enable Service Control Policies in the organization with retry logic"""
+              last_error = None
+
+              for attempt in range(max_attempts):
+                  try:
+                      orgs.enable_policy_type(
+                          RootId=root_id,
+                          PolicyType='SERVICE_CONTROL_POLICY'
+                      )
+                      print(f"Enabled Service Control Policies (SCPs) on attempt {attempt + 1}")
+                      # Wait for AWS Organizations to propagate the policy type enablement
+                      print("Waiting for SCP policy type propagation...")
+                      time.sleep(5)
+                      return
+                  except ClientError as e:
+                      if 'PolicyTypeAlreadyEnabledException' in str(e):
+                          print("Service Control Policies already enabled")
+                          return
+
+                      last_error = e
+                      error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+                      print(f"Attempt {attempt + 1}/{max_attempts} failed to enable SCPs: [{error_code}] {e}")
+
+                      if attempt < max_attempts - 1:
+                          wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                          print(f"Retrying in {wait_time} seconds...")
+                          time.sleep(wait_time)
+
+              # All retries exhausted
+              error_msg = (
+                  f"Failed to enable SCPs after {max_attempts} attempts. "
+                  f"Verify organization has 'All Features' enabled and you have "
+                  f"organizations:EnablePolicyType permission. Last error: {last_error}"
+              )
+              print(f"Error: {error_msg}")
+              raise Exception(error_msg)
+
+          def get_organization_root_id(orgs):
+              """Fetch the Organization Root ID using list_roots API."""
+              roots = orgs.list_roots()['Roots']
+              if not roots:
+                  raise Exception("No Organization Roots found. Ensure this is the management account.")
+              return roots[0]['Id']
+
+          def handler(event, context):
+              try:
+                  response_data = {}
+                  orgs = boto3.client("organizations")
+
+                  if event['RequestType'] in ['Create', 'Update']:
+                      # Wait for IAM policy propagation on first deploy
+                      time.sleep(10)
+
+                      if orgs.describe_organization()['Organization']['FeatureSet'] != 'ALL':
+                          raise Exception("Organization must have 'All Features' enabled.")
+
+                      # 1. Enable & Verify Cost Optimization Hub
+                      enable_coh(orgs)
+
+                      # 2. Enable & Verify Compute Optimizer
+                      enable_compute_optimizer(orgs)
+
+                      # 3. Fetch Organization Root ID (needed for SCP and StackSet deployment)
+                      org_root_id = get_organization_root_id(orgs)
+                      print(f"Organization Root ID: {org_root_id}")
+                      response_data['OrganizationRootId'] = org_root_id
+
+                      # 4. Enable Service Control Policies
+                      enable_scps(orgs, org_root_id)
+                  else:
+                      # For Delete operations, still need to fetch root ID for response
+                      org_root_id = get_organization_root_id(orgs)
+                      response_data['OrganizationRootId'] = org_root_id
+
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
+              except Exception as e:
+                  print(f"Unexpected Error in EnableOrgServices: {e}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {"Error": str(e)})
+
+  # Custom Resource: Enable Organization Services
+  # Triggers Lambda to enable Cost Optimization Hub and Compute Optimizer
+  EnableOrgServices:
+    Type: Custom::EnableOrgServices
+    Properties:
+      ServiceToken: !GetAtt EnableOrgServicesLambda.Arn
+      # Force re-execution on template updates by including version
+      TemplateVersion: !FindInMap [TemplateConfig, Constants, Version]
+
+  # Lambda Function: Delete Step 1 Stack
+  # Deletes the Step 1 stack after Step 2 deployment completes
+  DeleteStep1StackLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: "Lambda function to delete Step 1 stack"
+      FunctionName: DeleteStep1Stack-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}
+      Runtime: python3.11
+      Handler: index.handler
+      Role: !GetAtt LighthouseOnboardingLambdaRole.Arn
+      Timeout: 60
+      Architectures:
+        - arm64
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          from botocore.exceptions import ClientError
+
+          STACK_NAME = "lighthouse-customer-step-1-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}"
+
+          def handler(event, context):
+              print(f"Received event: {event}")
+
+              try:
+                  if event['RequestType'] in ['Create', 'Update']:
+                      cf_client = boto3.client('cloudformation')
+
+                      # Check if stack exists
+                      try:
+                          cf_client.describe_stacks(StackName=STACK_NAME)
+                      except ClientError as e:
+                          if 'does not exist' in str(e):
+                              print(f"Stack {STACK_NAME} not found, nothing to delete")
+                              cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                              return
+                          raise
+
+                      # Delete the stack - CloudFormation handles StackSet cleanup
+                      cf_client.delete_stack(StackName=STACK_NAME)
+                      print(f"Delete initiated for stack {STACK_NAME}")
+
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+
+              except Exception as e:
+                  print(f"Error: {e}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {"Error": str(e)})
+
+  # Custom Resource: Delete Step 1 Stack
+  # Triggers after Step 2 deployment completes to clean up Step 1 resources
+  DeleteStep1Stack:
+    Type: Custom::DeleteStep1Stack
+    DependsOn:
+      - SubAccountStackSet
+      - LighthouseExecutionRole
+    Properties:
+      ServiceToken: !GetAtt DeleteStep1StackLambda.Arn
+
+  # Organizational Unit: Lighthouse Optimization
+  # Accounts in this OU are exempted from Savings Plans restrictions
+  # Provides organizational boundary for cost optimization governance
+  LighthouseOptimizationOU:
+    Type: AWS::Organizations::OrganizationalUnit
+    Properties:
+      Name: "LighthouseOptimization-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}"
+      ParentId: !GetAtt EnableOrgServices.OrganizationRootId
+      Tags:
+        - Key: OwnedBy
+          Value: Lighthouse
+        - Key: Purpose
+          Value: CostOptimization
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # Service Control Policy: Savings Plans Restriction
+  # Denies all Savings Plans write operations except for:
+  #   1. LighthouseExecutionRole (works from any account)
+  #   2. Any principal in LighthouseOptimization OU (organizational boundary)
+  # Applies at organization root level to enforce governance across all accounts
+  LighthouseSavingsPlansDenyPolicy:
+    Type: AWS::Organizations::Policy
+    Properties:
+      Type: SERVICE_CONTROL_POLICY
+      Name: LighthouseSavingsPlansDenyPolicy-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}
+      Description: "Denies Savings Plans write operations except LighthouseExecutionRole and accounts in LighthouseOptimization OU. Managed by Lighthouse."
+      Content:
+        Version: "2012-10-17"
+        Statement:
+          # Deny if NOT using LighthouseExecutionRole (regardless of OU)
+          - Sid: DenySavingsPlansIfNotUsingLighthouseRole
+            Effect: Deny
+            Action:
+              - savingsplans:CreateSavingsPlan
+              - savingsplans:DeleteQueuedSavingsPlan
+              - savingsplans:ReturnSavingsPlan
+              - savingsplans:TagResource
+              - savingsplans:UntagResource
+            Resource: "*"
+            Condition:
+              ArnNotLike:
+                aws:PrincipalArn: arn:aws:iam::*:role/LighthouseExecutionRole-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}
+
+          # Deny if NOT in LighthouseOptimization OU (regardless of role)
+          - Sid: DenySavingsPlansIfNotInLighthouseOU
+            Effect: Deny
+            Action:
+              - savingsplans:CreateSavingsPlan
+              - savingsplans:DeleteQueuedSavingsPlan
+              - savingsplans:ReturnSavingsPlan
+              - savingsplans:TagResource
+              - savingsplans:UntagResource
+            Resource: "*"
+            Condition:
+              ForAllValues:StringNotLike:
+                aws:PrincipalOrgPaths:
+                  - !Sub "o-*/r-*/${LighthouseOptimizationOU}/*"
+                  - !Sub "o-*/r-*/${LighthouseOptimizationOU}/"
+      TargetIds:
+        - !GetAtt EnableOrgServices.OrganizationRootId
+      Tags:
+        - Key: OwnedBy
+          Value: Lighthouse
+        - Key: Purpose
+          Value: SavingsPlansRestriction
+
+  # Service Control Policy: Lighthouse Governance - Complete Lockdown
+  # Denies ALL resource creation and IAM management for accounts in LighthouseOptimization OU
+  # LighthouseExecutionRole, AWS service-linked roles, and LighthousePoolAccountTransferRole exempted
+  # Creates frozen sandbox environment for Lighthouse-only operations
+  LighthouseGovernanceDenyPolicy:
+    Type: AWS::Organizations::Policy
+    Properties:
+      Type: SERVICE_CONTROL_POLICY
+      Name: LighthouseGovernanceDenyPolicy-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}
+      Description: "Complete account lockdown for LighthouseOptimization OU. Only LighthouseExecutionRole can create resources or manage IAM. AWS services and users are blocked. Managed by Lighthouse."
+      Content:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyOrgAndAccountActions
+            Effect: Deny
+            Action:
+              - organizations:LeaveOrganization
+              - organizations:RemoveAccountFromOrganization
+              - account:CloseAccount
+              - account:EnableRegion
+              - account:DisableRegion
+              - iam:CreateUser
+              - iam:CreateAccessKey
+            Resource: "*"
+            Condition:
+              ArnNotLike:
+                aws:PrincipalArn:
+                  - !Sub "arn:${AWS::Partition}:iam::*:role/LighthouseExecutionRole-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}"
+                  - !Sub "arn:${AWS::Partition}:iam::*:role/aws-service-role/*"
+                  - !Sub "arn:${AWS::Partition}:iam::*:role/LighthousePoolAccountTransferRole"
+
+          - Sid: DenyResourceCreation
+            Effect: Deny
+            Action:
+              - ec2:RunInstances
+              - ec2:CreateVpc
+              - ec2:CreateSubnet
+              - ec2:CreateVolume
+              - ec2:CreateSecurityGroup
+              - lambda:CreateFunction
+              - s3:CreateBucket
+              - rds:CreateDBInstance
+              - rds:CreateDBCluster
+              - dynamodb:CreateTable
+              - ecs:CreateCluster
+              - eks:CreateCluster
+              - cloudwatch:PutMetricAlarm
+              - sns:CreateTopic
+              - sqs:CreateQueue
+            Resource: "*"
+            Condition:
+              ArnNotLike:
+                aws:PrincipalArn:
+                  - !Sub "arn:${AWS::Partition}:iam::*:role/LighthouseExecutionRole-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}"
+
+          - Sid: DenySecurityTampering
+            Effect: Deny
+            Action:
+              - guardduty:DeleteDetector
+              - config:DeleteConfigRule
+              - config:StopConfigurationRecorder
+              - cloudtrail:DeleteTrail
+              - cloudtrail:StopLogging
+              - securityhub:DisableSecurityHub
+            Resource: "*"
+            Condition:
+              ArnNotLike:
+                aws:PrincipalArn:
+                  - !Sub "arn:${AWS::Partition}:iam::*:role/LighthouseExecutionRole-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}"
+      TargetIds:
+        - !Ref LighthouseOptimizationOU
+      Tags:
+        - Key: OwnedBy
+          Value: Lighthouse
+        - Key: Purpose
+          Value: GovernanceControl
+
+  # S3 Bucket for CUR 2.0 Data
+  # Stores hourly Cost and Usage Report exports in Parquet format
+  # with encryption, versioning, and 365-day lifecycle policy
+  CURBucket:
+    Type: AWS::S3::Bucket
+    Condition: EnableCostAllocationBackfill
+    Properties:
+      BucketName: "lighthouse-cur-data-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}"
+      OwnershipControls:
+        Rules: [{ ObjectOwnership: BucketOwnerEnforced }]
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Status: Enabled
+            ExpirationInDays: 365
+            NoncurrentVersionExpirationInDays: 30
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 30
+      VersioningConfiguration: { Status: Enabled }
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - { ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 } }
+
+  # S3 Bucket Policy for CUR Data
+  # Allows BCM Data Exports service to write CUR 2.0 data
+  # Roles access bucket via IAM policies (ReadOnlyAccess + LighthouseDataProtectionPolicy)
+  CURBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Condition: EnableCostAllocationBackfill
+    Properties:
+      Bucket: !Ref CURBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # Services: BCM Data Exports
+          - Sid: AllowBCMDataExportsPut
+            Effect: Allow
+            Principal: { Service: bcm-data-exports.amazonaws.com }
+            Action: s3:PutObject
+            Resource: !Sub "arn:${AWS::Partition}:s3:::${CURBucket}/*"
+            Condition:
+              StringEquals: { aws:SourceAccount: !Ref AWS::AccountId }
+              StringLike:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:bcm-data-exports:us-east-1:${AWS::AccountId}:export/*"
+
+          # Services: BCM Data Exports
+          - Sid: AllowBCMDataExportsBucketMeta
+            Effect: Allow
+            Principal: { Service: bcm-data-exports.amazonaws.com }
+            Action:
+              - s3:GetBucketAcl
+              - s3:GetBucketPolicy
+              - s3:GetBucketLocation
+              - s3:ListBucket
+            Resource: !Sub "arn:${AWS::Partition}:s3:::${CURBucket}"
+            Condition:
+              StringEquals: { aws:SourceAccount: !Ref AWS::AccountId }
+              StringLike:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:bcm-data-exports:us-east-1:${AWS::AccountId}:export/*"
+
+  # BCM Data Export (CUR 2.0)
+  # Configures hourly cost and usage data export with resource-level detail
+  # Outputs Parquet files to CURBucket for analysis by Lighthouse
+  Cur20Export:
+    Type: AWS::BCMDataExports::Export
+    Condition: EnableCostAllocationBackfill
+    DependsOn: CURBucketPolicy
+    Properties:
+      Export:
+        Name: "lighthouse-cur-data-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}"
+        Description: "CUR 2.0 export to S3 (Parquet), hourly with resource IDs"
+        DataQuery:
+          QueryStatement: |
+            SELECT bill_bill_type,
+              bill_billing_entity,
+              bill_billing_period_end_date,
+              bill_billing_period_start_date,
+              bill_invoice_id,
+              bill_invoicing_entity,
+              bill_payer_account_id,
+              bill_payer_account_name,
+              cost_category,
+              discount,
+              discount_bundled_discount,
+              discount_total_discount,
+              identity_line_item_id,
+              identity_time_interval,
+              line_item_availability_zone,
+              line_item_blended_cost,
+              line_item_blended_rate,
+              line_item_currency_code,
+              line_item_legal_entity,
+              line_item_line_item_description,
+              line_item_line_item_type,
+              line_item_net_unblended_cost,
+              line_item_net_unblended_rate,
+              line_item_normalization_factor,
+              line_item_normalized_usage_amount,
+              line_item_operation,
+              line_item_product_code,
+              line_item_resource_id,
+              line_item_tax_type,
+              line_item_unblended_cost,
+              line_item_unblended_rate,
+              line_item_usage_account_id,
+              line_item_usage_account_name,
+              line_item_usage_amount,
+              line_item_usage_end_date,
+              line_item_usage_start_date,
+              line_item_usage_type,
+              line_item_user_identifier,
+              pricing_currency,
+              pricing_lease_contract_length,
+              pricing_offering_class,
+              pricing_public_on_demand_cost,
+              pricing_public_on_demand_rate,
+              pricing_purchase_option,
+              pricing_rate_code,
+              pricing_rate_id,
+              pricing_term,
+              pricing_unit,
+              product,
+              product_comment,
+              product_fee_code,
+              product_fee_description,
+              product_from_location,
+              product_from_location_type,
+              product_from_region_code,
+              product_instance_family,
+              product_instance_type,
+              product_instancesku,
+              product_location,
+              product_location_type,
+              product_operation,
+              product_pricing_unit,
+              product_product_family,
+              product_region_code,
+              product_servicecode,
+              product_sku,
+              product_to_location,
+              product_to_location_type,
+              product_to_region_code,
+              product_usagetype,
+              reservation_amortized_upfront_cost_for_usage,
+              reservation_amortized_upfront_fee_for_billing_period,
+              reservation_availability_zone,
+              reservation_effective_cost,
+              reservation_end_time,
+              reservation_modification_status,
+              reservation_net_amortized_upfront_cost_for_usage,
+              reservation_net_amortized_upfront_fee_for_billing_period,
+              reservation_net_effective_cost,
+              reservation_net_recurring_fee_for_usage,
+              reservation_net_unused_amortized_upfront_fee_for_billing_period,
+              reservation_net_unused_recurring_fee,
+              reservation_net_upfront_value,
+              reservation_normalized_units_per_reservation,
+              reservation_number_of_reservations,
+              reservation_recurring_fee_for_usage,
+              reservation_reservation_a_r_n,
+              reservation_start_time,
+              reservation_subscription_id,
+              reservation_total_reserved_normalized_units,
+              reservation_total_reserved_units,
+              reservation_units_per_reservation,
+              reservation_unused_amortized_upfront_fee_for_billing_period,
+              reservation_unused_normalized_unit_quantity,
+              reservation_unused_quantity,
+              reservation_unused_recurring_fee,
+              reservation_upfront_value,
+              resource_tags,
+              tags,
+              savings_plan_amortized_upfront_commitment_for_billing_period,
+              savings_plan_end_time,
+              savings_plan_instance_type_family,
+              savings_plan_net_amortized_upfront_commitment_for_billing_period,
+              savings_plan_net_recurring_commitment_for_billing_period,
+              savings_plan_net_savings_plan_effective_cost,
+              savings_plan_offering_type,
+              savings_plan_payment_option,
+              savings_plan_purchase_term,
+              savings_plan_recurring_commitment_for_billing_period,
+              savings_plan_region,
+              savings_plan_savings_plan_a_r_n,
+              savings_plan_savings_plan_effective_cost,
+              savings_plan_savings_plan_rate,
+              savings_plan_start_time,
+              savings_plan_total_commitment_to_date,
+              savings_plan_used_commitment
+            FROM COST_AND_USAGE_REPORT
+          TableConfigurations:
+            COST_AND_USAGE_REPORT:
+              INCLUDE_MANUAL_DISCOUNT_COMPATIBILITY: "FALSE"
+              TIME_GRANULARITY: "HOURLY"
+              INCLUDE_RESOURCES: "TRUE"
+              INCLUDE_SPLIT_COST_ALLOCATION_DATA: "FALSE"
+        DestinationConfigurations:
+          S3Destination:
+            S3Bucket: !Ref CURBucket
+            S3Prefix: "cur2"
+            S3Region: !Ref AWS::Region
+            S3OutputConfigurations:
+              Compression: PARQUET
+              Format: PARQUET
+              OutputType: CUSTOM
+              Overwrite: OVERWRITE_REPORT
+        RefreshCadence: { Frequency: SYNCHRONOUS }
+
+  EnableCostAllocationBackfillLambda:
+    Type: AWS::Lambda::Function
+    Condition: EnableCostAllocationBackfill
+    DependsOn: Cur20Export
+    Properties:
+      Description: "Lambda function to enable Cost Allocation Backfill"
+      FunctionName: EnableCostAllocationBackfill-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}
+      Runtime: python3.11
+      Handler: index.handler
+      Role: !GetAtt LighthouseOnboardingLambdaRole.Arn
+      Timeout: 180
+      Architectures:
+        - arm64
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          import time
+          import datetime
+          from botocore.exceptions import ClientError
+          def handler(event, context):
+            print("Received event:", event)
+            ce = boto3.client("ce")
+            try:
+                if event['RequestType'] in ['Create', 'Update']:
+                    print("Checking for existing backfills...")
+                    try:
+                        backfill_history = ce.list_cost_allocation_tag_backfill_history()
+                        if any(b['BackfillStatus'] == 'PROCESSING' for b in backfill_history.get('BackfillHistory', [])):
+                            print("A backfill is already processing. Skipping new request.")
+                            cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                            return
+                    except Exception as e:
+                        print(f"Warning: Could not list backfill history: {e}")
+
+                    print("Attempting to activate Cost Allocation Backfill...")
+
+                    current_date = datetime.datetime.utcnow()
+                    backfill_from = datetime.datetime(
+                        current_date.year - 1,
+                        current_date.month,
+                        1,
+                        0,
+                        0,
+                        0
+                    )
+                    print(f"Backfill from: {backfill_from.strftime('%Y-%m-%dT%H:%M:%SZ')}")
+
+                    target_tag_key = 'aws:createdBy'
+
+                    try:
+                        # Check status of aws:createdBy
+                        response = ce.list_cost_allocation_tags(
+                            TagKeys=[target_tag_key],
+                            Type='AWSGenerated'
+                        )
+
+                        is_active = False
+                        for tag in response.get('CostAllocationTags', []):
+                            if tag['TagKey'] == target_tag_key and tag['Status'] == 'Active':
+                                is_active = True
+                                break
+
+                        if is_active:
+                            print(f"Tag {target_tag_key} is already Active. Searching for another inactive AWS-managed tag...")
+
+                            # List AWS generated tags to find a substitute
+                            all_tags_response = ce.list_cost_allocation_tags(
+                                MaxResults=50
+                            )
+
+                            for tag in all_tags_response.get('CostAllocationTags', []):
+                                if tag['Status'] == 'Inactive':
+                                    target_tag_key = tag['TagKey']
+                                    print(f"Found inactive tag to activate: {target_tag_key}")
+                                    break
+
+                    except Exception as e:
+                        print(f"Error checking tag status: {str(e)}")
+
+                    print(f"Activating tag: {target_tag_key}")
+
+                    ce.update_cost_allocation_tags_status(
+                        CostAllocationTagsStatus=[
+                            {
+                                'TagKey': target_tag_key,
+                                'Status': 'Active'
+                            }
+                        ]
+                    )
+                    response = ce.start_cost_allocation_tag_backfill(
+                        BackfillFrom=backfill_from.strftime("%Y-%m-%dT%H:%M:%SZ")
+                    )
+                    print(f"Backfill response: {response}")
+                    print("Cost Allocation Backfill requested successfully.")
+
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+            except Exception as e:
+                print("Error:", e)
+                cfnresponse.send(event, context, cfnresponse.FAILED, {"Error": str(e)})
+
+  # Custom Resource: Cost Allocation Tag Backfill
+  # Triggers Lambda to backfill historical cost data with cost allocation tags for the past 12 months
+  EnableCostAllocationBackfill:
+    Type: Custom::EnableCostAllocationBackfill
+    Condition: EnableCostAllocationBackfill
+    Properties:
+      ServiceToken: !GetAtt EnableCostAllocationBackfillLambda.Arn
+
+  SubAccountStackSet:
+    Type: AWS::CloudFormation::StackSet
+    DependsOn: LighthouseSavingsPlansDenyPolicy
+    Properties:
+      StackSetName: "Lighthouse-CostOptimization-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}"
+      Description: "Deploys the Lighthouse IAM roles to all member accounts for organization-wide cost analysis and optimization. Must remain in place for Lighthouse to function correctly. Email support@aws-lighthouse.local for assistance."
+      PermissionModel: SERVICE_MANAGED
+      AutoDeployment:
+        Enabled: true
+        RetainStacksOnAccountRemoval: false
+      Capabilities:
+        - CAPABILITY_NAMED_IAM
+      TemplateURL: "{{SUBACCOUNTS_TEMPLATE_URL}}"
+      Parameters:
+        - ParameterKey: LighthouseCustomerId
+          ParameterValue: "{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}"
+        - ParameterKey: LighthouseAccountId
+          ParameterValue: "{{LIGHTHOUSE_ACCOUNT_ID}}"
+        - ParameterKey: ExternalId
+          ParameterValue: "{{EXTERNAL_ID}}"
+      StackInstancesGroup:
+        - DeploymentTargets:
+            OrganizationalUnitIds:
+              - !GetAtt EnableOrgServices.OrganizationRootId
+          Regions:
+            - us-east-1
+      OperationPreferences:
+        FailureTolerancePercentage: 0
+        MaxConcurrentPercentage: 100
+        RegionConcurrencyType: PARALLEL
+        ConcurrencyMode: SOFT_FAILURE_TOLERANCE
+      Tags:
+        - Key: TemplateVersion
+          Value: !FindInMap [TemplateConfig, Constants, Version]
+      CallAs: SELF
+
+
+  # ==== BEGIN GENERATED IAM POLICIES ====
+  # Source: iam-policies/policies/
+  # DO NOT EDIT MANUALLY 
+
+  # IAM Policy: Cost Optimization Write Permissions
+  # Grants Lighthouse execution permissions for purchasing RIs/Savings Plans,
+  # managing budgets, alarms, Cost Optimization Hub enrollment, and AWS Organizations management
+  LighthouseCostOptimizationWritePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: "LighthouseCostOptimizationWritePolicy-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}"
+      Description: "Used by Lighthouse. Must remain in place for Lighthouse to function correctly. Email support@aws-lighthouse.local for assistance. Grants execution permissions for cost optimization actions including purchasing Savings Plans, RIs, and managing accounts."
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # Reserved Instance Purchases - Allows purchasing, modifying, and exchanging RIs
+          # Services: EC2, RDS, ElastiCache, Redshift, OpenSearch, MemoryDB, DynamoDB, CloudFront, MediaConvert, MediaConnect, SageMaker
+          - Sid: SavingsPlansAndRIsWrite
+            Effect: Allow
+            Action:
+              - ec2:PurchaseReservedInstancesOffering
+              - ec2:ModifyReservedInstances
+              - ec2:AcceptReservedInstancesExchangeQuote
+              - ec2:DeleteQueuedReservedInstances
+              - ec2:PurchaseHostReservation
+              - rds:PurchaseReservedDBInstancesOffering
+              - elasticache:PurchaseReservedCacheNodesOffering
+              - redshift:PurchaseReservedNodeOffering
+              - redshift:AcceptReservedNodeExchange
+              - es:PurchaseReservedInstanceOffering
+              - memorydb:PurchaseReservedNodesOffering
+              - dynamodb:PurchaseReservedCapacityOfferings
+              - cloudfront:CreateSavingsPlan
+              - ec2:PurchaseCapacityBlock
+              - mediaconvert:CreateQueue
+              - mediaconvert:UpdateQueue
+              - mediaconnect:PurchaseOffering
+              - sagemaker:CreateTrainingPlan
+            Resource: "*"
+          # Organization Management - Manage organization structure and service integrations
+          # Services: Organizations
+          - Sid: OrgManagementWrite
+            Effect: Allow
+            Action:
+              - organizations:MoveAccount
+              - organizations:TagResource
+              - organizations:UntagResource
+              - organizations:AcceptHandshake
+              - organizations:EnableAWSServiceAccess
+              - organizations:CreateOrganizationalUnit
+              - organizations:ListRoots
+              - organizations:ListOrganizationalUnitsForParent
+              - organizations:ListParents
+            Resource: "*"
+          # Account Transfer - Required for commitment service to move accounts between organizations
+          # Services: Organizations
+          - Sid: AccountTransferOperations
+            Effect: Allow
+            Action:
+              - organizations:InviteAccountToOrganization
+              - organizations:DescribeHandshake
+              - organizations:ListHandshakesForOrganization
+              - organizations:CancelHandshake
+              - organizations:DescribeOrganization
+            Resource: "*"
+          # Governance & Monitoring - Budgets, anomaly detection, and service quotas
+          # Services: Budgets, Cost Explorer, Billing, Account, Service Quotas, IAM
+          - Sid: GovernanceWrite
+            Effect: Allow
+            Action:
+              - budgets:*
+              - ce:CreateAnomalyMonitor
+              - ce:CreateAnomalySubscription
+              - ce:UpdateAnomalyMonitor
+              - ce:UpdateAnomalySubscription
+              - ce:StartCommitmentPurchaseAnalysis
+              - ce:StartSavingsPlansPurchaseRecommendationGeneration
+              - servicequotas:RequestServiceQuotaIncrease
+              - servicequotas:GetServiceQuota
+              - servicequotas:ListServiceQuotas
+              - servicequotas:GetRequestedServiceQuotaChange
+              - servicequotas:ListRequestedServiceQuotaChangeHistory
+              - servicequotas:GetAWSDefaultServiceQuota
+              - servicequotas:ListAWSDefaultServiceQuotas
+              - iam:SimulatePrincipalPolicy
+            Resource: "*"
+          # Service Quotas - Create service-linked role for Service Quotas functionality
+          # Services: IAM
+          - Sid: ServiceQuotasServiceLinkedRole
+            Effect: Allow
+            Action:
+              - iam:CreateServiceLinkedRole
+            Resource: "arn:aws:iam::*:role/aws-service-role/servicequotas.amazonaws.com/*"
+            Condition:
+              StringEquals:
+                "iam:AWSServiceName": "servicequotas.amazonaws.com"
+          # Cost Allocation Tags - Activate tags and trigger backfill (management account only)
+          # Services: Cost Explorer
+          - Sid: CostAllocationTagsWrite
+            Effect: Allow
+            Action:
+              - ce:UpdateCostAllocationTagsStatus
+              - ce:ListCostAllocationTags
+              - ce:StartCostAllocationTagBackfill
+              - ce:ListCostAllocationTagBackfillHistory
+            Resource: "*"
+          # Data Exports - Create and manage BCM Data Exports (CUR 2.0)
+          # Services: BCM Data Exports
+          - Sid: DataExportsWrite
+            Effect: Allow
+            Action:
+              - bcm-data-exports:CreateExport
+              - bcm-data-exports:UpdateExport
+              - bcm-data-exports:DeleteExport
+              - bcm-data-exports:TagResource
+              - bcm-data-exports:UntagResource
+            Resource: "*"
+          # SNS - Write access for Lighthouse-prefixed topics (anomaly detection subscriptions)
+          # Services: SNS
+          - Sid: SNSAnomalyDetectionSubscriptionsWrite
+            Effect: Allow
+            Action:
+              - sns:*
+            Resource: !Sub "arn:${AWS::Partition}:sns:*:${AWS::AccountId}:Lighthouse*"
+          # CloudWatch Alarms - Create and manage Lighthouse-prefixed alarms only
+          # Services: CloudWatch
+          - Sid: CloudWatchWrite
+            Effect: Allow
+            Action:
+              - cloudwatch:PutMetricAlarm
+              - cloudwatch:DeleteAlarms
+              - cloudwatch:EnableAlarmActions
+              - cloudwatch:DisableAlarmActions
+            Resource: !Sub "arn:${AWS::Partition}:cloudwatch:*:${AWS::AccountId}:alarm:Lighthouse-*"
+          # EventBridge - Write access for Lighthouse-prefixed rules and event buses
+          # Services: EventBridge
+          - Sid: EventBridgeWrite
+            Effect: Allow
+            Action:
+              - events:PutRule
+              - events:PutTargets
+              - events:DeleteRule
+              - events:RemoveTargets
+              - events:CreateEventBus
+              - events:DeleteEventBus
+              - events:PutEvents
+            Resource:
+              - !Sub "arn:${AWS::Partition}:events:*:*:rule/Lighthouse*"
+              - !Sub "arn:${AWS::Partition}:events:*:*:event-bus/Lighthouse*"
+          # Compute Optimizer - Full write access for optimization recommendations
+          # Services: Compute Optimizer
+          - Sid: ComputeOptimizerWrite
+            Effect: Allow
+            Action:
+              - compute-optimizer:*
+            Resource: "*"
+          # Cost Optimization Hub - Create service-linked role for opt-in
+          # Services: IAM, Cost Optimization Hub
+          - Sid: CostOptimizationHubOptIn
+            Effect: Allow
+            Action:
+              - iam:CreateServiceLinkedRole
+            Resource: "arn:aws:iam::*:role/aws-service-role/cost-optimization-hub.bcm.amazonaws.com/AWSServiceRoleForCostOptimizationHub"
+            Condition:
+              StringLike:
+                "iam:AWSServiceName": "cost-optimization-hub.bcm.amazonaws.com"
+          # Cost Optimization Hub - Update service-linked role policy
+          # Services: IAM
+          - Sid: CostOptimizationHubPolicy
+            Effect: Allow
+            Action:
+              - iam:PutRolePolicy
+            Resource: "arn:aws:iam::*:role/aws-service-role/cost-optimization-hub.bcm.amazonaws.com/AWSServiceRoleForCostOptimizationHub"
+          # Cost Optimization Hub - Update enrollment status
+          # Services: Cost Optimization Hub
+          - Sid: CostOptimizationHubUpdateStatus
+            Effect: Allow
+            Action:
+              - cost-optimization-hub:UpdateEnrollmentStatus
+            Resource: "*"
+
+  # IAM Policy: Custom Read Permissions
+  # Custom read permissions for Lighthouse cost optimization not covered by AWS managed policies
+  # Note: Most read permissions come from AWS managed policies (ReadOnlyAccess, etc.)
+  LighthouseCustomReadPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: "LighthouseCustomReadPolicy-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}"
+      Description: "Custom read permissions for Lighthouse cost optimization not covered by AWS managed policies"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # Invoicing & Tax - Combined read access for LighthouseCustomReadPolicy
+          # Services: AWS Invoicing, AWS Tax Settings
+          - Sid: InvoicingTaxRead
+            Effect: Allow
+            Action:
+              - invoicing:BatchGetInvoiceProfile
+              - tax:GetTaxRegistration
+              - taxsettings:Get*
+              - taxsettings:List*
+            Resource: "*"
+          # Commitment purchases - Read access for RI and Savings Plans analysis
+          # Services: Cost Explorer, Redshift, CloudFront, SageMaker
+          - Sid: CommitmentReads
+            Effect: Allow
+            Action:
+              - redshift:GetReservedNodeExchangeOfferings
+              - redshift:GetReservedNodeExchangeConfigurationOptions
+              - cloudfront:ListSavingsPlans
+              - cloudfront:GetSavingsPlan
+              - cloudfront:ListRateCards
+              - cloudfront:ListUsages
+              - ce:GetCommitmentPurchaseAnalysis
+              - ce:ListCommitmentPurchaseAnalyses
+              - sagemaker:SearchTrainingPlanOfferings
+            Resource: "*"
+          # Savings Plans - Trigger and retrieve purchase recommendations
+          # Services: Cost Explorer
+          - Sid: SavingsPlansRecommendationGeneration
+            Effect: Allow
+            Action:
+              - ce:StartSavingsPlansPurchaseRecommendationGeneration
+              - ce:ListSavingsPlansPurchaseRecommendationGeneration
+              - ce:GetSavingsPlansPurchaseRecommendation
+            Resource: "*"
+          # S3 - Bucket configuration discovery for cost optimization
+          # Services: S3
+          - Sid: S3BucketDiscovery
+            Effect: Allow
+            Action:
+              - s3:GetBucketLocation
+              - s3:GetLifecycleConfiguration
+              - s3:GetIntelligentTieringConfiguration
+            Resource: "*"
+          # BCM Data Exports - Read access for CUR 2.0 export configurations
+          # Services: BCM Data Exports
+          - Sid: DataExportsRead
+            Effect: Allow
+            Action:
+              - bcm-data-exports:GetExport
+              - bcm-data-exports:GetExecution
+              - bcm-data-exports:GetTable
+              - bcm-data-exports:ListExports
+              - bcm-data-exports:ListExecutions
+              - bcm-data-exports:ListTables
+              - bcm-data-exports:ListTagsForResource
+            Resource: "*"
+
+  # ============================================================================
+  # IAM Managed Policy: Data Protection Policy (Step 2 - Cost Optimization)
+  # 11-Tier Explicit Deny Policy - Cryptographic Assurance of Data Protection
+  # ============================================================================
+  # IAM evaluation: Explicit Deny > Allow > Implicit Deny (denies always win)
+  # Coverage: 100+ actions across 11 tiers protecting secrets, communications,
+  # documents, databases, storage, analytics, logs, identity, code, ML, and instance access
+  # Note: Step 2 allows CUR bucket access (lighthouse-cur-data-*/cur2/*)
+  # ============================================================================
+  LighthouseDataProtectionPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: "LighthouseDataProtectionPolicy-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}"
+      Description: "Comprehensive 11-tier data protection policy with 100+ explicit denies across secrets, communications, documents, databases, storage, analytics, logs, identity, code, ML, and instance access. Provides cryptographic assurance that Lighthouse cannot access customer sensitive data."
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # TIER 1: Secrets & Credentials
+          - Sid: DenySecretsAndCredentials
+            Effect: Deny
+            Action:
+              - secretsmanager:GetSecretValue
+              - secretsmanager:GetResourcePolicy
+              - secretsmanager:DescribeSecret
+              - ssm:GetParameter
+              - ssm:GetParameters
+              - ssm:GetParameterHistory
+              - ssm:GetParametersByPath
+              - acm-pca:GetCertificate
+              - acm-pca:GetCertificateAuthorityCertificate
+              - kms:Decrypt
+              - kms:Encrypt
+              - kms:GenerateDataKey
+              - kms:ReEncrypt*
+            Resource: "*"
+          # TIER 2: Communications (Emails, Messages, SMS)
+          - Sid: DenyCommunicationsData
+            Effect: Deny
+            Action:
+              - workmail:*
+              - ses:GetMessage
+              - ses:GetEmailIdentity
+              - ses:GetEmailTemplate
+              - chime:GetMessage*
+              - chime:GetConversation*
+              - chime:ListMessages
+              - connect:GetContactAttributes
+              - connect:GetContactRecording
+              - pinpoint:GetEmailTemplate
+              - pinpoint:GetSmsTemplate
+              - sns:GetSMSAttributes
+            Resource: "*"
+          # TIER 3: Documents & Collaboration
+          - Sid: DenyDocumentsAccess
+            Effect: Deny
+            Action:
+              - workdocs:GetDocument
+              - workdocs:GetDocumentVersion
+              - workdocs:DownloadDocumentVersion
+              - workspaces:DescribeWorkspacesConnectionStatus
+              - workspaces:DescribeWorkspaceSnapshots
+            Resource: "*"
+          # TIER 4: Database Content
+          - Sid: DenyDatabaseContentAccess
+            Effect: Deny
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:BatchGetItem
+              - dynamodb:Query
+              - dynamodb:Scan
+              - dynamodb:GetRecords
+              - dynamodb:GetShardIterator
+              - rds-data:ExecuteStatement
+              - rds-data:BatchExecuteStatement
+              - rds:DownloadDBLogFilePortion
+              - rds:DownloadCompleteDBLogFile
+              - neptune-db:*
+              - timestream:Select
+              - timestream:SelectValues
+              - qldb:SendCommand
+              - qldb:ExecuteStatement
+              - redshift:GetClusterCredentials
+              - redshift:ExecuteQuery
+              - redshift-data:ExecuteStatement
+              - redshift-data:GetStatementResult
+            Resource: "*"
+          # TIER 5: Storage Content - S3 with CUR exception
+          - Sid: DenyS3DataAccessExceptCURBucket
+            Effect: Deny
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:GetObjectTorrent
+            Resource: "*"
+            Condition:
+              ArnNotLike:
+                "aws:ResourceArn": "arn:aws:s3:::lighthouse-cur-data-*/cur2/*"
+          # Deny all S3 write/delete operations
+          - Sid: DenyS3WriteDelete
+            Effect: Deny
+            Action:
+              - s3:PutObject
+              - s3:DeleteObject
+            Resource: "*"
+          # TIER 5: File systems and backups
+          - Sid: DenyFileSystemAndBackupAccess
+            Effect: Deny
+            Action:
+              - elasticfilesystem:ClientMount
+              - elasticfilesystem:ClientWrite
+              - elasticfilesystem:ClientRootAccess
+              - fsx:*
+              - backup:GetRecoveryPointRestoreMetadata
+              - backup:StartRestoreJob
+            Resource: "*"
+          # TIER 6: Analytics Query Results
+          - Sid: DenyAnalyticsQueryResults
+            Effect: Deny
+            Action:
+              - athena:GetQueryResults
+              - athena:GetQueryResultsStream
+              - quicksight:GetDashboard
+              - quicksight:GetDataSet
+              - glue:GetTable
+              - glue:GetPartition
+              - glue:GetPartitions
+            Resource: "*"
+          # TIER 7: Logs (with Container Insights exception)
+          - Sid: DenyLogsQueryExceptContainerInsights
+            Effect: Deny
+            Action:
+              - logs:StartQuery
+              - logs:GetQueryResults
+            Resource: "*"
+            Condition:
+              StringNotLike:
+                "logs:LogGroupName": "/aws/containerinsights/*/performance"
+          # Deny direct log access
+          - Sid: DenyLogEventsAccess
+            Effect: Deny
+            Action:
+              - logs:GetLogEvents
+              - logs:FilterLogEvents
+              - logs:GetLogRecord
+              - cloudtrail:LookupEvents
+              - cloudtrail:GetQueryResults
+            Resource: "*"
+          # TIER 8: User Directories & Identity
+          - Sid: DenyUserDirectoryAccess
+            Effect: Deny
+            Action:
+              - cognito-identity:*
+              - cognito-idp:*
+              - cognito-sync:*
+              - ds:DescribeUsers
+              - iam:GetSSHPublicKey
+              - iam:GetServiceSpecificCredential
+              - iam:GetLoginProfile
+            Resource: "*"
+          # TIER 9: Code & Artifacts
+          - Sid: DenyCodeAccess
+            Effect: Deny
+            Action:
+              - codecommit:GetFile
+              - codecommit:GetFolder
+              - codecommit:GetBlob
+              - codecommit:GitPull
+              - codeartifact:GetPackageVersionAsset
+              - codeartifact:ReadFromRepository
+              - ecr:BatchGetImage
+              - ecr:GetDownloadUrlForLayer
+            Resource: "*"
+          # TIER 10: Machine Learning Data
+          - Sid: DenyMachineLearningData
+            Effect: Deny
+            Action:
+              - sagemaker:DescribeModelPackage
+              - sagemaker:DescribeTrainingJob
+              - rekognition:DetectFaces
+              - rekognition:SearchFaces*
+              - comprehend:DetectPiiEntities
+            Resource: "*"
+          # TIER 11: Instance Access
+          - Sid: DenyInstanceAccess
+            Effect: Deny
+            Action:
+              - ec2:GetConsoleOutput
+              - ec2:GetConsoleScreenshot
+              - ec2:GetPasswordData
+              - ssm:StartSession
+            Resource: "*"
+          # Additional sensitive operations
+          - Sid: DenyOtherSensitiveOperations
+            Effect: Deny
+            Action:
+              - lambda:InvokeFunction
+              - sqs:ReceiveMessage
+              - kinesis:GetRecords
+            Resource: "*"
+
+  # ==== END GENERATED IAM POLICIES ====
+
+  # IAM Role: Lighthouse Execution Role (Management Account)
+  # Cross-account role assumed by Lighthouse to execute cost optimization actions
+  # Combines write policy with read-only policies
+  LighthouseExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: "LighthouseExecutionRole-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}"
+      Description: "Used by Lighthouse to execute cost optimization actions. Must remain in place for Lighthouse to function correctly. Email support@aws-lighthouse.local for assistance."
+      MaxSessionDuration: 3600
+      Tags:
+        - Key: OwnedBy
+          Value: Lighthouse
+        - Key: Purpose
+          Value: CostOptimization
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::{{LIGHTHOUSE_ACCOUNT_ID}}:role/LighthouseCustomerAccessRole"
+            Action:
+              - sts:AssumeRole
+            Condition:
+              StringEquals:
+                "sts:ExternalId": "{{EXTERNAL_ID}}"
+          - Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::{{LIGHTHOUSE_ACCOUNT_ID}}:role/LighthouseCustomerAccessRole"
+            Action:
+              - sts:TagSession
+      ManagedPolicyArns:
+        # Write permissions for cost optimization actions
+        - !Ref LighthouseCostOptimizationWritePolicy
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AWSSavingsPlansFullAccess
+        # Read permissions - using AWS managed policies for broad coverage
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/ReadOnlyAccess
+        # Additional AWS managed policies not covered by ReadOnlyAccess
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AWSBillingReadOnlyAccess
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/ComputeOptimizerReadOnlyAccess
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AWSOrganizationsReadOnlyAccess
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/SecurityAudit
+        - !Ref LighthouseDataProtectionPolicy
+        - !Ref LighthouseCustomReadPolicy
+
+  # IAM Role: Lighthouse Read Role (Management Account)
+  # Read-only cross-account role for cost analysis and monitoring
+  LighthouseReadRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: "LighthouseReadRole-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}"
+      Description: "Read-only role for Lighthouse cost analysis and monitoring. Must remain in place for Lighthouse to function correctly. Email support@aws-lighthouse.local for assistance."
+      MaxSessionDuration: 3600
+      Tags:
+        - Key: OwnedBy
+          Value: Lighthouse
+        - Key: Purpose
+          Value: CostOptimization
+        - Key: RoleType
+          Value: ReadOnly
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::{{LIGHTHOUSE_ACCOUNT_ID}}:role/LighthouseCustomerAccessRole"
+            Action:
+              - sts:AssumeRole
+            Condition:
+              StringEquals:
+                "sts:ExternalId": "{{EXTERNAL_ID}}"
+          - Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::{{LIGHTHOUSE_ACCOUNT_ID}}:role/LighthouseCustomerAccessRole"
+            Action:
+              - sts:TagSession
+      ManagedPolicyArns:
+        # Read permissions - using AWS managed policies for broad coverage
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/ReadOnlyAccess
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AWSBillingReadOnlyAccess
+        # Additional AWS managed policies not covered by ViewOnlyAccess
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AWSSavingsPlansReadOnlyAccess
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/ComputeOptimizerReadOnlyAccess
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AWSOrganizationsReadOnlyAccess
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/SecurityAudit
+        - !Ref LighthouseDataProtectionPolicy
+        - !Ref LighthouseCustomReadPolicy
+
+  # IAM Role: LighthouseAgent Read Role
+  # Read-only AI role for cost analysis and monitoring
+  LighthouseAgentReadRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: "LighthouseAgentReadRole-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}"
+      Description: "Read-only AI role for Lighthouse cost analysis and monitoring. Must remain in place for LighthouseAgent to function correctly."
+      MaxSessionDuration: 3600
+      Tags:
+        - Key: OwnedBy
+          Value: Lighthouse
+        - Key: Purpose
+          Value: CostOptimization
+        - Key: RoleType
+          Value: AI-ReadOnly
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::{{LIGHTHOUSE_ACCOUNT_ID}}:role/LighthouseCustomerAccessRole"
+            Action:
+              - sts:AssumeRole
+            Condition:
+              StringEquals:
+                "sts:ExternalId": "{{EXTERNAL_ID}}"
+          - Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::{{LIGHTHOUSE_ACCOUNT_ID}}:role/LighthouseCustomerAccessRole"
+            Action:
+              - sts:TagSession
+      ManagedPolicyArns:
+        # Read permissions - using AWS managed policies for broad coverage
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/ReadOnlyAccess
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AWSBillingReadOnlyAccess
+        # Additional AWS managed policies not covered by ViewOnlyAccess
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AWSSavingsPlansReadOnlyAccess
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/ComputeOptimizerReadOnlyAccess
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AWSOrganizationsReadOnlyAccess
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/SecurityAudit
+        - !Ref LighthouseDataProtectionPolicy
+        - !Ref LighthouseCustomReadPolicy
+
+  LighthouseOptimizationNotifierRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: "LighthouseOptimizationNotifierRole-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}"
+      Description: "Used by Lighthouse to notify about deployment events. Must remain in place for Lighthouse to function correctly. Email support@aws-lighthouse.local for assistance."
+      Tags:
+        - Key: OwnedBy
+          Value: Lighthouse
+        - Key: Purpose
+          Value: EventNotification
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SendToLighthouseSQS
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: "arn:aws:sqs:us-east-1:{{LIGHTHOUSE_ACCOUNT_ID}}:Lighthouse-Onboarding-Queue"
+
+  # EventBridge Rule: Stack Completion Notification
+  # Sends CloudFormation status events to Lighthouse SQS queue
+  CloudFormationCompleteRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: "NotifyLighthouseStep2Complete-{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}"
+      Description: "Notifies Lighthouse when CloudFormation stack deployment completes"
+      EventPattern:
+        source:
+          - "aws.cloudformation"
+        detail-type:
+          - "CloudFormation Stack Status Change"
+        detail:
+          stack-id:
+            - prefix: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/"
+      Targets:
+        - Arn: "arn:aws:sqs:us-east-1:{{LIGHTHOUSE_ACCOUNT_ID}}:Lighthouse-Onboarding-Queue"
+          Id: "LighthouseSQSQueue"
+          RoleArn: !GetAtt LighthouseOptimizationNotifierRole.Arn
+          InputTransformer:
+            InputPathsMap:
+              account: "$.account"
+              region: "$.region"
+              time: "$.time"
+              stackId: "$.detail.stack-id"
+              statusDetails: "$.detail.status-details"
+            InputTemplate: !Sub
+              - |
+                {
+                  "source": "aws.cloudformation",
+                  "account": <account>,
+                  "region": <region>,
+                  "time": <time>,
+                  "stackId": <stackId>,
+                  "statusDetails": <statusDetails>,
+                  "templateVersion": "${TemplateVersion}",
+                  "customerResourceId": "{{LIGHTHOUSE_CUSTOMER_RESOURCE_ID}}",
+                  "executionRoleArn": "${LighthouseExecutionRole.Arn}",
+                  "readRoleArn": "${LighthouseReadRole.Arn}",
+                  "majorTomReadRoleArn": "${LighthouseAgentReadRole.Arn}",
+                  "bucketArn": "${BucketArn}",
+                  "lighthouseOptimizationOUId": "${LighthouseOptimizationOU}",
+                  "externalId": "{{EXTERNAL_ID}}",
+                  "step": "2"
+                }
+              - TemplateVersion: !FindInMap [TemplateConfig, Constants, Version]
+                BucketArn: !If
+                  - EnableCostAllocationBackfill
+                  - !Sub "arn:${AWS::Partition}:s3:::${CURBucket}"
+                  - ""
+
+Outputs:
+  CURBucketName:
+    Condition: EnableCostAllocationBackfill
+    Description: "S3 bucket where CUR 2.0 data is stored"
+    Value: !Ref CURBucket
+  CURBucketArn:
+    Condition: EnableCostAllocationBackfill
+    Description: "ARN of the S3 bucket where CUR 2.0 data is stored"
+    Value: !Sub "arn:${AWS::Partition}:s3:::${CURBucket}"
+  Cur20ExportName:
+    Condition: EnableCostAllocationBackfill
+    Description: "Name of the CUR 2.0 export"
+    Value: !Ref Cur20Export
+  LighthouseExecutionRoleArn:
+    Description: "Cross-account role ARN for execution of cost optimization actions"
+    Value: !GetAtt LighthouseExecutionRole.Arn
+  LighthouseExecutionRoleName:
+    Description: "Name of the cross-account Lighthouse execution role"
+    Value: !Ref LighthouseExecutionRole
+  LighthouseReadRoleArn:
+    Description: "Read-only cross-account role ARN for cost analysis"
+    Value: !GetAtt LighthouseReadRole.Arn
+  LighthouseReadRoleName:
+    Description: "Name of the read-only Lighthouse role"
+    Value: !Ref LighthouseReadRole
+
+  ###################
+  # LighthouseAgent Roles  #
+  ###################
+  LighthouseAgentReadRoleArn:
+    Description: "Read-only AI role ARN for cost analysis and monitoring"
+    Value: !GetAtt LighthouseAgentReadRole.Arn
+  LighthouseAgentReadRoleName:
+    Description: "Name of the LighthouseAgent read-only role"
+    Value: !Ref LighthouseAgentReadRole
+
+  ###################################
+  # Organizational Unit             #
+  ###################################
+  LighthouseOptimizationOUId:
+    Description: "Organizational Unit ID for Lighthouse-managed accounts (exempted from Savings Plans SCP)"
+    Value: !Ref LighthouseOptimizationOU
+    Export:
+      Name: !Sub "${AWS::StackName}-LighthouseOptimizationOUId"
+
+  LighthouseOptimizationOUArn:
+    Description: "ARN of the Lighthouse Optimization OU"
+    Value: !GetAtt LighthouseOptimizationOU.Arn
+
+  ###################################
+  # Service Control Policies        #
+  ###################################
+  SavingsPlansSCPId:
+    Description: "ID of the Savings Plans deny SCP policy (attached to organization root)"
+    Value: !Ref LighthouseSavingsPlansDenyPolicy
+
+  SavingsPlansSCPArn:
+    Description: "ARN of the Savings Plans deny SCP policy"
+    Value: !GetAtt LighthouseSavingsPlansDenyPolicy.Arn
+
+  GovernanceSCPId:
+    Description: "ID of the Lighthouse Governance deny SCP policy (attached to LighthouseOptimization OU)"
+    Value: !Ref LighthouseGovernanceDenyPolicy
+
+  GovernanceSCPArn:
+    Description: "ARN of the Lighthouse Governance deny SCP policy"
+    Value: !GetAtt LighthouseGovernanceDenyPolicy.Arn
