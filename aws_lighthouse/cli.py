@@ -52,6 +52,7 @@ def analyze(
     from .tools.tagging import check_tagging_compliance
     from .tools.iam_scan import detect_overpermissive_iam
     from .tools.cloudwatch_scan import detect_cloudwatch_gaps
+    from .tools.ri_sp_coverage import get_ri_sp_coverage
 
     c = logger.console
 
@@ -219,6 +220,64 @@ def analyze(
             padding=(0, 1),
         ))
 
+    c.print()
+
+    # ── 5b. RI / Savings Plan coverage ───────────────────────────────────────
+    with c.status("[cyan]Checking RI / Savings Plan coverage...[/cyan]", spinner="dots"):
+        ri_sp = get_ri_sp_coverage(days=days)
+
+    def _pct_style(val: float | None, low: float = 60.0, high: float = 80.0) -> str:
+        """Return a colored percentage string based on thresholds."""
+        if val is None:
+            return "[dim]N/A[/dim]"
+        color = "green" if val >= high else ("yellow" if val >= low else "red")
+        return f"[{color}]{val:.1f}%[/{color}]"
+
+    def _dollar(val: float | None) -> str:
+        return f"${val:,.2f}" if val is not None else "[dim]N/A[/dim]"
+
+    ri_cov  = ri_sp.get("ri_coverage_pct")
+    ri_util = ri_sp.get("ri_utilization_pct")
+    sp_cov  = ri_sp.get("sp_coverage_pct")
+    sp_util = ri_sp.get("sp_utilization_pct")
+
+    has_any = any(v and v > 0 for v in [ri_cov, ri_util, sp_cov, sp_util])
+
+    ri_sp_table = Table(box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False)
+    ri_sp_table.add_column("Commitment",    style="dim",  no_wrap=True)
+    ri_sp_table.add_column("Coverage",      justify="right", no_wrap=True)
+    ri_sp_table.add_column("Utilization",   justify="right", no_wrap=True)
+    ri_sp_table.add_column("Uncovered Spend", justify="right", no_wrap=True)
+    ri_sp_table.add_column("Idle Cost",     justify="right", no_wrap=True)
+
+    ri_sp_table.add_row(
+        "Reserved Instances",
+        _pct_style(ri_cov),
+        _pct_style(ri_util),
+        _dollar(ri_sp.get("ri_on_demand_cost")),
+        _dollar(ri_sp.get("ri_unused_cost")),
+    )
+    ri_sp_table.add_row(
+        "Savings Plans",
+        _pct_style(sp_cov),
+        _pct_style(sp_util),
+        _dollar(ri_sp.get("sp_on_demand_cost")),
+        _dollar(ri_sp.get("sp_unused_commitment")),
+    )
+
+    if has_any:
+        ri_sp_border = "yellow"
+        ri_sp_title  = "[bold yellow]RI / Savings Plan Coverage[/bold yellow]"
+    else:
+        ri_sp_border = "dim"
+        ri_sp_title  = "[bold dim]RI / Savings Plan Coverage[/bold dim]  [dim]no commitments detected[/dim]"
+
+    c.print(Panel(
+        ri_sp_table,
+        title=f"{ri_sp_title}  [dim]{ri_sp.get('period', '')}[/dim]",
+        border_style=ri_sp_border,
+        padding=(0, 1),
+    ))
     c.print()
 
     # ── 6. Security scan ─────────────────────────────────────────────────────

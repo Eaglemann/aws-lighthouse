@@ -70,6 +70,7 @@ from .tools.tagging import check_tagging_compliance as _check_tagging_compliance
 from .tools.iam_scan import detect_overpermissive_iam as _detect_overpermissive_iam
 from .tools.cloudwatch_scan import detect_cloudwatch_gaps as _detect_cloudwatch_gaps
 from .tools.multi_region import get_enabled_regions as _get_enabled_regions
+from .tools.ri_sp_coverage import get_ri_sp_coverage as _get_ri_sp_coverage
 
 
 @tool
@@ -145,6 +146,16 @@ def tool_check_tagging_compliance(required_tags: str = "Environment,Owner", regi
 
 
 @tool
+def tool_get_ri_sp_coverage(days: int = 30) -> str:
+    """
+    Fetch Reserved Instance and Savings Plan coverage and utilization from Cost Explorer.
+    Shows what % of eligible spend is covered by commitments vs on-demand,
+    how well existing commitments are utilized, and the dollar value of uncovered spend.
+    """
+    return json.dumps(_get_ri_sp_coverage(days=days))
+
+
+@tool
 def tool_detect_cost_anomalies(threshold_pct: float = 50.0) -> str:
     """
     Compare the last 7 days of per-service AWS spend against the prior 7-day baseline.
@@ -167,6 +178,7 @@ tools = [
     tool_get_rds_inventory,
     tool_get_s3_inventory,
     tool_get_lambda_inventory,
+    tool_get_ri_sp_coverage,
     tool_detect_cost_anomalies,
     tool_check_tagging_compliance,
     tool_detect_overpermissive_iam,
@@ -227,7 +239,7 @@ def approval_node(state: AgentState):
     return None  # Proceed down the state graph
 
 
-SAFE_TOOLS = {"tool_read_file", "parse_terraform_context", "tool_get_enabled_regions", "tool_get_ec2_inventory", "tool_get_rds_inventory", "tool_get_s3_inventory", "tool_get_lambda_inventory", "tool_detect_cost_anomalies", "tool_check_tagging_compliance", "tool_detect_overpermissive_iam", "tool_detect_cloudwatch_gaps"}
+SAFE_TOOLS = {"tool_read_file", "parse_terraform_context", "tool_get_enabled_regions", "tool_get_ec2_inventory", "tool_get_rds_inventory", "tool_get_s3_inventory", "tool_get_lambda_inventory", "tool_get_ri_sp_coverage", "tool_detect_cost_anomalies", "tool_check_tagging_compliance", "tool_detect_overpermissive_iam", "tool_detect_cloudwatch_gaps"}
 
 
 def should_require_approval(state: AgentState) -> str:
