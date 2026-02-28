@@ -300,6 +300,8 @@ def test_cloudtrail_not_logging_flagged():
     findings = _check_cloudtrail(ct)
     assert len(findings) == 1
     assert "not actively logging" in findings[0]["finding"]
+    assert findings[0]["remediation_type"] == "enable_cloudtrail_logging"
+    assert findings[0]["remediation_label"] == "Start CloudTrail Logging"
 
 
 def test_cloudtrail_logging_ok():
@@ -341,6 +343,8 @@ def test_imdsv2_optional_flagged():
     assert findings[0]["severity"] == "MEDIUM"
     assert "IMDSv1" in findings[0]["finding"]
     assert "web" in findings[0]["finding"]
+    assert findings[0]["remediation_type"] == "enforce_imdsv2"
+    assert findings[0]["remediation_label"] == "Enforce IMDSv2"
 
 
 def test_imdsv2_required_not_flagged():
@@ -445,6 +449,8 @@ def test_s3_no_encryption_rule_flagged():
     assert len(findings) == 1
     assert findings[0]["resource"] == "plain-bucket"
     assert findings[0]["severity"] == "MEDIUM"
+    assert findings[0]["remediation_type"] == "s3_default_encryption"
+    assert findings[0]["remediation_label"] == "Enable S3 Default Encryption"
 
 
 def test_s3_aes256_encryption_not_flagged():
@@ -549,6 +555,8 @@ def test_guardduty_not_enabled_flagged():
     assert len(findings) == 1
     assert findings[0]["severity"] == "HIGH"
     assert "GuardDuty" in findings[0]["finding"]
+    assert findings[0]["remediation_type"] == "enable_guardduty"
+    assert findings[0]["remediation_label"] == "Enable GuardDuty"
 
 
 def test_guardduty_detector_disabled_flagged():
@@ -558,6 +566,8 @@ def test_guardduty_detector_disabled_flagged():
     findings = _check_guardduty_enabled(gd)
     assert len(findings) == 1
     assert "not enabled" in findings[0]["finding"]
+    assert findings[0]["remediation_type"] == "enable_guardduty"
+    assert findings[0]["remediation_label"] == "Enable GuardDuty"
 
 
 def test_guardduty_enabled_not_flagged():
