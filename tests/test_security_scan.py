@@ -5,7 +5,9 @@ from botocore.exceptions import ClientError
 
 from aws_lighthouse.tools.security_scan import (
     _check_cloudtrail,
+    _check_ebs_encryption,
     _check_iam_key_age,
+    _check_imdsv2,
     _check_open_security_groups,
     _check_public_rds,
     _check_root_mfa,
@@ -306,3 +308,107 @@ def test_cloudtrail_logging_ok():
     ct.get_trail_status.return_value = {"IsLogging": True}
     findings = _check_cloudtrail(ct)
     assert findings == []
+
+
+# ── _check_imdsv2 ─────────────────────────────────────────────────────────────
+
+
+def _make_ec2_instance(instance_id, http_tokens, state="running", name=None):
+    tags = [{"Key": "Name", "Value": name}] if name else []
+    return {
+        "InstanceId": instance_id,
+        "State": {"Name": state},
+        "MetadataOptions": {"HttpTokens": http_tokens},
+        "Tags": tags,
+    }
+
+
+def _ec2_with_instances(instances):
+    ec2 = MagicMock()
+    ec2.describe_instances.return_value = {"Reservations": [{"Instances": instances}]}
+    return ec2
+
+
+def test_imdsv2_optional_flagged():
+    ec2 = _ec2_with_instances([_make_ec2_instance("i-111", "optional", name="web")])
+    findings = _check_imdsv2(ec2)
+    assert len(findings) == 1
+    assert findings[0]["resource"] == "i-111"
+    assert findings[0]["severity"] == "MEDIUM"
+    assert "IMDSv1" in findings[0]["finding"]
+    assert "web" in findings[0]["finding"]
+
+
+def test_imdsv2_required_not_flagged():
+    ec2 = _ec2_with_instances([_make_ec2_instance("i-222", "required")])
+    assert _check_imdsv2(ec2) == []
+
+
+def test_imdsv2_terminated_skipped():
+    ec2 = _ec2_with_instances(
+        [_make_ec2_instance("i-333", "optional", state="terminated")]
+    )
+    assert _check_imdsv2(ec2) == []
+
+
+def test_imdsv2_no_name_uses_instance_id():
+    ec2 = _ec2_with_instances([_make_ec2_instance("i-444", "optional")])
+    findings = _check_imdsv2(ec2)
+    assert "i-444" in findings[0]["finding"]
+
+
+def test_imdsv2_api_error_returns_empty():
+    ec2 = MagicMock()
+    ec2.describe_instances.side_effect = Exception("denied")
+    assert _check_imdsv2(ec2) == []
+
+
+# ── _check_ebs_encryption ─────────────────────────────────────────────────────
+
+
+def test_ebs_unencrypted_flagged():
+    ec2 = MagicMock()
+    ec2.describe_volumes.return_value = {
+        "Volumes": [
+            {"VolumeId": "vol-abc", "Encrypted": False, "Size": 50, "VolumeType": "gp3"}
+        ]
+    }
+    findings = _check_ebs_encryption(ec2)
+    assert len(findings) == 1
+    assert findings[0]["resource"] == "vol-abc"
+    assert findings[0]["severity"] == "MEDIUM"
+    assert "50 GB" in findings[0]["finding"]
+
+
+def test_ebs_encrypted_not_flagged():
+    ec2 = MagicMock()
+    ec2.describe_volumes.return_value = {
+        "Volumes": [
+            {"VolumeId": "vol-xyz", "Encrypted": True, "Size": 100, "VolumeType": "gp3"}
+        ]
+    }
+    assert _check_ebs_encryption(ec2) == []
+
+
+def test_ebs_mixed_only_flags_unencrypted():
+    ec2 = MagicMock()
+    ec2.describe_volumes.return_value = {
+        "Volumes": [
+            {
+                "VolumeId": "vol-bad",
+                "Encrypted": False,
+                "Size": 20,
+                "VolumeType": "gp2",
+            },
+            {"VolumeId": "vol-ok", "Encrypted": True, "Size": 20, "VolumeType": "gp2"},
+        ]
+    }
+    findings = _check_ebs_encryption(ec2)
+    assert len(findings) == 1
+    assert findings[0]["resource"] == "vol-bad"
+
+
+def test_ebs_api_error_returns_empty():
+    ec2 = MagicMock()
+    ec2.describe_volumes.side_effect = Exception("denied")
+    assert _check_ebs_encryption(ec2) == []
