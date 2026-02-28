@@ -1,5 +1,5 @@
-import boto3
 from botocore.exceptions import ClientError
+from ..auth import get_aws_session
 from ..logger import logger
 
 def deploy_cur_template(
@@ -26,9 +26,10 @@ def deploy_cur_template(
     template_body = template_body.replace("{{EXTERNAL_ID}}", ext_id)
     template_body = template_body.replace("{{ENABLE_COST_ALLOCATION_BACKFILL}}", "true")
     
-    # Enforce us-east-1 for CUR billing exports
-    s3 = boto3.client('s3', region_name='us-east-1')
-    cfn = boto3.client('cloudformation', region_name='us-east-1')
+    # Enforce us-east-1 for CUR billing exports, using authenticated session for credentials
+    session = get_aws_session()
+    s3 = session.client('s3', region_name='us-east-1')
+    cfn = session.client('cloudformation', region_name='us-east-1')
     
     # 3. Create Bucket
     logger.step(f"Creating temporary S3 bucket: {s3_bucket}")
