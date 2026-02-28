@@ -1,0 +1,56 @@
+services:
+
+  # ── AWS Lighthouse ──────────────────────────────────────────────────────────
+  lighthouse:
+    build: .
+    # Default command is "analyze" (read-only dashboard, no Ollama needed).
+    # To start the interactive agent shell:
+    #   docker compose run --rm lighthouse shell
+    stdin_open: true
+    tty: true
+    environment:
+      # AWS credentials — forwarded from host environment.
+      # Alternatively, the ~/.aws volume mount below handles profile-based auth.
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
+      - AWS_SESSION_TOKEN
+      - AWS_DEFAULT_REGION
+      - AWS_PROFILE
+      # Points "shell" at the Ollama sidecar instead of localhost.
+      # Only relevant when running the agent shell, not analyze.
+      - OLLAMA_HOST=http://ollama:11434
+    volumes:
+      # Host AWS credentials (read-only) — supports profiles and SSO.
+      - ~/.aws:/root/.aws:ro
+      # Persist cost-trend SQLite database across container restarts.
+      - lighthouse-data:/root/.aws-lighthouse
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+  # ── Ollama (LLM backend for the agent shell) ────────────────────────────────
+  ollama:
+    image: ollama/ollama
+    ports:
+      # Expose so you can also run `ollama` CLI commands from the host.
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    # ── GPU support (uncomment if you have an NVIDIA GPU) ────────────────────
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+volumes:
+  lighthouse-data:
+  ollama-data:

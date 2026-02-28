@@ -1,0 +1,28 @@
+# Version control
+.git/
+.github/
+
+# Tests and dev tooling — not needed at runtime
+tests/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.venv/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+__pycache__/
+*.pyc
+*.pyo
+
+# Dev-only docs
+CLAUDE.md
+fixplan.md
+
+# Secrets — never bake credentials into the image
+.env
+.env.*
+*.pem
+*.key
