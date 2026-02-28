@@ -48,6 +48,7 @@ def analyze(
     from .tools.cost import get_monthly_cost_summary
     from .tools.security_scan import run_security_scan
     from .tools.cost_scan import run_cost_scan
+    from .tools.cost_anomaly import detect_cost_anomalies
 
     c = logger.console
 
@@ -148,7 +149,42 @@ def analyze(
     ]))
     c.print()
 
-    # ── 5. Security scan ─────────────────────────────────────────────────────
+    # ── 5. Cost anomaly detection ─────────────────────────────────────────────
+    with c.status("[cyan]Detecting cost anomalies...[/cyan]", spinner="dots"):
+        anomalies = detect_cost_anomalies(threshold_pct=50.0)
+
+    # Silently skip the panel on API errors so the dashboard still renders
+    valid_anomalies = [a for a in anomalies if "error" not in a]
+    if valid_anomalies:
+        anomaly_table = Table(box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False)
+        anomaly_table.add_column("Service",         style="cyan")
+        anomaly_table.add_column("Baseline 7d",     justify="right", style="dim")
+        anomaly_table.add_column("Recent 7d",       justify="right")
+        anomaly_table.add_column("Change",          justify="right")
+        for a in valid_anomalies:
+            anomaly_table.add_row(
+                a["service"],
+                f"${a['baseline_7d']:,.2f}",
+                f"[bold yellow]${a['recent_7d']:,.2f}[/bold yellow]",
+                f"[bold red]▲ {a['pct_change']:+.1f}%[/bold red]",
+            )
+        c.print(Panel(
+            anomaly_table,
+            title=f"[bold red]Cost Anomalies[/bold red]  [dim]{len(valid_anomalies)} spike{'s' if len(valid_anomalies) != 1 else ''} vs prior 7d[/dim]",
+            border_style="red",
+            padding=(0, 1),
+        ))
+    else:
+        c.print(Panel(
+            "[green]✓  No cost spikes detected vs the prior 7-day baseline.[/green]",
+            title="[bold green]Cost Anomalies[/bold green]",
+            border_style="green",
+            padding=(0, 1),
+        ))
+
+    c.print()
+
+    # ── 6. Security scan ─────────────────────────────────────────────────────
     with c.status("[cyan]Running security checks...[/cyan]", spinner="dots"):
         sec_findings = run_security_scan(s3s=s3s, rdss=rdss)
 

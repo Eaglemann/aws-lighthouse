@@ -65,6 +65,7 @@ from .tools.inventory import (
     get_s3_inventory as _get_s3_inventory,
     get_lambda_inventory as _get_lambda_inventory,
 )
+from .tools.cost_anomaly import detect_cost_anomalies as _detect_cost_anomalies
 
 
 @tool
@@ -91,6 +92,16 @@ def tool_get_lambda_inventory() -> str:
     return json.dumps(_get_lambda_inventory())
 
 
+@tool
+def tool_detect_cost_anomalies(threshold_pct: float = 50.0) -> str:
+    """
+    Compare the last 7 days of per-service AWS spend against the prior 7-day baseline.
+    Returns services whose cost increased by more than threshold_pct (default 50%).
+    Useful for spotting unexpected spending spikes before the bill arrives.
+    """
+    return json.dumps(_detect_cost_anomalies(threshold_pct=threshold_pct))
+
+
 tools = [
     tool_read_file,
     tool_write_file,
@@ -103,6 +114,7 @@ tools = [
     tool_get_rds_inventory,
     tool_get_s3_inventory,
     tool_get_lambda_inventory,
+    tool_detect_cost_anomalies,
 ]
 
 llm_with_tools = llm.bind_tools(tools)
@@ -159,7 +171,7 @@ def approval_node(state: AgentState):
     return None  # Proceed down the state graph
 
 
-SAFE_TOOLS = {"tool_read_file", "parse_terraform_context", "tool_get_ec2_inventory", "tool_get_rds_inventory", "tool_get_s3_inventory", "tool_get_lambda_inventory"}
+SAFE_TOOLS = {"tool_read_file", "parse_terraform_context", "tool_get_ec2_inventory", "tool_get_rds_inventory", "tool_get_s3_inventory", "tool_get_lambda_inventory", "tool_detect_cost_anomalies"}
 
 
 def should_require_approval(state: AgentState) -> str:
