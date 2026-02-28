@@ -60,9 +60,21 @@ def _make_clients(instances=None, dbs=None, alarms=None):
     return cw, ec2, rds
 
 
-def _run(cw, ec2, rds):
+def _make_lambda_client(functions=None):
+    lmb = MagicMock()
+    lmb.get_paginator.return_value.paginate.return_value = [
+        {"Functions": functions or []}
+    ]
+    return lmb
+
+
+def _run(cw, ec2, rds, lmb=None):
+    lmb = lmb or _make_lambda_client()
+
     def get_client(svc):
-        return {"cloudwatch": cw, "ec2": ec2, "rds": rds}[svc]
+        return {"cloudwatch": cw, "ec2": ec2, "rds": rds, "lambda": lmb}.get(
+            svc, MagicMock()
+        )
 
     with patch(f"{MOD}.get_aws_client", side_effect=get_client):
         return detect_cloudwatch_gaps()
@@ -151,3 +163,61 @@ def test_ec2_api_error_returns_no_ec2_findings():
 
     findings = _run(cw, ec2, rds)
     assert not any(f["resource_type"] == "EC2" for f in findings)
+
+
+# ── Lambda alarm gaps ─────────────────────────────────────────────────────────
+
+
+def test_lambda_missing_both_alarms_flagged():
+    fn = {"FunctionName": "process-orders"}
+    cw, ec2, rds = _make_clients()
+    findings = _run(cw, ec2, rds, lmb=_make_lambda_client([fn]))
+    lmb_findings = [f for f in findings if f["resource_type"] == "Lambda"]
+    assert len(lmb_findings) == 1
+    assert set(lmb_findings[0]["missing_alarms"]) == {"Errors", "Throttles"}
+    assert lmb_findings[0]["resource_id"] == "process-orders"
+
+
+def test_lambda_with_all_alarms_not_flagged():
+    fn = {"FunctionName": "fully-alarmed"}
+    alarms = [
+        {
+            "Namespace": "AWS/Lambda",
+            "MetricName": "Errors",
+            "Dimensions": [{"Name": "FunctionName", "Value": "fully-alarmed"}],
+        },
+        {
+            "Namespace": "AWS/Lambda",
+            "MetricName": "Throttles",
+            "Dimensions": [{"Name": "FunctionName", "Value": "fully-alarmed"}],
+        },
+    ]
+    cw, ec2, rds = _make_clients(alarms=alarms)
+    findings = _run(cw, ec2, rds, lmb=_make_lambda_client([fn]))
+    assert not any(f["resource_type"] == "Lambda" for f in findings)
+
+
+def test_lambda_missing_only_throttles_flagged():
+    fn = {"FunctionName": "half-monitored"}
+    alarms = [
+        {
+            "Namespace": "AWS/Lambda",
+            "MetricName": "Errors",
+            "Dimensions": [{"Name": "FunctionName", "Value": "half-monitored"}],
+        }
+    ]
+    cw, ec2, rds = _make_clients(alarms=alarms)
+    findings = _run(cw, ec2, rds, lmb=_make_lambda_client([fn]))
+    lmb_findings = [f for f in findings if f["resource_type"] == "Lambda"]
+    assert len(lmb_findings) == 1
+    assert lmb_findings[0]["missing_alarms"] == ["Throttles"]
+
+
+def test_lambda_api_error_doesnt_break_other_findings():
+    db = {"DBInstanceIdentifier": "prod-db"}
+    cw, ec2, rds = _make_clients(dbs=[db])
+    bad_lmb = MagicMock()
+    bad_lmb.get_paginator.side_effect = Exception("denied")
+    findings = _run(cw, ec2, rds, lmb=bad_lmb)
+    assert not any(f["resource_type"] == "Lambda" for f in findings)
+    assert any(f["resource_type"] == "RDS" for f in findings)

@@ -36,10 +36,25 @@ def _make_s3(buckets, tag_map=None):
     return s3
 
 
-def _run(ec2=None, rds=None, s3=None, required_tags=None):
+def _make_lambda(functions, tag_map=None):
+    """functions: list of {"FunctionName": .., "FunctionArn": ..}
+    tag_map: dict of arn -> {"Key": "Value", ...} flat tag dict."""
+    lmb = MagicMock()
+    lmb.get_paginator.return_value.paginate.return_value = [{"Functions": functions}]
+    tag_map = tag_map or {}
+
+    def list_tags(Resource):
+        return {"Tags": tag_map.get(Resource, {})}
+
+    lmb.list_tags.side_effect = list_tags
+    return lmb
+
+
+def _run(ec2=None, rds=None, s3=None, lmb=None, required_tags=None):
     ec2 = ec2 or _make_ec2([])
     rds = rds or _make_rds([])
     s3 = s3 or _make_s3([])
+    lmb = lmb or _make_lambda([])
 
     def get_client(svc):
         if svc == "ec2":
@@ -48,6 +63,8 @@ def _run(ec2=None, rds=None, s3=None, required_tags=None):
             return rds
         if svc == "s3":
             return s3
+        if svc == "lambda":
+            return lmb
         return MagicMock()
 
     with patch(f"{MOD}.get_aws_client", side_effect=get_client):
@@ -147,3 +164,58 @@ def test_s3_skipped_when_include_s3_false():
     with patch(f"{MOD}.get_aws_client", side_effect=get_client):
         findings = check_tagging_compliance(required_tags=["Owner"], include_s3=False)
     assert not any(f["resource_type"] == "S3" for f in findings)
+
+
+# ── Lambda ────────────────────────────────────────────────────────────────────
+
+_FN = {
+    "FunctionName": "my-fn",
+    "FunctionArn": "arn:aws:lambda:us-east-1:123:function:my-fn",
+}
+
+
+def test_lambda_missing_tags_flagged():
+    lmb = _make_lambda([_FN], tag_map={})  # no tags at all
+    findings = _run(lmb=lmb, required_tags=["Environment", "Owner"])
+    lmb_findings = [f for f in findings if f["resource_type"] == "Lambda"]
+    assert len(lmb_findings) == 1
+    assert lmb_findings[0]["resource_id"] == "my-fn"
+    assert set(lmb_findings[0]["missing_tags"]) == {"Environment", "Owner"}
+
+
+def test_lambda_fully_tagged_not_flagged():
+    lmb = _make_lambda(
+        [_FN],
+        tag_map={_FN["FunctionArn"]: {"Environment": "prod", "Owner": "team"}},
+    )
+    findings = _run(lmb=lmb, required_tags=["Environment", "Owner"])
+    assert not any(f["resource_type"] == "Lambda" for f in findings)
+
+
+def test_lambda_partially_tagged_reports_only_missing():
+    lmb = _make_lambda(
+        [_FN],
+        tag_map={_FN["FunctionArn"]: {"Environment": "prod"}},
+    )
+    findings = _run(lmb=lmb, required_tags=["Environment", "Owner"])
+    lmb_findings = [f for f in findings if f["resource_type"] == "Lambda"]
+    assert len(lmb_findings) == 1
+    assert lmb_findings[0]["missing_tags"] == ["Owner"]
+
+
+def test_lambda_list_tags_error_treats_as_no_tags():
+    lmb = _make_lambda([_FN])
+    lmb.list_tags.side_effect = Exception("access denied")
+    findings = _run(lmb=lmb, required_tags=["Owner"])
+    lmb_findings = [f for f in findings if f["resource_type"] == "Lambda"]
+    assert len(lmb_findings) == 1  # missing tag flagged because existing = set()
+
+
+def test_lambda_api_error_doesnt_break_other_findings():
+    lmb = MagicMock()
+    lmb.get_paginator.side_effect = Exception("denied")
+    db = {"DBInstanceIdentifier": "ok-db", "TagList": []}
+    findings = _run(rds=_make_rds([db]), lmb=lmb, required_tags=["Owner"])
+    # RDS finding still returned despite Lambda error
+    assert any(f["resource_type"] == "RDS" for f in findings)
+    assert not any(f["resource_type"] == "Lambda" for f in findings)
