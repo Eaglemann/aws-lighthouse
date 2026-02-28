@@ -46,7 +46,9 @@ def tool_write_file(filepath: str, content: str, overwrite: bool = False) -> str
 
 
 @tool
-def tool_execute_bash(command: str, cwd: str | None = None, timeout_seconds: int = 60) -> str:
+def tool_execute_bash(
+    command: str, cwd: str | None = None, timeout_seconds: int = 60
+) -> str:
     """Executes a bash command and returns stdout/stderr."""
     from .tools.bash import ExecuteBashInput
 
