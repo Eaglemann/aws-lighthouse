@@ -1,8 +1,10 @@
 from typing import List, Dict, Any
+from langchain_core.tools import tool
 from ..auth import get_aws_client
 from ..logger import logger
 
 
+@tool
 def get_s3_inventory() -> List[Dict[str, Any]]:
     """List S3 buckets and basic stats."""
     s3 = get_aws_client("s3")
@@ -24,6 +26,7 @@ def get_s3_inventory() -> List[Dict[str, Any]]:
         return [{"error": str(e)}]
 
 
+@tool
 def get_ec2_inventory() -> List[Dict[str, Any]]:
     """Retrieve all EC2 instances and state."""
     ec2 = get_aws_client("ec2")
@@ -57,6 +60,7 @@ def get_ec2_inventory() -> List[Dict[str, Any]]:
         return [{"error": str(e)}]
 
 
+@tool
 def get_rds_inventory() -> List[Dict[str, Any]]:
     """Retrieve all RDS instances and basic metrics."""
     rds = get_aws_client("rds")

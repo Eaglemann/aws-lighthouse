@@ -59,6 +59,7 @@ def tool_execute_bash(command: str, cwd: str = None, timeout_seconds: int = 60) 
 from .tools.remediation import terminate_ec2, delete_ebs
 from .tools.security import s3_block_public_access
 from .tools.terraform import parse_terraform_context
+from .tools.inventory import get_ec2_inventory, get_rds_inventory, get_s3_inventory
 
 tools = [
     tool_read_file,
@@ -68,6 +69,9 @@ tools = [
     delete_ebs,
     s3_block_public_access,
     parse_terraform_context,
+    get_ec2_inventory,
+    get_rds_inventory,
+    get_s3_inventory,
 ]
 
 llm_with_tools = llm.bind_tools(tools)
@@ -124,7 +128,7 @@ def approval_node(state: AgentState):
     return None  # Proceed down the state graph
 
 
-SAFE_TOOLS = {"tool_read_file", "parse_terraform_context"}
+SAFE_TOOLS = {"tool_read_file", "parse_terraform_context", "get_ec2_inventory", "get_rds_inventory", "get_s3_inventory"}
 
 
 def should_require_approval(state: AgentState) -> str:
