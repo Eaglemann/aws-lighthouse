@@ -19,6 +19,7 @@ def analyze(
     from .tools.inventory import get_ec2_inventory, get_rds_inventory, get_s3_inventory
     from .tools.cost import get_monthly_cost_summary
     from .tools.security_scan import run_security_scan
+    from .tools.cost_scan import run_cost_scan
     from rich.table import Table
     from rich.columns import Columns
     from rich.panel import Panel
@@ -56,6 +57,12 @@ def analyze(
         "[cyan]Running security posture checks...[/cyan]", spinner="dots"
     ):
         sec_findings = run_security_scan(s3s=s3s, rdss=rdss)
+
+    # 3c. Cost Waste Scan
+    with logger.console.status(
+        "[cyan]Scanning for cost optimization opportunities...[/cyan]", spinner="dots"
+    ):
+        cost_findings = run_cost_scan()
 
     # 4. Capture previous snapshot before saving the new one, then save
     prev_snapshot = db_manager.get_latest_cost_snapshot(account_id)
@@ -122,11 +129,23 @@ def analyze(
     else:
         sec_table.add_row("[green]OK[/green]", "-", "No security findings detected.")
 
+    # Cost Optimization Table
+    waste_table = Table(title="Cost Optimization Findings")
+    waste_table.add_column("Resource", style="cyan")
+    waste_table.add_column("Finding")
+    if cost_findings:
+        for f in cost_findings:
+            waste_table.add_row(f["resource"], f["finding"])
+    else:
+        waste_table.add_row("[green]OK[/green]", "No cost waste detected.")
+
     logger.console.print()
     logger.console.print(Columns([inv_table, cost_table]))
     logger.console.print(f"\n[bold]Trend:[/bold] {trend_msg}")
     logger.console.print()
     logger.console.print(sec_table)
+    logger.console.print()
+    logger.console.print(waste_table)
 
     # CUR Upsell
     if not cur_bucket_exists:
