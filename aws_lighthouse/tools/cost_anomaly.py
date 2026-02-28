@@ -44,7 +44,7 @@ def detect_cost_anomalies(threshold_pct: float = 50.0) -> List[Dict[str, Any]]:
             amount = float(group["Metrics"]["UnblendedCost"]["Amount"])
             bucket[service] = bucket.get(service, 0.0) + amount
 
-    anomalies = []
+    anomalies: List[Dict[str, Any]] = []
     for service, recent_total in recent.items():
         baseline_total = baseline.get(service, 0.0)
 
@@ -63,5 +63,5 @@ def detect_cost_anomalies(threshold_pct: float = 50.0) -> List[Dict[str, Any]]:
                 }
             )
 
-    anomalies.sort(key=lambda x: x["pct_change"], reverse=True)
+    anomalies.sort(key=lambda x: float(x["pct_change"]), reverse=True)
     return anomalies

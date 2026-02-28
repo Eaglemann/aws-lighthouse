@@ -84,7 +84,7 @@ def analyze(
     from .tools.multi_region import get_enabled_regions
 
     with c.status("[cyan]Detecting enabled regions...[/cyan]", spinner="dots"):
-        regions = get_enabled_regions()
+        regions: list[str | None] = list(get_enabled_regions())
     if not regions:
         regions = [None]  # fallback: scan default region only
 
@@ -339,7 +339,7 @@ def analyze(
         sec_table.add_column("Resource", style="cyan", no_wrap=True)
         sec_table.add_column("Finding")
         for f in sec_findings:
-            row = [_severity_text(f["severity"])]
+            row: list[str | Text] = [_severity_text(f["severity"])]
             if multi_region:
                 row.append(f.get("region", "global"))
             row += [f["resource"], f["finding"]]

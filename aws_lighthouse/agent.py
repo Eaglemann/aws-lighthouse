@@ -1,7 +1,7 @@
 # ruff: noqa: E402
 import json
 from typing import TypedDict, Annotated, Sequence
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage
 from langchain_ollama import ChatOllama
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
@@ -27,7 +27,7 @@ llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=0)
 # 3. Tool Binding
 # Convert bare functions to LangChain @tools based on Bash specs from Phase 1
 @tool
-def tool_read_file(filepath: str, max_lines: int = None) -> str:
+def tool_read_file(filepath: str, max_lines: int | None = None) -> str:
     """Reads the contents of a local file safely."""
     # Convert kwargs to BaseModel instance dynamically or pass directly
     from .tools.bash import ReadFileInput
@@ -46,7 +46,7 @@ def tool_write_file(filepath: str, content: str, overwrite: bool = False) -> str
 
 
 @tool
-def tool_execute_bash(command: str, cwd: str = None, timeout_seconds: int = 60) -> str:
+def tool_execute_bash(command: str, cwd: str | None = None, timeout_seconds: int = 60) -> str:
     """Executes a bash command and returns stdout/stderr."""
     from .tools.bash import ExecuteBashInput
 
@@ -211,7 +211,7 @@ def approval_node(state: AgentState):
     import typer
 
     # Find the last AIMessage with tool calls
-    last_message = state["messages"][-1]
+    last_message: AIMessage = state["messages"][-1]  # type: ignore[assignment]
 
     logger.print_header("AWS Lighthouse - Execution Plan")
     logger.warn("The agent has proposed the following infrastructure changes:")
@@ -263,7 +263,7 @@ SAFE_TOOLS = {
 
 def should_require_approval(state: AgentState) -> str:
     """Routing logic to intercept dangerous tools before they hit ToolNode."""
-    last_message = state["messages"][-1]
+    last_message: AIMessage = state["messages"][-1]  # type: ignore[assignment]
     if not last_message.tool_calls:
         return "end"
 
