@@ -149,6 +149,48 @@ def _check_s3_block_public_access(s3s: List[Dict[str, Any]]) -> List[Dict[str, A
     return findings
 
 
+def _check_s3_encryption(s3s: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Flag S3 buckets that have no default server-side encryption rule."""
+    findings = []
+    try:
+        s3 = get_aws_client("s3")
+        for bucket in s3s:
+            if "error" in bucket:
+                continue
+            name = bucket["BucketName"]
+            try:
+                rules = (
+                    s3.get_bucket_encryption(Bucket=name)
+                    .get("ServerSideEncryptionConfiguration", {})
+                    .get("Rules", [])
+                )
+                if not rules:
+                    raise ClientError(
+                        {
+                            "Error": {
+                                "Code": "ServerSideEncryptionConfigurationNotFoundError",
+                                "Message": "",
+                            }
+                        },
+                        "GetBucketEncryption",
+                    )
+            except ClientError as e:
+                if (
+                    e.response["Error"]["Code"]
+                    == "ServerSideEncryptionConfigurationNotFoundError"
+                ):
+                    findings.append(
+                        {
+                            "severity": "MEDIUM",
+                            "resource": name,
+                            "finding": "S3 bucket has no default server-side encryption rule",
+                        }
+                    )
+    except Exception as e:
+        logger.error(f"Failed to check S3 encryption: {e}")
+    return findings
+
+
 def _check_imdsv2(ec2) -> List[Dict[str, Any]]:
     """Flag EC2 instances that still allow IMDSv1 (HttpTokens != required)."""
     findings = []
@@ -252,6 +294,7 @@ def run_security_scan(
         findings.extend(_check_root_mfa())
         findings.extend(_check_iam_key_age())
         findings.extend(_check_s3_block_public_access(s3s))
+        findings.extend(_check_s3_encryption(s3s))
     ec2 = _cl("ec2")
     findings.extend(_check_open_security_groups(ec2))
     findings.extend(_check_imdsv2(ec2))
