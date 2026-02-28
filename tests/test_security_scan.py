@@ -12,6 +12,7 @@ from aws_lighthouse.tools.security_scan import (
     _check_public_rds,
     _check_root_mfa,
     _check_s3_block_public_access,
+    _check_s3_encryption,
 )
 
 MOD = "aws_lighthouse.tools.security_scan"
@@ -412,3 +413,72 @@ def test_ebs_api_error_returns_empty():
     ec2 = MagicMock()
     ec2.describe_volumes.side_effect = Exception("denied")
     assert _check_ebs_encryption(ec2) == []
+
+
+# ── _check_s3_encryption ──────────────────────────────────────────────────────
+
+
+def _make_s3_enc(bucket_name, rules=None, error_code=None):
+    """Return a mock s3 client for a single bucket encryption check."""
+    mock_s3 = MagicMock()
+    if error_code:
+        mock_s3.get_bucket_encryption.side_effect = ClientError(
+            {"Error": {"Code": error_code, "Message": ""}}, "GetBucketEncryption"
+        )
+    else:
+        mock_s3.get_bucket_encryption.return_value = {
+            "ServerSideEncryptionConfiguration": {"Rules": rules or []}
+        }
+    return mock_s3
+
+
+def test_s3_no_encryption_rule_flagged():
+    mock_s3 = _make_s3_enc(
+        "plain-bucket", error_code="ServerSideEncryptionConfigurationNotFoundError"
+    )
+    s3s = [{"BucketName": "plain-bucket"}]
+    with patch(f"{MOD}.get_aws_client", return_value=mock_s3):
+        findings = _check_s3_encryption(s3s)
+    assert len(findings) == 1
+    assert findings[0]["resource"] == "plain-bucket"
+    assert findings[0]["severity"] == "MEDIUM"
+
+
+def test_s3_aes256_encryption_not_flagged():
+    mock_s3 = _make_s3_enc(
+        "enc-bucket",
+        rules=[{"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}],
+    )
+    s3s = [{"BucketName": "enc-bucket"}]
+    with patch(f"{MOD}.get_aws_client", return_value=mock_s3):
+        findings = _check_s3_encryption(s3s)
+    assert findings == []
+
+
+def test_s3_kms_encryption_not_flagged():
+    mock_s3 = _make_s3_enc(
+        "kms-bucket",
+        rules=[{"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "aws:kms"}}],
+    )
+    s3s = [{"BucketName": "kms-bucket"}]
+    with patch(f"{MOD}.get_aws_client", return_value=mock_s3):
+        findings = _check_s3_encryption(s3s)
+    assert findings == []
+
+
+def test_s3_encryption_error_bucket_skipped():
+    s3s = [{"error": "AccessDenied"}]
+    mock_s3 = MagicMock()
+    with patch(f"{MOD}.get_aws_client", return_value=mock_s3):
+        findings = _check_s3_encryption(s3s)
+    assert findings == []
+    mock_s3.get_bucket_encryption.assert_not_called()
+
+
+def test_s3_encryption_api_error_returns_empty():
+    mock_s3 = MagicMock()
+    mock_s3.get_bucket_encryption.side_effect = Exception("connection error")
+    s3s = [{"BucketName": "any-bucket"}]
+    with patch(f"{MOD}.get_aws_client", return_value=mock_s3):
+        findings = _check_s3_encryption(s3s)
+    assert findings == []
