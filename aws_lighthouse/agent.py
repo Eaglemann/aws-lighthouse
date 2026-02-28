@@ -63,6 +63,7 @@ from .tools.inventory import (
     get_ec2_inventory as _get_ec2_inventory,
     get_rds_inventory as _get_rds_inventory,
     get_s3_inventory as _get_s3_inventory,
+    get_lambda_inventory as _get_lambda_inventory,
 )
 
 
@@ -84,6 +85,12 @@ def tool_get_s3_inventory() -> str:
     return json.dumps(_get_s3_inventory())
 
 
+@tool
+def tool_get_lambda_inventory() -> str:
+    """List all Lambda functions with runtime, memory size, timeout, code size, and whether they are stale (>180 days since last deploy)."""
+    return json.dumps(_get_lambda_inventory())
+
+
 tools = [
     tool_read_file,
     tool_write_file,
@@ -95,6 +102,7 @@ tools = [
     tool_get_ec2_inventory,
     tool_get_rds_inventory,
     tool_get_s3_inventory,
+    tool_get_lambda_inventory,
 ]
 
 llm_with_tools = llm.bind_tools(tools)
@@ -151,7 +159,7 @@ def approval_node(state: AgentState):
     return None  # Proceed down the state graph
 
 
-SAFE_TOOLS = {"tool_read_file", "parse_terraform_context", "tool_get_ec2_inventory", "tool_get_rds_inventory", "tool_get_s3_inventory"}
+SAFE_TOOLS = {"tool_read_file", "parse_terraform_context", "tool_get_ec2_inventory", "tool_get_rds_inventory", "tool_get_s3_inventory", "tool_get_lambda_inventory"}
 
 
 def should_require_approval(state: AgentState) -> str:

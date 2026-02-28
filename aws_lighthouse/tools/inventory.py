@@ -1,6 +1,9 @@
+from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any
 from ..auth import get_aws_client
 from ..logger import logger
+
+_LAMBDA_STALE_DAYS = 180
 
 
 def get_s3_inventory() -> List[Dict[str, Any]]:
@@ -76,4 +79,40 @@ def get_rds_inventory() -> List[Dict[str, Any]]:
         return instances
     except Exception as e:
         logger.error(f"Failed to list RDS instances: {str(e)}")
+        return [{"error": str(e)}]
+
+
+def get_lambda_inventory() -> List[Dict[str, Any]]:
+    """List all Lambda functions with runtime, memory, timeout, code size, and staleness flag."""
+    lmb = get_aws_client("lambda")
+    functions = []
+    cutoff = datetime.now(timezone.utc) - timedelta(days=_LAMBDA_STALE_DAYS)
+    try:
+        paginator = lmb.get_paginator("list_functions")
+        for page in paginator.paginate():
+            for fn in page.get("Functions", []):
+                raw_modified = fn.get("LastModified", "")
+                # Lambda returns ISO-8601 with offset, e.g. "2025-09-01T12:00:00.000+0000"
+                try:
+                    last_modified_dt = datetime.fromisoformat(
+                        raw_modified.replace("+0000", "+00:00")
+                    )
+                    last_modified = last_modified_dt.strftime("%Y-%m-%d")
+                    stale = last_modified_dt < cutoff
+                except ValueError:
+                    last_modified = raw_modified[:10]
+                    stale = False
+
+                functions.append({
+                    "FunctionName": fn.get("FunctionName"),
+                    "Runtime":      fn.get("Runtime", "unknown"),
+                    "MemorySize":   fn.get("MemorySize", 128),
+                    "Timeout":      fn.get("Timeout", 3),
+                    "CodeSizeMB":   round(fn.get("CodeSize", 0) / 1_048_576, 2),
+                    "LastModified": last_modified,
+                    "Stale":        stale,
+                })
+        return functions
+    except Exception as e:
+        logger.error(f"Failed to list Lambda functions: {str(e)}")
         return [{"error": str(e)}]

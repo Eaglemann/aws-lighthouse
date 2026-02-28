@@ -44,7 +44,7 @@ def analyze(
     """Retrieve read-only state (inventory, cost, security) and render a dashboard."""
     from .auth import get_aws_session
     from .db import db_manager
-    from .tools.inventory import get_ec2_inventory, get_rds_inventory, get_s3_inventory
+    from .tools.inventory import get_ec2_inventory, get_rds_inventory, get_s3_inventory, get_lambda_inventory
     from .tools.cost import get_monthly_cost_summary
     from .tools.security_scan import run_security_scan
     from .tools.cost_scan import run_cost_scan
@@ -73,6 +73,7 @@ def analyze(
         ec2s = get_ec2_inventory()
         rdss = get_rds_inventory()
         s3s = get_s3_inventory()
+        lambdas = get_lambda_inventory()
 
     cur_bucket_exists = False
     if s3s and "error" not in s3s[0]:
@@ -86,9 +87,10 @@ def analyze(
     inv_table = Table(box=box.SIMPLE_HEAD, show_header=False, padding=(0, 1), show_edge=False)
     inv_table.add_column("Resource", style="dim")
     inv_table.add_column("Count", justify="right", style="bold white")
-    inv_table.add_row("EC2 Instances", _count(ec2s))
-    inv_table.add_row("RDS Databases", _count(rdss))
-    inv_table.add_row("S3 Buckets",    _count(s3s))
+    inv_table.add_row("EC2 Instances",    _count(ec2s))
+    inv_table.add_row("RDS Databases",    _count(rdss))
+    inv_table.add_row("S3 Buckets",       _count(s3s))
+    inv_table.add_row("Lambda Functions", _count(lambdas))
 
     # ── 3. Costs ─────────────────────────────────────────────────────────────
     with c.status(f"[cyan]Fetching costs ({days}d)...[/cyan]", spinner="dots"):
@@ -201,7 +203,41 @@ def analyze(
 
     c.print()
 
-    # ── 7. CUR upsell ────────────────────────────────────────────────────────
+    # ── 7. Lambda detail ─────────────────────────────────────────────────────
+    valid_lambdas = [fn for fn in lambdas if "error" not in fn]
+    if valid_lambdas:
+        lambda_table = Table(box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False)
+        lambda_table.add_column("Function",      style="cyan", no_wrap=True)
+        lambda_table.add_column("Runtime",       style="dim")
+        lambda_table.add_column("Memory (MB)",   justify="right")
+        lambda_table.add_column("Code (MB)",     justify="right", style="dim")
+        lambda_table.add_column("Last Deploy",   style="dim")
+        for fn in valid_lambdas:
+            name = fn["FunctionName"]
+            if fn.get("Stale"):
+                name = f"[yellow]{name}[/yellow]"
+            memory_str = (
+                f"[yellow]{fn['MemorySize']}[/yellow]"
+                if fn["MemorySize"] >= 1024 else str(fn["MemorySize"])
+            )
+            lambda_table.add_row(
+                name,
+                fn["Runtime"],
+                memory_str,
+                str(fn["CodeSizeMB"]),
+                fn["LastModified"],
+            )
+        stale_count = sum(1 for fn in valid_lambdas if fn.get("Stale"))
+        stale_note = f"  [dim]· {stale_count} stale (>{180}d)[/dim]" if stale_count else ""
+        c.print(Panel(
+            lambda_table,
+            title=f"[bold blue]Lambda Functions[/bold blue]  [dim]{len(valid_lambdas)} total[/dim]{stale_note}",
+            border_style="blue",
+            padding=(0, 1),
+        ))
+        c.print()
+
+    # ── 8. CUR upsell ────────────────────────────────────────────────────────
     if not cur_bucket_exists:
         c.print(Panel(
             "AWS Cost Explorer shows only daily service-level totals. "

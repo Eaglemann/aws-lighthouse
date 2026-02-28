@@ -82,7 +82,7 @@ Resources:
     template_url = f"https://{s3_bucket}.s3.amazonaws.com/cur.yaml"
     
     # 5. Deploy Stack
-    stack_name = f"lighthouse-cur-deployment"
+    stack_name = "lighthouse-cur-deployment"
     logger.step(f"Deploying CloudFormation stack: {stack_name}")
     try:
         cfn.create_stack(
