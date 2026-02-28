@@ -49,6 +49,7 @@ def analyze(
     from .tools.security_scan import run_security_scan
     from .tools.cost_scan import run_cost_scan
     from .tools.cost_anomaly import detect_cost_anomalies
+    from .tools.tagging import check_tagging_compliance
 
     c = logger.console
 
@@ -239,7 +240,39 @@ def analyze(
 
     c.print()
 
-    # ── 7. Lambda detail ─────────────────────────────────────────────────────
+    # ── 7. Tagging compliance ─────────────────────────────────────────────────
+    with c.status("[cyan]Checking tag compliance...[/cyan]", spinner="dots"):
+        tag_findings = check_tagging_compliance()
+
+    tag_count = len(tag_findings)
+    if tag_count:
+        tag_table = Table(box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False)
+        tag_table.add_column("Type",     style="dim",  no_wrap=True)
+        tag_table.add_column("Resource", style="cyan", no_wrap=True)
+        tag_table.add_column("Missing Tags")
+        for f in tag_findings:
+            tag_table.add_row(
+                f["resource_type"],
+                f["resource_name"],
+                "[yellow]" + ", ".join(f["missing_tags"]) + "[/yellow]",
+            )
+        c.print(Panel(
+            tag_table,
+            title=f"[bold yellow]Tagging Compliance[/bold yellow]  [dim]{tag_count} resource{'s' if tag_count != 1 else ''} untagged[/dim]",
+            border_style="yellow",
+            padding=(0, 1),
+        ))
+    else:
+        c.print(Panel(
+            "[green]✓  All resources carry the required tags.[/green]",
+            title="[bold green]Tagging Compliance[/bold green]",
+            border_style="green",
+            padding=(0, 1),
+        ))
+
+    c.print()
+
+    # ── 8. Lambda detail ─────────────────────────────────────────────────────
     valid_lambdas = [fn for fn in lambdas if "error" not in fn]
     if valid_lambdas:
         lambda_table = Table(box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False)

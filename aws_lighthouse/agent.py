@@ -66,6 +66,7 @@ from .tools.inventory import (
     get_lambda_inventory as _get_lambda_inventory,
 )
 from .tools.cost_anomaly import detect_cost_anomalies as _detect_cost_anomalies
+from .tools.tagging import check_tagging_compliance as _check_tagging_compliance
 
 
 @tool
@@ -93,6 +94,17 @@ def tool_get_lambda_inventory() -> str:
 
 
 @tool
+def tool_check_tagging_compliance(required_tags: str = "Environment,Owner") -> str:
+    """
+    Check EC2, RDS, and S3 resources for missing required tags.
+    Pass a comma-separated list of tag keys to enforce (default: Environment,Owner).
+    Returns one finding per non-compliant resource.
+    """
+    tags = [t.strip() for t in required_tags.split(",") if t.strip()]
+    return json.dumps(_check_tagging_compliance(required_tags=tags))
+
+
+@tool
 def tool_detect_cost_anomalies(threshold_pct: float = 50.0) -> str:
     """
     Compare the last 7 days of per-service AWS spend against the prior 7-day baseline.
@@ -115,6 +127,7 @@ tools = [
     tool_get_s3_inventory,
     tool_get_lambda_inventory,
     tool_detect_cost_anomalies,
+    tool_check_tagging_compliance,
 ]
 
 llm_with_tools = llm.bind_tools(tools)
@@ -171,7 +184,7 @@ def approval_node(state: AgentState):
     return None  # Proceed down the state graph
 
 
-SAFE_TOOLS = {"tool_read_file", "parse_terraform_context", "tool_get_ec2_inventory", "tool_get_rds_inventory", "tool_get_s3_inventory", "tool_get_lambda_inventory", "tool_detect_cost_anomalies"}
+SAFE_TOOLS = {"tool_read_file", "parse_terraform_context", "tool_get_ec2_inventory", "tool_get_rds_inventory", "tool_get_s3_inventory", "tool_get_lambda_inventory", "tool_detect_cost_anomalies", "tool_check_tagging_compliance"}
 
 
 def should_require_approval(state: AgentState) -> str:
