@@ -1,11 +1,14 @@
 from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock
 
+from unittest.mock import patch
+
 from aws_lighthouse.tools.cost_scan import (
     _check_old_snapshots,
     _check_stopped_ec2,
     _check_unassociated_eips,
     _check_unattached_ebs,
+    run_cost_scan,
 )
 
 MOD = "aws_lighthouse.tools.cost_scan"
@@ -167,3 +170,62 @@ def test_unassociated_eips_api_error_returns_empty():
     ec2 = MagicMock()
     ec2.describe_addresses.side_effect = Exception("denied")
     assert _check_unassociated_eips(ec2) == []
+
+
+# ── run_cost_scan wiring ──────────────────────────────────────────────────────
+
+MOD = "aws_lighthouse.tools.cost_scan"
+
+
+def _make_clean_ec2():
+    ec2 = MagicMock()
+    ec2.describe_volumes.return_value = {"Volumes": []}
+    ec2.describe_instances.return_value = {"Reservations": []}
+    ec2.describe_snapshots.return_value = {"Snapshots": []}
+    ec2.describe_addresses.return_value = {"Addresses": []}
+    return ec2
+
+
+def test_run_cost_scan_clean_returns_empty():
+    ec2 = _make_clean_ec2()
+    with patch(f"{MOD}.get_aws_client", return_value=ec2):
+        findings = run_cost_scan()
+    assert findings == []
+
+
+def test_run_cost_scan_aggregates_all_checks():
+    ec2 = MagicMock()
+    # One finding from each sub-check
+    ec2.describe_volumes.return_value = {
+        "Volumes": [{"VolumeId": "vol-aaa", "Size": 10, "VolumeType": "gp2"}]
+    }
+    ec2.describe_instances.return_value = {
+        "Reservations": [
+            {
+                "Instances": [
+                    {"InstanceId": "i-bbb", "InstanceType": "t3.micro", "Tags": []}
+                ]
+            }
+        ]
+    }
+    ec2.describe_snapshots.return_value = {
+        "Snapshots": [
+            {
+                "SnapshotId": "snap-ccc",
+                "StartTime": datetime.now(timezone.utc) - timedelta(days=100),
+                "VolumeSize": 20,
+                "Description": "old",
+            }
+        ]
+    }
+    ec2.describe_addresses.return_value = {
+        "Addresses": [{"AllocationId": "eipalloc-ddd", "PublicIp": "1.2.3.4"}]
+    }
+    with patch(f"{MOD}.get_aws_client", return_value=ec2):
+        findings = run_cost_scan()
+
+    resources = [f["resource"] for f in findings]
+    assert "vol-aaa" in resources
+    assert "i-bbb" in resources
+    assert "snap-ccc" in resources
+    assert "eipalloc-ddd" in resources

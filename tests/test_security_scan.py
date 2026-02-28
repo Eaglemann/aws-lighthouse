@@ -6,13 +6,16 @@ from botocore.exceptions import ClientError
 from aws_lighthouse.tools.security_scan import (
     _check_cloudtrail,
     _check_ebs_encryption,
+    _check_guardduty_enabled,
     _check_iam_key_age,
+    _check_iam_users_mfa,
     _check_imdsv2,
     _check_open_security_groups,
     _check_public_rds,
     _check_root_mfa,
     _check_s3_block_public_access,
     _check_s3_encryption,
+    run_security_scan,
 )
 
 MOD = "aws_lighthouse.tools.security_scan"
@@ -482,3 +485,185 @@ def test_s3_encryption_api_error_returns_empty():
     with patch(f"{MOD}.get_aws_client", return_value=mock_s3):
         findings = _check_s3_encryption(s3s)
     assert findings == []
+
+
+# ── _check_iam_users_mfa ──────────────────────────────────────────────────────
+
+
+def _make_iam_user_mfa(username, has_login_profile=True, mfa_devices=None):
+    iam = MagicMock()
+    iam.list_users.return_value = {"Users": [{"UserName": username}]}
+    if not has_login_profile:
+        iam.get_login_profile.side_effect = ClientError(
+            {"Error": {"Code": "NoSuchEntity", "Message": ""}}, "GetLoginProfile"
+        )
+    else:
+        iam.get_login_profile.return_value = {"LoginProfile": {"UserName": username}}
+    iam.list_mfa_devices.return_value = {"MFADevices": mfa_devices or []}
+    return iam
+
+
+def test_iam_user_mfa_missing_flagged():
+    mock_iam = _make_iam_user_mfa("alice", has_login_profile=True, mfa_devices=[])
+    with patch(f"{MOD}.get_aws_client", return_value=mock_iam):
+        findings = _check_iam_users_mfa()
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "HIGH"
+    assert findings[0]["resource"] == "alice"
+    assert "MFA" in findings[0]["finding"]
+
+
+def test_iam_user_mfa_present_not_flagged():
+    mock_iam = _make_iam_user_mfa(
+        "bob",
+        has_login_profile=True,
+        mfa_devices=[{"SerialNumber": "arn:aws:iam::123:mfa/bob"}],
+    )
+    with patch(f"{MOD}.get_aws_client", return_value=mock_iam):
+        findings = _check_iam_users_mfa()
+    assert findings == []
+
+
+def test_iam_user_no_console_access_skipped():
+    mock_iam = _make_iam_user_mfa("carol", has_login_profile=False)
+    with patch(f"{MOD}.get_aws_client", return_value=mock_iam):
+        findings = _check_iam_users_mfa()
+    assert findings == []
+
+
+def test_iam_user_mfa_api_error_returns_empty():
+    iam = MagicMock()
+    iam.list_users.side_effect = Exception("denied")
+    with patch(f"{MOD}.get_aws_client", return_value=iam):
+        findings = _check_iam_users_mfa()
+    assert findings == []
+
+
+# ── _check_guardduty_enabled ──────────────────────────────────────────────────
+
+
+def test_guardduty_not_enabled_flagged():
+    gd = MagicMock()
+    gd.list_detectors.return_value = {"DetectorIds": []}
+    findings = _check_guardduty_enabled(gd)
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "HIGH"
+    assert "GuardDuty" in findings[0]["finding"]
+
+
+def test_guardduty_detector_disabled_flagged():
+    gd = MagicMock()
+    gd.list_detectors.return_value = {"DetectorIds": ["abc123"]}
+    gd.get_detector.return_value = {"Status": "DISABLED"}
+    findings = _check_guardduty_enabled(gd)
+    assert len(findings) == 1
+    assert "not enabled" in findings[0]["finding"]
+
+
+def test_guardduty_enabled_not_flagged():
+    gd = MagicMock()
+    gd.list_detectors.return_value = {"DetectorIds": ["abc123"]}
+    gd.get_detector.return_value = {"Status": "ENABLED"}
+    assert _check_guardduty_enabled(gd) == []
+
+
+def test_guardduty_api_error_returns_empty():
+    gd = MagicMock()
+    gd.list_detectors.side_effect = Exception("denied")
+    assert _check_guardduty_enabled(gd) == []
+
+
+# ── run_security_scan wiring ──────────────────────────────────────────────────
+
+
+def _make_clean_clients():
+    """Return mocks representing a fully-compliant AWS environment."""
+    iam = MagicMock()
+    iam.get_account_summary.return_value = {"SummaryMap": {"AccountMFAEnabled": 1}}
+    iam.list_users.return_value = {"Users": []}
+    iam.list_access_keys.return_value = {"AccessKeyMetadata": []}
+
+    ec2 = MagicMock()
+    ec2.describe_security_groups.return_value = {"SecurityGroups": []}
+    ec2.describe_instances.return_value = {"Reservations": []}
+    ec2.describe_volumes.return_value = {"Volumes": []}
+
+    s3 = MagicMock()
+    s3.get_public_access_block.return_value = {
+        "PublicAccessBlockConfiguration": {
+            "BlockPublicAcls": True,
+            "IgnorePublicAcls": True,
+            "BlockPublicPolicy": True,
+            "RestrictPublicBuckets": True,
+        }
+    }
+    s3.get_bucket_encryption.return_value = {
+        "ServerSideEncryptionConfiguration": {
+            "Rules": [
+                {"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}
+            ]
+        }
+    }
+
+    ct = MagicMock()
+    ct.describe_trails.return_value = {
+        "trailList": [
+            {"TrailARN": "arn:aws:cloudtrail:us-east-1:123:trail/main", "Name": "main"}
+        ]
+    }
+    ct.get_trail_status.return_value = {"IsLogging": True}
+
+    gd = MagicMock()
+    gd.list_detectors.return_value = {"DetectorIds": ["det-111"]}
+    gd.get_detector.return_value = {"Status": "ENABLED"}
+
+    return iam, ec2, s3, ct, gd
+
+
+def test_run_security_scan_clean_environment_no_findings():
+    iam, ec2, s3, ct, gd = _make_clean_clients()
+
+    def get_client(svc):
+        return {"iam": iam, "ec2": ec2, "s3": s3, "cloudtrail": ct, "guardduty": gd}[
+            svc
+        ]
+
+    s3s = [{"BucketName": "my-bucket"}]
+
+    with patch(f"{MOD}.get_aws_client", side_effect=get_client):
+        findings = run_security_scan(s3s=s3s, rdss=[], include_global=True)
+
+    assert findings == []
+
+
+def test_run_security_scan_include_global_false_skips_root_mfa():
+    iam, ec2, s3, ct, gd = _make_clean_clients()
+    # If include_global were True, this would produce a finding
+    iam.get_account_summary.return_value = {"SummaryMap": {"AccountMFAEnabled": 0}}
+
+    def get_client(svc):
+        return {"iam": iam, "ec2": ec2, "s3": s3, "cloudtrail": ct, "guardduty": gd}[
+            svc
+        ]
+
+    with patch(f"{MOD}.get_aws_client", side_effect=get_client):
+        findings = run_security_scan(s3s=[], rdss=[], include_global=False)
+
+    assert not any(f.get("resource") == "root" for f in findings)
+
+
+def test_run_security_scan_guardduty_disabled_produces_finding():
+    iam, ec2, s3, ct, gd = _make_clean_clients()
+    gd.list_detectors.return_value = {"DetectorIds": []}
+
+    def get_client(svc):
+        return {"iam": iam, "ec2": ec2, "s3": s3, "cloudtrail": ct, "guardduty": gd}[
+            svc
+        ]
+
+    with patch(f"{MOD}.get_aws_client", side_effect=get_client):
+        findings = run_security_scan(s3s=[], rdss=[], include_global=False)
+
+    gd_findings = [f for f in findings if f["resource"] == "guardduty"]
+    assert len(gd_findings) == 1
+    assert gd_findings[0]["severity"] == "HIGH"
