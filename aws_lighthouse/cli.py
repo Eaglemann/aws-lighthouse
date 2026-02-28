@@ -51,6 +51,7 @@ def analyze(
     from .tools.cost_anomaly import detect_cost_anomalies
     from .tools.tagging import check_tagging_compliance
     from .tools.iam_scan import detect_overpermissive_iam
+    from .tools.cloudwatch_scan import detect_cloudwatch_gaps
 
     c = logger.console
 
@@ -245,6 +246,38 @@ def analyze(
         c.print(Panel(
             "[green]✓  No over-permissive IAM policies detected.[/green]",
             title="[bold green]IAM Policies[/bold green]",
+            border_style="green",
+            padding=(0, 1),
+        ))
+
+    c.print()
+
+    # ── 6c. CloudWatch alarm gaps ─────────────────────────────────────────────
+    with c.status("[cyan]Checking CloudWatch alarm coverage...[/cyan]", spinner="dots"):
+        cw_findings = detect_cloudwatch_gaps()
+
+    cw_count = len(cw_findings)
+    if cw_count:
+        cw_table = Table(box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False)
+        cw_table.add_column("Type",     style="dim",  no_wrap=True)
+        cw_table.add_column("Resource", style="cyan", no_wrap=True)
+        cw_table.add_column("Missing Alarms")
+        for f in cw_findings:
+            cw_table.add_row(
+                f["resource_type"],
+                f["resource_name"],
+                "[yellow]" + ", ".join(f["missing_alarms"]) + "[/yellow]",
+            )
+        c.print(Panel(
+            cw_table,
+            title=f"[bold yellow]CloudWatch Alarm Gaps[/bold yellow]  [dim]{cw_count} resource{'s' if cw_count != 1 else ''} unmonitored[/dim]",
+            border_style="yellow",
+            padding=(0, 1),
+        ))
+    else:
+        c.print(Panel(
+            "[green]✓  All EC2 and RDS resources have required CloudWatch alarms.[/green]",
+            title="[bold green]CloudWatch Alarms[/bold green]",
             border_style="green",
             padding=(0, 1),
         ))

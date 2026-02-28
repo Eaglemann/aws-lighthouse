@@ -68,6 +68,7 @@ from .tools.inventory import (
 from .tools.cost_anomaly import detect_cost_anomalies as _detect_cost_anomalies
 from .tools.tagging import check_tagging_compliance as _check_tagging_compliance
 from .tools.iam_scan import detect_overpermissive_iam as _detect_overpermissive_iam
+from .tools.cloudwatch_scan import detect_cloudwatch_gaps as _detect_cloudwatch_gaps
 
 
 @tool
@@ -92,6 +93,17 @@ def tool_get_s3_inventory() -> str:
 def tool_get_lambda_inventory() -> str:
     """List all Lambda functions with runtime, memory size, timeout, code size, and whether they are stale (>180 days since last deploy)."""
     return json.dumps(_get_lambda_inventory())
+
+
+@tool
+def tool_detect_cloudwatch_gaps() -> str:
+    """
+    Find EC2 instances and RDS databases missing CloudWatch alarms on key metrics.
+    EC2: CPUUtilization, StatusCheckFailed.
+    RDS: CPUUtilization, FreeStorageSpace.
+    Returns one finding per resource listing every uncovered metric.
+    """
+    return json.dumps(_detect_cloudwatch_gaps())
 
 
 @tool
@@ -142,6 +154,7 @@ tools = [
     tool_detect_cost_anomalies,
     tool_check_tagging_compliance,
     tool_detect_overpermissive_iam,
+    tool_detect_cloudwatch_gaps,
 ]
 
 llm_with_tools = llm.bind_tools(tools)
@@ -198,7 +211,7 @@ def approval_node(state: AgentState):
     return None  # Proceed down the state graph
 
 
-SAFE_TOOLS = {"tool_read_file", "parse_terraform_context", "tool_get_ec2_inventory", "tool_get_rds_inventory", "tool_get_s3_inventory", "tool_get_lambda_inventory", "tool_detect_cost_anomalies", "tool_check_tagging_compliance", "tool_detect_overpermissive_iam"}
+SAFE_TOOLS = {"tool_read_file", "parse_terraform_context", "tool_get_ec2_inventory", "tool_get_rds_inventory", "tool_get_s3_inventory", "tool_get_lambda_inventory", "tool_detect_cost_anomalies", "tool_check_tagging_compliance", "tool_detect_overpermissive_iam", "tool_detect_cloudwatch_gaps"}
 
 
 def should_require_approval(state: AgentState) -> str:
