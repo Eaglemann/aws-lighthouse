@@ -209,7 +209,9 @@ def shell():
                     "you MUST output a clear, concise explanation of what you are about to do and why. "
                     "This explanation will be shown to the user before they approve your tool call."
         )
-        state = {"messages": [system_prompt]}
+        # Thread config lets the checkpointer persist conversation state across turns
+        config = {"configurable": {"thread_id": "main"}}
+        first_turn = True
         logger.success("Agent initialized. Ready to execute commands.")
     except Exception as e:
         logger.error(f"Failed to initialize agent graph: {str(e)}")
@@ -221,10 +223,15 @@ def shell():
             if user_input.lower() in ("exit", "quit"):
                 break
 
-            state["messages"].append(HumanMessage(content=user_input))
+            # On the first turn include the system prompt; the checkpointer
+            # persists it from then on so we only send the new user message.
+            if first_turn:
+                messages = [system_prompt, HumanMessage(content=user_input)]
+                first_turn = False
+            else:
+                messages = [HumanMessage(content=user_input)]
 
-            # Run graph to completion (or approval pause)
-            for event in graph.stream(state):
+            for event in graph.stream({"messages": messages}, config=config):
                 if "agent" in event:
                     msg = event["agent"]["messages"][-1]
                     if msg.content:
@@ -232,9 +239,6 @@ def shell():
                 elif "tools" in event:
                     msg = event["tools"]["messages"][-1]
                     logger.step(f"Tool execution returned: {msg.content[:100]}...")
-
-            # The Langraph state mutates in place via messages
-            # This is a simple interactive stream.
 
         except typer.Abort:
             break

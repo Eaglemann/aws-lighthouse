@@ -168,8 +168,10 @@ def should_require_approval(state: AgentState) -> str:
     return "tools"
 
 
-def create_agent_graph() -> StateGraph:
-    """Instantiate and compile the baseline LangGraph agent."""
+def create_agent_graph():
+    """Instantiate and compile the baseline LangGraph agent with a memory checkpointer."""
+    from langgraph.checkpoint.memory import MemorySaver
+
     workflow = StateGraph(AgentState)
 
     workflow.add_node("agent", agent_node)
@@ -189,4 +191,4 @@ def create_agent_graph() -> StateGraph:
     # After tools execute, we go back to the agent
     workflow.add_edge("tools", "agent")
 
-    return workflow.compile()
+    return workflow.compile(checkpointer=MemorySaver())
