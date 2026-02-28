@@ -50,7 +50,8 @@ def analyze(
     ):
         costs = get_monthly_cost_summary(days=days)
 
-    # 4. Save to DB
+    # 4. Capture previous snapshot before saving the new one, then save
+    prev_snapshot = db_manager.get_latest_cost_snapshot(account_id)
     if "error" not in costs:
         db_manager.record_cost_snapshot(
             account_id=account_id,
@@ -95,7 +96,6 @@ def analyze(
 
     # Trend Analysis
     trend_msg = "[dim]No previous scan found for comparison.[/dim]"
-    prev_snapshot = db_manager.get_latest_cost_snapshot(account_id)
     if prev_snapshot and "error" not in costs:
         prev_total = prev_snapshot["total_usd"]
         curr_total = costs["total_usd"]
