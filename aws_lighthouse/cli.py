@@ -50,6 +50,7 @@ def analyze(
     from .tools.cost_scan import run_cost_scan
     from .tools.cost_anomaly import detect_cost_anomalies
     from .tools.tagging import check_tagging_compliance
+    from .tools.iam_scan import detect_overpermissive_iam
 
     c = logger.console
 
@@ -213,7 +214,44 @@ def analyze(
 
     c.print()
 
-    # ── 6. Cost waste scan ───────────────────────────────────────────────────
+    # ── 6b. IAM over-permissive scan ──────────────────────────────────────────
+    with c.status("[cyan]Scanning IAM policies...[/cyan]", spinner="dots"):
+        iam_findings = detect_overpermissive_iam()
+
+    iam_count = len(iam_findings)
+    if iam_count:
+        iam_table = Table(box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False)
+        iam_table.add_column("Severity",   no_wrap=True)
+        iam_table.add_column("Principal",  style="cyan", no_wrap=True)
+        iam_table.add_column("Type",       style="dim",  no_wrap=True)
+        iam_table.add_column("Policy",     style="dim",  no_wrap=True)
+        iam_table.add_column("Reason")
+        for f in iam_findings:
+            principal = f"{f['principal_type']}/{f['principal_name']}"
+            iam_table.add_row(
+                _severity_text(f["severity"]),
+                principal,
+                f["policy_type"],
+                f["policy_name"],
+                f["reason"],
+            )
+        c.print(Panel(
+            iam_table,
+            title=f"[bold red]IAM Over-Permissive Policies[/bold red]  [dim]{iam_count} finding{'s' if iam_count != 1 else ''}[/dim]",
+            border_style="red",
+            padding=(0, 1),
+        ))
+    else:
+        c.print(Panel(
+            "[green]✓  No over-permissive IAM policies detected.[/green]",
+            title="[bold green]IAM Policies[/bold green]",
+            border_style="green",
+            padding=(0, 1),
+        ))
+
+    c.print()
+
+    # ── 7. Cost waste scan ───────────────────────────────────────────────────
     with c.status("[cyan]Scanning for cost waste...[/cyan]", spinner="dots"):
         cost_findings = run_cost_scan()
 
