@@ -149,6 +149,59 @@ def _check_s3_block_public_access(s3s: List[Dict[str, Any]]) -> List[Dict[str, A
     return findings
 
 
+def _check_imdsv2(ec2) -> List[Dict[str, Any]]:
+    """Flag EC2 instances that still allow IMDSv1 (HttpTokens != required)."""
+    findings = []
+    try:
+        for res in ec2.describe_instances().get("Reservations", []):
+            for inst in res.get("Instances", []):
+                if inst.get("State", {}).get("Name") == "terminated":
+                    continue
+                if inst.get("MetadataOptions", {}).get("HttpTokens") != "required":
+                    name = next(
+                        (
+                            t["Value"]
+                            for t in inst.get("Tags", [])
+                            if t["Key"] == "Name"
+                        ),
+                        inst["InstanceId"],
+                    )
+                    findings.append(
+                        {
+                            "severity": "MEDIUM",
+                            "resource": inst["InstanceId"],
+                            "finding": (
+                                f"Instance '{name}' allows IMDSv1 (HttpTokens=optional)"
+                                " — vulnerable to SSRF credential theft"
+                            ),
+                        }
+                    )
+    except Exception as e:
+        logger.error(f"Failed to check IMDSv2 enforcement: {e}")
+    return findings
+
+
+def _check_ebs_encryption(ec2) -> List[Dict[str, Any]]:
+    """Flag EBS volumes that are not encrypted at rest."""
+    findings = []
+    try:
+        for vol in ec2.describe_volumes().get("Volumes", []):
+            if not vol.get("Encrypted", False):
+                findings.append(
+                    {
+                        "severity": "MEDIUM",
+                        "resource": vol["VolumeId"],
+                        "finding": (
+                            f"EBS volume is not encrypted"
+                            f" ({vol.get('Size', 0)} GB {vol.get('VolumeType', 'unknown')})"
+                        ),
+                    }
+                )
+    except Exception as e:
+        logger.error(f"Failed to check EBS encryption: {e}")
+    return findings
+
+
 def _check_cloudtrail(ct) -> List[Dict[str, Any]]:
     """Check that CloudTrail is configured and actively logging in this region."""
     findings = []
@@ -199,7 +252,10 @@ def run_security_scan(
         findings.extend(_check_root_mfa())
         findings.extend(_check_iam_key_age())
         findings.extend(_check_s3_block_public_access(s3s))
-    findings.extend(_check_open_security_groups(_cl("ec2")))
+    ec2 = _cl("ec2")
+    findings.extend(_check_open_security_groups(ec2))
+    findings.extend(_check_imdsv2(ec2))
+    findings.extend(_check_ebs_encryption(ec2))
     findings.extend(_check_public_rds(rdss))
     findings.extend(_check_cloudtrail(_cl("cloudtrail")))
     return findings
