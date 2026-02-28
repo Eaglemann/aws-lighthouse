@@ -105,6 +105,8 @@ def _check_s3_block_public_access(s3s: List[Dict[str, Any]]) -> List[Dict[str, A
                         "severity": "HIGH",
                         "resource": name,
                         "finding": "S3 bucket does not have Block Public Access fully enabled",
+                        "remediation_type": "s3_block_public_access",
+                        "remediation_label": "Enable S3 Block Public Access",
                     })
             except ClientError as e:
                 if e.response["Error"]["Code"] == "NoSuchPublicAccessBlockConfiguration":
@@ -112,6 +114,8 @@ def _check_s3_block_public_access(s3s: List[Dict[str, Any]]) -> List[Dict[str, A
                         "severity": "HIGH",
                         "resource": name,
                         "finding": "S3 bucket has no Block Public Access configuration",
+                        "remediation_type": "s3_block_public_access",
+                        "remediation_label": "Enable S3 Block Public Access",
                     })
     except Exception as e:
         logger.error(f"Failed to check S3 public access: {e}")

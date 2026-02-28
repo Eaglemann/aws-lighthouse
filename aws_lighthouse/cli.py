@@ -377,7 +377,71 @@ def analyze(
         ))
         c.print()
 
-    # ── 8. CUR upsell ────────────────────────────────────────────────────────
+    # ── 9. One-click remediation ──────────────────────────────────────────────
+    remediable = [f for f in sec_findings + cost_findings if f.get("remediation_type")]
+    if remediable:
+        from .tools.remediation_actions import (
+            apply_s3_block_public_access,
+            delete_ebs_volume,
+            release_eip,
+        )
+
+        _ACTIONS = {
+            "s3_block_public_access": apply_s3_block_public_access,
+            "delete_ebs_volume": delete_ebs_volume,
+            "release_eip": release_eip,
+        }
+
+        rem_table = Table(box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False)
+        rem_table.add_column("#",        justify="right", style="dim", no_wrap=True)
+        rem_table.add_column("Action",   style="bold cyan", no_wrap=True)
+        rem_table.add_column("Resource", no_wrap=True)
+        for i, f in enumerate(remediable, 1):
+            rem_table.add_row(str(i), f["remediation_label"], f["resource"])
+
+        c.print(Panel(
+            rem_table,
+            title=(
+                f"[bold cyan]One-Click Remediation[/bold cyan]  "
+                f"[dim]{len(remediable)} fix{'es' if len(remediable) != 1 else ''} available[/dim]"
+            ),
+            border_style="cyan",
+            padding=(0, 1),
+        ))
+        c.print()
+
+        raw = Prompt.ask(
+            "  [bold cyan]Apply fixes[/bold cyan] [dim](e.g. 1,3 — or Enter to skip)[/dim]",
+            default="",
+        )
+
+        if raw.strip():
+            indices = [
+                int(x.strip()) - 1
+                for x in raw.split(",")
+                if x.strip().isdigit()
+            ]
+            for idx in indices:
+                if 0 <= idx < len(remediable):
+                    f = remediable[idx]
+                    label    = f["remediation_label"]
+                    resource = f["resource"]
+                    action   = _ACTIONS.get(f["remediation_type"])
+                    if not action:
+                        logger.error(f"Unknown remediation type: {f['remediation_type']}")
+                        continue
+                    if typer.confirm(f"  Apply '{label}' on {resource}?", default=False):
+                        with c.status(f"[cyan]Applying {label}...[/cyan]", spinner="dots"):
+                            ok = action(resource)
+                        if ok:
+                            logger.success(f"{label} applied to {resource}.")
+                        else:
+                            logger.error(f"Failed to apply {label} on {resource}.")
+                    else:
+                        c.print(f"  [dim]Skipped {resource}.[/dim]")
+        c.print()
+
+    # ── 10. CUR upsell ────────────────────────────────────────────────────────
     if not cur_bucket_exists:
         c.print(Panel(
             "AWS Cost Explorer shows only daily service-level totals. "
