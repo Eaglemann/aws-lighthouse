@@ -15,6 +15,11 @@ _RDS_REQUIRED: List[Tuple[str, str, str]] = [
     ("AWS/RDS", "FreeStorageSpace", "DBInstanceIdentifier"),
 ]
 
+_LAMBDA_REQUIRED: List[Tuple[str, str, str]] = [
+    ("AWS/Lambda", "Errors", "FunctionName"),
+    ("AWS/Lambda", "Throttles", "FunctionName"),
+]
+
 
 def _build_alarm_index(cw) -> Set[Tuple[str, str, str, str]]:
     """
@@ -106,5 +111,29 @@ def detect_cloudwatch_gaps(region: str | None = None) -> List[Dict[str, Any]]:
                 )
     except Exception as e:
         logger.error(f"Failed to check RDS alarm gaps: {e}")
+
+    # ── Lambda ────────────────────────────────────────────────────────────────
+    try:
+        lmb = _cl("lambda")
+        paginator = lmb.get_paginator("list_functions")
+        for page in paginator.paginate():
+            for fn in page.get("Functions", []):
+                fn_name = fn["FunctionName"]
+                missing = [
+                    metric
+                    for ns, metric, dim in _LAMBDA_REQUIRED
+                    if (ns, metric, dim, fn_name) not in alarm_index
+                ]
+                if missing:
+                    findings.append(
+                        {
+                            "resource_type": "Lambda",
+                            "resource_id": fn_name,
+                            "resource_name": fn_name,
+                            "missing_alarms": missing,
+                        }
+                    )
+    except Exception as e:
+        logger.error(f"Failed to check Lambda alarm gaps: {e}")
 
     return findings

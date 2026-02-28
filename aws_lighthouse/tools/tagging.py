@@ -79,6 +79,31 @@ def check_tagging_compliance(
     except Exception as e:
         logger.error(f"Failed to check RDS tags: {e}")
 
+    # ── Lambda ────────────────────────────────────────────────────────────────
+    try:
+        lmb = _cl("lambda")
+        paginator = lmb.get_paginator("list_functions")
+        for page in paginator.paginate():
+            for fn in page.get("Functions", []):
+                name = fn["FunctionName"]
+                try:
+                    tag_response = lmb.list_tags(Resource=fn["FunctionArn"])
+                    existing = set(tag_response.get("Tags", {}).keys())
+                except Exception:
+                    existing = set()
+                missing = [tag for tag in required_tags if tag not in existing]
+                if missing:
+                    findings.append(
+                        {
+                            "resource_type": "Lambda",
+                            "resource_id": name,
+                            "resource_name": name,
+                            "missing_tags": missing,
+                        }
+                    )
+    except Exception as e:
+        logger.error(f"Failed to check Lambda tags: {e}")
+
     # ── S3 (global service — skip when iterating per-region to avoid duplicates) ──
     if not include_s3:
         return findings
