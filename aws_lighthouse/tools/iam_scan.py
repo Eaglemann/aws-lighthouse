@@ -9,7 +9,7 @@ from ..logger import logger
 # rather than downloading their documents to save API calls.
 _DANGEROUS_AWS_MANAGED: Dict[str, str] = {
     "AdministratorAccess": "HIGH",
-    "PowerUserAccess":     "MEDIUM",
+    "PowerUserAccess": "MEDIUM",
 }
 
 
@@ -40,7 +40,7 @@ def _check_statements(statements: Any) -> Optional[str]:
         if stmt.get("Effect") != "Allow":
             continue
 
-        actions   = _normalise(stmt.get("Action",   []))
+        actions = _normalise(stmt.get("Action", []))
         resources = _normalise(stmt.get("Resource", []))
 
         has_star_resource = "*" in resources
@@ -56,15 +56,17 @@ def _check_statements(statements: Any) -> Optional[str]:
     return highest
 
 
-def _get_managed_policy_doc(iam, policy_arn: str, cache: Dict[str, Any]) -> Optional[Any]:
+def _get_managed_policy_doc(
+    iam, policy_arn: str, cache: Dict[str, Any]
+) -> Optional[Any]:
     """Fetch and cache a managed policy's default-version document."""
     if policy_arn in cache:
         return cache[policy_arn]
     try:
         version_id = iam.get_policy(PolicyArn=policy_arn)["Policy"]["DefaultVersionId"]
-        raw = iam.get_policy_version(
-            PolicyArn=policy_arn, VersionId=version_id
-        )["PolicyVersion"]["Document"]
+        raw = iam.get_policy_version(PolicyArn=policy_arn, VersionId=version_id)[
+            "PolicyVersion"
+        ]["Document"]
         # boto3 returns the document already parsed for managed policies,
         # but URL-encoded in some SDK versions — handle both.
         if isinstance(raw, str):
@@ -97,15 +99,19 @@ def detect_overpermissive_iam() -> List[Dict[str, Any]]:
     findings: List[Dict[str, Any]] = []
     policy_cache: Dict[str, Any] = {}
 
-    def _add(severity, principal_type, principal_name, policy_type, policy_name, reason):
-        findings.append({
-            "severity":       severity,
-            "principal_type": principal_type,
-            "principal_name": principal_name,
-            "policy_type":    policy_type,
-            "policy_name":    policy_name,
-            "reason":         reason,
-        })
+    def _add(
+        severity, principal_type, principal_name, policy_type, policy_name, reason
+    ):
+        findings.append(
+            {
+                "severity": severity,
+                "principal_type": principal_type,
+                "principal_name": principal_name,
+                "policy_type": policy_type,
+                "policy_name": policy_name,
+                "reason": reason,
+            }
+        )
 
     # ── helpers ──────────────────────────────────────────────────────────────
 
@@ -121,12 +127,20 @@ def detect_overpermissive_iam() -> List[Dict[str, Any]]:
                 doc = _parse_inline_doc(raw)
                 severity = _check_statements(doc.get("Statement", []))
                 if severity:
-                    _add(severity, principal_type, principal_name,
-                         "Inline", policy_name,
-                         "Action:* on Resource:*" if severity == "HIGH"
-                         else "Action:<svc>:* on Resource:*")
+                    _add(
+                        severity,
+                        principal_type,
+                        principal_name,
+                        "Inline",
+                        policy_name,
+                        "Action:* on Resource:*"
+                        if severity == "HIGH"
+                        else "Action:<svc>:* on Resource:*",
+                    )
             except Exception as e:
-                logger.error(f"Failed to read inline policy {policy_name} on {principal_name}: {e}")
+                logger.error(
+                    f"Failed to read inline policy {policy_name} on {principal_name}: {e}"
+                )
 
     def _check_attached(principal_type, principal_name, list_fn):
         try:
@@ -135,15 +149,20 @@ def detect_overpermissive_iam() -> List[Dict[str, Any]]:
             logger.error(f"Failed to list attached policies for {principal_name}: {e}")
             return
         for p in policies:
-            arn  = p["PolicyArn"]
+            arn = p["PolicyArn"]
             name = p["PolicyName"]
             # AWS-managed: check by name only
             if arn.startswith("arn:aws:iam::aws:policy/"):
                 sev = _DANGEROUS_AWS_MANAGED.get(name)
                 if sev:
-                    _add(sev, principal_type, principal_name,
-                         "AWS Managed", name,
-                         f"Known over-permissive AWS policy: {name}")
+                    _add(
+                        sev,
+                        principal_type,
+                        principal_name,
+                        "AWS Managed",
+                        name,
+                        f"Known over-permissive AWS policy: {name}",
+                    )
                 continue
             # Customer-managed: fetch and parse document
             doc = _get_managed_policy_doc(iam, arn, policy_cache)
@@ -151,23 +170,33 @@ def detect_overpermissive_iam() -> List[Dict[str, Any]]:
                 continue
             severity = _check_statements(doc.get("Statement", []))
             if severity:
-                _add(severity, principal_type, principal_name,
-                     "Customer Managed", name,
-                     "Action:* on Resource:*" if severity == "HIGH"
-                     else "Action:<svc>:* on Resource:*")
+                _add(
+                    severity,
+                    principal_type,
+                    principal_name,
+                    "Customer Managed",
+                    name,
+                    "Action:* on Resource:*"
+                    if severity == "HIGH"
+                    else "Action:<svc>:* on Resource:*",
+                )
 
     # ── Users ─────────────────────────────────────────────────────────────────
     try:
         for user in iam.get_paginator("list_users").paginate().search("Users"):
             uname = user["UserName"]
             _check_inline(
-                "User", uname,
-                lambda pn, u=uname: iam.get_user_policy(UserName=u, PolicyName=pn)["PolicyDocument"],
+                "User",
+                uname,
+                lambda pn, u=uname: iam.get_user_policy(UserName=u, PolicyName=pn)[
+                    "PolicyDocument"
+                ],
                 lambda u=uname: iam.list_user_policies(UserName=u),
                 "PolicyNames",
             )
             _check_attached(
-                "User", uname,
+                "User",
+                uname,
                 lambda u=uname: iam.list_attached_user_policies(UserName=u),
             )
     except Exception as e:
@@ -181,13 +210,17 @@ def detect_overpermissive_iam() -> List[Dict[str, Any]]:
             if role.get("Path", "").startswith("/aws-service-role/"):
                 continue
             _check_inline(
-                "Role", rname,
-                lambda pn, r=rname: iam.get_role_policy(RoleName=r, PolicyName=pn)["PolicyDocument"],
+                "Role",
+                rname,
+                lambda pn, r=rname: iam.get_role_policy(RoleName=r, PolicyName=pn)[
+                    "PolicyDocument"
+                ],
                 lambda r=rname: iam.list_role_policies(RoleName=r),
                 "PolicyNames",
             )
             _check_attached(
-                "Role", rname,
+                "Role",
+                rname,
                 lambda r=rname: iam.list_attached_role_policies(RoleName=r),
             )
     except Exception as e:
@@ -198,18 +231,24 @@ def detect_overpermissive_iam() -> List[Dict[str, Any]]:
         for group in iam.get_paginator("list_groups").paginate().search("Groups"):
             gname = group["GroupName"]
             _check_inline(
-                "Group", gname,
-                lambda pn, g=gname: iam.get_group_policy(GroupName=g, PolicyName=pn)["PolicyDocument"],
+                "Group",
+                gname,
+                lambda pn, g=gname: iam.get_group_policy(GroupName=g, PolicyName=pn)[
+                    "PolicyDocument"
+                ],
                 lambda g=gname: iam.list_group_policies(GroupName=g),
                 "PolicyNames",
             )
             _check_attached(
-                "Group", gname,
+                "Group",
+                gname,
                 lambda g=gname: iam.list_attached_group_policies(GroupName=g),
             )
     except Exception as e:
         logger.error(f"Failed to enumerate IAM groups: {e}")
 
     # Sort: HIGH first, then by principal name
-    findings.sort(key=lambda f: (0 if f["severity"] == "HIGH" else 1, f["principal_name"]))
+    findings.sort(
+        key=lambda f: (0 if f["severity"] == "HIGH" else 1, f["principal_name"])
+    )
     return findings

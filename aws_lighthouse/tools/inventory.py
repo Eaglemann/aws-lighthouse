@@ -5,7 +5,12 @@ from ..logger import logger
 
 
 def _client(service: str, region: str | None):
-    return get_aws_client_for_region(service, region) if region else get_aws_client(service)
+    return (
+        get_aws_client_for_region(service, region)
+        if region
+        else get_aws_client(service)
+    )
+
 
 _LAMBDA_STALE_DAYS = 180
 
@@ -107,15 +112,17 @@ def get_lambda_inventory(region: str | None = None) -> List[Dict[str, Any]]:
                     last_modified = raw_modified[:10]
                     stale = False
 
-                functions.append({
-                    "FunctionName": fn.get("FunctionName"),
-                    "Runtime":      fn.get("Runtime", "unknown"),
-                    "MemorySize":   fn.get("MemorySize", 128),
-                    "Timeout":      fn.get("Timeout", 3),
-                    "CodeSizeMB":   round(fn.get("CodeSize", 0) / 1_048_576, 2),
-                    "LastModified": last_modified,
-                    "Stale":        stale,
-                })
+                functions.append(
+                    {
+                        "FunctionName": fn.get("FunctionName"),
+                        "Runtime": fn.get("Runtime", "unknown"),
+                        "MemorySize": fn.get("MemorySize", 128),
+                        "Timeout": fn.get("Timeout", 3),
+                        "CodeSizeMB": round(fn.get("CodeSize", 0) / 1_048_576, 2),
+                        "LastModified": last_modified,
+                        "Stale": stale,
+                    }
+                )
         return functions
     except Exception as e:
         logger.error(f"Failed to list Lambda functions: {str(e)}")

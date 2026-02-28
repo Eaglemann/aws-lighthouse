@@ -17,9 +17,9 @@ def detect_cost_anomalies(threshold_pct: float = 50.0) -> List[Dict[str, Any]]:
     """
     ce = get_aws_client("ce")
 
-    today    = date.today()
-    end_str  = today.strftime("%Y-%m-%d")
-    mid_str  = (today - timedelta(days=7)).strftime("%Y-%m-%d")
+    today = date.today()
+    end_str = today.strftime("%Y-%m-%d")
+    mid_str = (today - timedelta(days=7)).strftime("%Y-%m-%d")
     start_str = (today - timedelta(days=14)).strftime("%Y-%m-%d")
 
     try:
@@ -34,14 +34,14 @@ def detect_cost_anomalies(threshold_pct: float = 50.0) -> List[Dict[str, Any]]:
         return [{"error": str(e)}]
 
     baseline: Dict[str, float] = {}
-    recent:   Dict[str, float] = {}
+    recent: Dict[str, float] = {}
 
     for day in response.get("ResultsByTime", []):
         day_start = day["TimePeriod"]["Start"]
         bucket = recent if day_start >= mid_str else baseline
         for group in day.get("Groups", []):
             service = group["Keys"][0]
-            amount  = float(group["Metrics"]["UnblendedCost"]["Amount"])
+            amount = float(group["Metrics"]["UnblendedCost"]["Amount"])
             bucket[service] = bucket.get(service, 0.0) + amount
 
     anomalies = []
@@ -54,12 +54,14 @@ def detect_cost_anomalies(threshold_pct: float = 50.0) -> List[Dict[str, Any]]:
 
         pct_change = ((recent_total - baseline_total) / baseline_total) * 100
         if pct_change >= threshold_pct:
-            anomalies.append({
-                "service":      service,
-                "baseline_7d":  round(baseline_total, 2),
-                "recent_7d":    round(recent_total, 2),
-                "pct_change":   round(pct_change, 1),
-            })
+            anomalies.append(
+                {
+                    "service": service,
+                    "baseline_7d": round(baseline_total, 2),
+                    "recent_7d": round(recent_total, 2),
+                    "pct_change": round(pct_change, 1),
+                }
+            )
 
     anomalies.sort(key=lambda x: x["pct_change"], reverse=True)
     return anomalies

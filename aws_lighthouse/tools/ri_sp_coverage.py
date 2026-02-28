@@ -47,7 +47,9 @@ def get_ri_sp_coverage(days: int = 30) -> Dict[str, Any]:
     try:
         resp = ce.get_reservation_utilization(TimePeriod=period, Granularity="MONTHLY")
         totals = resp.get("Total", {})
-        result["ri_utilization_pct"] = float(totals.get("UtilizationPercentage", 0) or 0)
+        result["ri_utilization_pct"] = float(
+            totals.get("UtilizationPercentage", 0) or 0
+        )
         result["ri_unused_cost"] = float(totals.get("UnusedRecurringFee", 0) or 0)
     except Exception as e:
         logger.error(f"Failed to fetch RI utilization: {e}")
@@ -67,7 +69,9 @@ def get_ri_sp_coverage(days: int = 30) -> Dict[str, Any]:
 
     # ── SP Utilization ────────────────────────────────────────────────────────
     try:
-        resp = ce.get_savings_plans_utilization(TimePeriod=period, Granularity="MONTHLY")
+        resp = ce.get_savings_plans_utilization(
+            TimePeriod=period, Granularity="MONTHLY"
+        )
         util = resp.get("Total", {}).get("Utilization", {})
         result["sp_utilization_pct"] = float(util.get("UtilizationPercentage", 0) or 0)
         result["sp_unused_commitment"] = float(util.get("UnusedCommitment", 0) or 0)

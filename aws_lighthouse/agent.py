@@ -134,7 +134,9 @@ def tool_detect_overpermissive_iam() -> str:
 
 
 @tool
-def tool_check_tagging_compliance(required_tags: str = "Environment,Owner", region: str = "") -> str:
+def tool_check_tagging_compliance(
+    required_tags: str = "Environment,Owner", region: str = ""
+) -> str:
     """
     Check EC2, RDS, and S3 resources for missing required tags.
     Pass a comma-separated list of tag keys to enforce (default: Environment,Owner).
@@ -142,7 +144,9 @@ def tool_check_tagging_compliance(required_tags: str = "Environment,Owner", regi
     Returns one finding per non-compliant resource.
     """
     tags = [t.strip() for t in required_tags.split(",") if t.strip()]
-    return json.dumps(_check_tagging_compliance(required_tags=tags, region=region or None))
+    return json.dumps(
+        _check_tagging_compliance(required_tags=tags, region=region or None)
+    )
 
 
 @tool
@@ -213,7 +217,9 @@ def approval_node(state: AgentState):
     logger.warn("The agent has proposed the following infrastructure changes:")
 
     if last_message.content:
-        logger.console.print(f"\n[bold yellow]Agent Reasoning:[/bold yellow]\n{last_message.content}\n")
+        logger.console.print(
+            f"\n[bold yellow]Agent Reasoning:[/bold yellow]\n{last_message.content}\n"
+        )
 
     for tc in last_message.tool_calls:
         logger.step(f"Tool: [bold cyan]{tc['name']}[/bold cyan]")
@@ -239,7 +245,20 @@ def approval_node(state: AgentState):
     return None  # Proceed down the state graph
 
 
-SAFE_TOOLS = {"tool_read_file", "parse_terraform_context", "tool_get_enabled_regions", "tool_get_ec2_inventory", "tool_get_rds_inventory", "tool_get_s3_inventory", "tool_get_lambda_inventory", "tool_get_ri_sp_coverage", "tool_detect_cost_anomalies", "tool_check_tagging_compliance", "tool_detect_overpermissive_iam", "tool_detect_cloudwatch_gaps"}
+SAFE_TOOLS = {
+    "tool_read_file",
+    "parse_terraform_context",
+    "tool_get_enabled_regions",
+    "tool_get_ec2_inventory",
+    "tool_get_rds_inventory",
+    "tool_get_s3_inventory",
+    "tool_get_lambda_inventory",
+    "tool_get_ri_sp_coverage",
+    "tool_detect_cost_anomalies",
+    "tool_check_tagging_compliance",
+    "tool_detect_overpermissive_iam",
+    "tool_detect_cloudwatch_gaps",
+}
 
 
 def should_require_approval(state: AgentState) -> str:
@@ -270,7 +289,9 @@ def create_agent_graph():
 
     # After the agent thinks, it either ends, goes to approval, or runs safe tools directly
     workflow.add_conditional_edges(
-        "agent", should_require_approval, {"end": END, "approval": "approval", "tools": "tools"}
+        "agent",
+        should_require_approval,
+        {"end": END, "approval": "approval", "tools": "tools"},
     )
 
     # After approval, we execute tools

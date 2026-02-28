@@ -9,10 +9,12 @@ def get_enabled_regions() -> List[str]:
     try:
         ec2 = get_aws_client("ec2")
         response = ec2.describe_regions(
-            Filters=[{
-                "Name": "opt-in-status",
-                "Values": ["opt-in-not-required", "opted-in"],
-            }]
+            Filters=[
+                {
+                    "Name": "opt-in-status",
+                    "Values": ["opt-in-not-required", "opted-in"],
+                }
+            ]
         )
         return sorted(r["RegionName"] for r in response.get("Regions", []))
     except Exception as e:

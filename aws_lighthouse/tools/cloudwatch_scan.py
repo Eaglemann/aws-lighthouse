@@ -6,12 +6,12 @@ from ..logger import logger
 # (namespace, metric_name, dimension_name) tuples required per resource type.
 # A resource is flagged only for the metrics it is actually missing.
 _EC2_REQUIRED: List[Tuple[str, str, str]] = [
-    ("AWS/EC2", "CPUUtilization",  "InstanceId"),
+    ("AWS/EC2", "CPUUtilization", "InstanceId"),
     ("AWS/EC2", "StatusCheckFailed", "InstanceId"),
 ]
 
 _RDS_REQUIRED: List[Tuple[str, str, str]] = [
-    ("AWS/RDS", "CPUUtilization",  "DBInstanceIdentifier"),
+    ("AWS/RDS", "CPUUtilization", "DBInstanceIdentifier"),
     ("AWS/RDS", "FreeStorageSpace", "DBInstanceIdentifier"),
 ]
 
@@ -26,7 +26,7 @@ def _build_alarm_index(cw) -> Set[Tuple[str, str, str, str]]:
         paginator = cw.get_paginator("describe_alarms")
         for page in paginator.paginate(AlarmTypes=["MetricAlarm"]):
             for alarm in page.get("MetricAlarms", []):
-                ns     = alarm.get("Namespace", "")
+                ns = alarm.get("Namespace", "")
                 metric = alarm.get("MetricName", "")
                 for dim in alarm.get("Dimensions", []):
                     index.add((ns, metric, dim["Name"], dim["Value"]))
@@ -46,8 +46,12 @@ def detect_cloudwatch_gaps(region: str | None = None) -> List[Dict[str, Any]]:
     Terminated EC2 instances are skipped.
     Returns one finding per resource, listing every missing metric.
     """
-    _cl = (lambda svc: get_aws_client_for_region(svc, region)) if region else get_aws_client
-    cw  = _cl("cloudwatch")
+    _cl = (
+        (lambda svc: get_aws_client_for_region(svc, region))
+        if region
+        else get_aws_client
+    )
+    cw = _cl("cloudwatch")
     ec2 = _cl("ec2")
     rds = _cl("rds")
 
@@ -71,12 +75,14 @@ def detect_cloudwatch_gaps(region: str | None = None) -> List[Dict[str, Any]]:
                     if (ns, metric, dim, instance_id) not in alarm_index
                 ]
                 if missing:
-                    findings.append({
-                        "resource_type":  "EC2",
-                        "resource_id":    instance_id,
-                        "resource_name":  name,
-                        "missing_alarms": missing,
-                    })
+                    findings.append(
+                        {
+                            "resource_type": "EC2",
+                            "resource_id": instance_id,
+                            "resource_name": name,
+                            "missing_alarms": missing,
+                        }
+                    )
     except Exception as e:
         logger.error(f"Failed to check EC2 alarm gaps: {e}")
 
@@ -90,12 +96,14 @@ def detect_cloudwatch_gaps(region: str | None = None) -> List[Dict[str, Any]]:
                 if (ns, metric, dim, db_id) not in alarm_index
             ]
             if missing:
-                findings.append({
-                    "resource_type":  "RDS",
-                    "resource_id":    db_id,
-                    "resource_name":  db_id,
-                    "missing_alarms": missing,
-                })
+                findings.append(
+                    {
+                        "resource_type": "RDS",
+                        "resource_id": db_id,
+                        "resource_name": db_id,
+                        "missing_alarms": missing,
+                    }
+                )
     except Exception as e:
         logger.error(f"Failed to check RDS alarm gaps: {e}")
 

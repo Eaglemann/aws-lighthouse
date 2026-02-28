@@ -24,7 +24,11 @@ def check_tagging_compliance(
     if required_tags is None:
         required_tags = DEFAULT_REQUIRED_TAGS
 
-    _cl = (lambda svc: get_aws_client_for_region(svc, region)) if region else get_aws_client
+    _cl = (
+        (lambda svc: get_aws_client_for_region(svc, region))
+        if region
+        else get_aws_client
+    )
     findings: List[Dict[str, Any]] = []
 
     # ── EC2 ──────────────────────────────────────────────────────────────────
@@ -39,15 +43,21 @@ def check_tagging_compliance(
                 missing = [tag for tag in required_tags if tag not in existing]
                 if missing:
                     name = next(
-                        (t["Value"] for t in inst.get("Tags", []) if t["Key"] == "Name"),
+                        (
+                            t["Value"]
+                            for t in inst.get("Tags", [])
+                            if t["Key"] == "Name"
+                        ),
                         inst["InstanceId"],
                     )
-                    findings.append({
-                        "resource_type": "EC2",
-                        "resource_id":   inst["InstanceId"],
-                        "resource_name": name,
-                        "missing_tags":  missing,
-                    })
+                    findings.append(
+                        {
+                            "resource_type": "EC2",
+                            "resource_id": inst["InstanceId"],
+                            "resource_name": name,
+                            "missing_tags": missing,
+                        }
+                    )
     except Exception as e:
         logger.error(f"Failed to check EC2 tags: {e}")
 
@@ -58,12 +68,14 @@ def check_tagging_compliance(
             existing = {t["Key"] for t in db.get("TagList", [])}
             missing = [tag for tag in required_tags if tag not in existing]
             if missing:
-                findings.append({
-                    "resource_type": "RDS",
-                    "resource_id":   db["DBInstanceIdentifier"],
-                    "resource_name": db["DBInstanceIdentifier"],
-                    "missing_tags":  missing,
-                })
+                findings.append(
+                    {
+                        "resource_type": "RDS",
+                        "resource_id": db["DBInstanceIdentifier"],
+                        "resource_name": db["DBInstanceIdentifier"],
+                        "missing_tags": missing,
+                    }
+                )
     except Exception as e:
         logger.error(f"Failed to check RDS tags: {e}")
 
@@ -84,12 +96,14 @@ def check_tagging_compliance(
                     continue  # permission or other transient error — skip bucket
             missing = [tag for tag in required_tags if tag not in existing]
             if missing:
-                findings.append({
-                    "resource_type": "S3",
-                    "resource_id":   name,
-                    "resource_name": name,
-                    "missing_tags":  missing,
-                })
+                findings.append(
+                    {
+                        "resource_type": "S3",
+                        "resource_id": name,
+                        "resource_name": name,
+                        "missing_tags": missing,
+                    }
+                )
     except Exception as e:
         logger.error(f"Failed to check S3 tags: {e}")
 
