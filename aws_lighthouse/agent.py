@@ -116,9 +116,10 @@ def tool_get_lambda_inventory(region: str = "") -> str:
 @tool
 def tool_detect_cloudwatch_gaps(region: str = "") -> str:
     """
-    Find EC2 instances and RDS databases missing CloudWatch alarms on key metrics.
+    Find EC2 instances, RDS databases, and Lambda functions missing CloudWatch alarms.
     EC2: CPUUtilization, StatusCheckFailed.
     RDS: CPUUtilization, FreeStorageSpace.
+    Lambda: Errors, Throttles.
     Returns one finding per resource listing every uncovered metric.
     Pass a region name to check a specific region, or leave empty for the default.
     """
@@ -142,7 +143,7 @@ def tool_check_tagging_compliance(
     required_tags: str = "Environment,Owner", region: str = ""
 ) -> str:
     """
-    Check EC2, RDS, and S3 resources for missing required tags.
+    Check EC2, RDS, S3, and Lambda resources for missing required tags.
     Pass a comma-separated list of tag keys to enforce (default: Environment,Owner).
     Pass a region name to check a specific region, or leave empty for the default.
     Returns one finding per non-compliant resource.
@@ -177,8 +178,10 @@ def tool_detect_cost_anomalies(threshold_pct: float = 50.0) -> str:
 def tool_run_security_scan(region: str = "", include_global: bool = True) -> str:
     """
     Run a comprehensive security scan against the current AWS account.
-    Checks: root MFA, open security groups (SSH/RDP), IAM access key age,
-    publicly accessible RDS instances, S3 Block Public Access, and CloudTrail logging.
+    Checks: root MFA, IAM access key age (>90 days), IAM users without MFA,
+    open security groups (SSH/RDP), publicly accessible RDS instances,
+    S3 Block Public Access, S3 default encryption, IMDSv2 enforcement,
+    EBS encryption at rest, CloudTrail logging, and GuardDuty enabled.
 
     Pass a region name to target a specific region; leave empty for the default region.
     Set include_global=False when calling in a loop over multiple regions to avoid

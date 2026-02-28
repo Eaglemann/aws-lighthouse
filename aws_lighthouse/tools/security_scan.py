@@ -61,6 +61,33 @@ def _check_open_security_groups(ec2) -> List[Dict[str, Any]]:
     return findings
 
 
+def _check_iam_users_mfa() -> List[Dict[str, Any]]:
+    """Flag IAM users with console access (login profile) but no MFA device."""
+    findings = []
+    try:
+        iam = get_aws_client("iam")
+        for user in iam.list_users().get("Users", []):
+            username = user["UserName"]
+            try:
+                iam.get_login_profile(UserName=username)
+            except ClientError as e:
+                if e.response["Error"]["Code"] == "NoSuchEntity":
+                    continue  # no console password — skip
+                raise
+            mfa_devices = iam.list_mfa_devices(UserName=username).get("MFADevices", [])
+            if not mfa_devices:
+                findings.append(
+                    {
+                        "severity": "HIGH",
+                        "resource": username,
+                        "finding": f"IAM user '{username}' has console access but no MFA device",
+                    }
+                )
+    except Exception as e:
+        logger.error(f"Failed to check IAM user MFA: {e}")
+    return findings
+
+
 def _check_iam_key_age() -> List[Dict[str, Any]]:
     """Flag active IAM access keys older than 90 days."""
     findings = []
@@ -272,6 +299,33 @@ def _check_cloudtrail(ct) -> List[Dict[str, Any]]:
     return findings
 
 
+def _check_guardduty_enabled(gd) -> List[Dict[str, Any]]:
+    """Check that GuardDuty is enabled in this region."""
+    try:
+        detector_ids = gd.list_detectors().get("DetectorIds", [])
+        if not detector_ids:
+            return [
+                {
+                    "severity": "HIGH",
+                    "resource": "guardduty",
+                    "finding": "GuardDuty is not enabled in this region",
+                }
+            ]
+        for detector_id in detector_ids:
+            det = gd.get_detector(DetectorId=detector_id)
+            if det.get("Status") != "ENABLED":
+                return [
+                    {
+                        "severity": "HIGH",
+                        "resource": detector_id,
+                        "finding": "GuardDuty detector exists but is not enabled",
+                    }
+                ]
+    except Exception as e:
+        logger.error(f"Failed to check GuardDuty: {e}")
+    return []
+
+
 def run_security_scan(
     s3s: List[Dict[str, Any]],
     rdss: List[Dict[str, Any]],
@@ -292,6 +346,7 @@ def run_security_scan(
     findings = []
     if include_global:
         findings.extend(_check_root_mfa())
+        findings.extend(_check_iam_users_mfa())
         findings.extend(_check_iam_key_age())
         findings.extend(_check_s3_block_public_access(s3s))
         findings.extend(_check_s3_encryption(s3s))
@@ -301,4 +356,5 @@ def run_security_scan(
     findings.extend(_check_ebs_encryption(ec2))
     findings.extend(_check_public_rds(rdss))
     findings.extend(_check_cloudtrail(_cl("cloudtrail")))
+    findings.extend(_check_guardduty_enabled(_cl("guardduty")))
     return findings

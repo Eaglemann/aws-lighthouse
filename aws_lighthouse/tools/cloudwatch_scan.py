@@ -42,11 +42,12 @@ def _build_alarm_index(cw) -> Set[Tuple[str, str, str, str]]:
 
 def detect_cloudwatch_gaps(region: str | None = None) -> List[Dict[str, Any]]:
     """
-    Find EC2 instances and RDS databases that have no CloudWatch alarm
-    configured for one or more key metrics:
+    Find EC2 instances, RDS databases, and Lambda functions that have no
+    CloudWatch alarm configured for one or more key metrics:
 
-      EC2  — CPUUtilization, StatusCheckFailed
-      RDS  — CPUUtilization, FreeStorageSpace
+      EC2     — CPUUtilization, StatusCheckFailed
+      RDS     — CPUUtilization, FreeStorageSpace
+      Lambda  — Errors, Throttles
 
     Terminated EC2 instances are skipped.
     Returns one finding per resource, listing every missing metric.

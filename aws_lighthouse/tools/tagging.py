@@ -15,8 +15,9 @@ def check_tagging_compliance(
     include_s3: bool = True,
 ) -> List[Dict[str, Any]]:
     """
-    Check EC2 instances, RDS databases, and S3 buckets for missing required tags.
-    Returns one finding per resource that is missing at least one required tag.
+    Check EC2 instances, RDS databases, Lambda functions, and S3 buckets for
+    missing required tags. Returns one finding per resource that is missing at
+    least one required tag.
 
     include_s3 can be set to False when looping over multiple regions to avoid
     duplicate S3 findings (S3 is a global service).

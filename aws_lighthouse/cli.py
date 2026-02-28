@@ -462,7 +462,7 @@ def analyze(
     else:
         c.print(
             Panel(
-                "[green]✓  All EC2 and RDS resources have required CloudWatch alarms.[/green]",
+                "[green]✓  All EC2, RDS, and Lambda resources have required CloudWatch alarms.[/green]",
                 title="[bold green]CloudWatch Alarms[/bold green]",
                 border_style="green",
                 padding=(0, 1),
