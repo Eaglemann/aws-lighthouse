@@ -42,6 +42,12 @@ def analyze(
     days: int = typer.Option(
         14, "--days", "-d", help="Days of cost history to analyze"
     ),
+    region: str | None = typer.Option(
+        None,
+        "--region",
+        "-r",
+        help="Scan a single region (default: all enabled regions)",
+    ),
 ):
     """Retrieve read-only state (inventory, cost, security) and render a dashboard."""
     from .auth import get_aws_session
@@ -83,10 +89,15 @@ def analyze(
     # ── 2. Regions ───────────────────────────────────────────────────────────
     from .tools.multi_region import get_enabled_regions
 
-    with c.status("[cyan]Detecting enabled regions...[/cyan]", spinner="dots"):
-        regions: list[str | None] = list(get_enabled_regions())
-    if not regions:
-        regions = [None]  # fallback: scan default region only
+    if region:
+        regions: list[str | None] = [region]
+        c.print(f"  [dim]Region[/dim]  [bold]{region}[/bold]")
+        c.print()
+    else:
+        with c.status("[cyan]Detecting enabled regions...[/cyan]", spinner="dots"):
+            regions = list(get_enabled_regions())
+        if not regions:
+            regions = [None]  # fallback: scan default region only
 
     multi_region = len(regions) > 1
     if multi_region:
