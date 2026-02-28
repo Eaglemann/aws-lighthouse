@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, Set, Tuple
 
-from ..auth import get_aws_client
+from ..auth import get_aws_client, get_aws_client_for_region
 from ..logger import logger
 
 # (namespace, metric_name, dimension_name) tuples required per resource type.
@@ -35,7 +35,7 @@ def _build_alarm_index(cw) -> Set[Tuple[str, str, str, str]]:
     return index
 
 
-def detect_cloudwatch_gaps() -> List[Dict[str, Any]]:
+def detect_cloudwatch_gaps(region: str | None = None) -> List[Dict[str, Any]]:
     """
     Find EC2 instances and RDS databases that have no CloudWatch alarm
     configured for one or more key metrics:
@@ -46,9 +46,10 @@ def detect_cloudwatch_gaps() -> List[Dict[str, Any]]:
     Terminated EC2 instances are skipped.
     Returns one finding per resource, listing every missing metric.
     """
-    cw  = get_aws_client("cloudwatch")
-    ec2 = get_aws_client("ec2")
-    rds = get_aws_client("rds")
+    _cl = (lambda svc: get_aws_client_for_region(svc, region)) if region else get_aws_client
+    cw  = _cl("cloudwatch")
+    ec2 = _cl("ec2")
+    rds = _cl("rds")
 
     alarm_index = _build_alarm_index(cw)
     findings: List[Dict[str, Any]] = []

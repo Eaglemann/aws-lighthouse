@@ -69,41 +69,55 @@ from .tools.cost_anomaly import detect_cost_anomalies as _detect_cost_anomalies
 from .tools.tagging import check_tagging_compliance as _check_tagging_compliance
 from .tools.iam_scan import detect_overpermissive_iam as _detect_overpermissive_iam
 from .tools.cloudwatch_scan import detect_cloudwatch_gaps as _detect_cloudwatch_gaps
+from .tools.multi_region import get_enabled_regions as _get_enabled_regions
 
 
 @tool
-def tool_get_ec2_inventory() -> str:
-    """Retrieve all EC2 instances and their current state."""
-    return json.dumps(_get_ec2_inventory())
+def tool_get_enabled_regions() -> str:
+    """
+    List all AWS regions that are enabled for this account (opted-in or opt-in-not-required).
+    Call this first when the user asks for a multi-region analysis so you know which regions to scan.
+    """
+    return json.dumps(_get_enabled_regions())
 
 
 @tool
-def tool_get_rds_inventory() -> str:
-    """Retrieve all RDS instances and their current state."""
-    return json.dumps(_get_rds_inventory())
+def tool_get_ec2_inventory(region: str = "") -> str:
+    """Retrieve all EC2 instances and their current state.
+    Pass a region name (e.g. 'us-west-2') to scan a specific region, or leave empty for the default."""
+    return json.dumps(_get_ec2_inventory(region=region or None))
+
+
+@tool
+def tool_get_rds_inventory(region: str = "") -> str:
+    """Retrieve all RDS instances and their current state.
+    Pass a region name (e.g. 'eu-west-1') to scan a specific region, or leave empty for the default."""
+    return json.dumps(_get_rds_inventory(region=region or None))
 
 
 @tool
 def tool_get_s3_inventory() -> str:
-    """List all S3 buckets."""
+    """List all S3 buckets. S3 is a global service — no region parameter needed."""
     return json.dumps(_get_s3_inventory())
 
 
 @tool
-def tool_get_lambda_inventory() -> str:
-    """List all Lambda functions with runtime, memory size, timeout, code size, and whether they are stale (>180 days since last deploy)."""
-    return json.dumps(_get_lambda_inventory())
+def tool_get_lambda_inventory(region: str = "") -> str:
+    """List all Lambda functions with runtime, memory size, timeout, code size, and whether they are stale (>180 days since last deploy).
+    Pass a region name to scan a specific region, or leave empty for the default."""
+    return json.dumps(_get_lambda_inventory(region=region or None))
 
 
 @tool
-def tool_detect_cloudwatch_gaps() -> str:
+def tool_detect_cloudwatch_gaps(region: str = "") -> str:
     """
     Find EC2 instances and RDS databases missing CloudWatch alarms on key metrics.
     EC2: CPUUtilization, StatusCheckFailed.
     RDS: CPUUtilization, FreeStorageSpace.
     Returns one finding per resource listing every uncovered metric.
+    Pass a region name to check a specific region, or leave empty for the default.
     """
-    return json.dumps(_detect_cloudwatch_gaps())
+    return json.dumps(_detect_cloudwatch_gaps(region=region or None))
 
 
 @tool
@@ -119,14 +133,15 @@ def tool_detect_overpermissive_iam() -> str:
 
 
 @tool
-def tool_check_tagging_compliance(required_tags: str = "Environment,Owner") -> str:
+def tool_check_tagging_compliance(required_tags: str = "Environment,Owner", region: str = "") -> str:
     """
     Check EC2, RDS, and S3 resources for missing required tags.
     Pass a comma-separated list of tag keys to enforce (default: Environment,Owner).
+    Pass a region name to check a specific region, or leave empty for the default.
     Returns one finding per non-compliant resource.
     """
     tags = [t.strip() for t in required_tags.split(",") if t.strip()]
-    return json.dumps(_check_tagging_compliance(required_tags=tags))
+    return json.dumps(_check_tagging_compliance(required_tags=tags, region=region or None))
 
 
 @tool
@@ -147,6 +162,7 @@ tools = [
     delete_ebs,
     s3_block_public_access,
     parse_terraform_context,
+    tool_get_enabled_regions,
     tool_get_ec2_inventory,
     tool_get_rds_inventory,
     tool_get_s3_inventory,
@@ -211,7 +227,7 @@ def approval_node(state: AgentState):
     return None  # Proceed down the state graph
 
 
-SAFE_TOOLS = {"tool_read_file", "parse_terraform_context", "tool_get_ec2_inventory", "tool_get_rds_inventory", "tool_get_s3_inventory", "tool_get_lambda_inventory", "tool_detect_cost_anomalies", "tool_check_tagging_compliance", "tool_detect_overpermissive_iam", "tool_detect_cloudwatch_gaps"}
+SAFE_TOOLS = {"tool_read_file", "parse_terraform_context", "tool_get_enabled_regions", "tool_get_ec2_inventory", "tool_get_rds_inventory", "tool_get_s3_inventory", "tool_get_lambda_inventory", "tool_detect_cost_anomalies", "tool_check_tagging_compliance", "tool_detect_overpermissive_iam", "tool_detect_cloudwatch_gaps"}
 
 
 def should_require_approval(state: AgentState) -> str:

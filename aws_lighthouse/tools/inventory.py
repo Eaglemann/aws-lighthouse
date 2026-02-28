@@ -1,7 +1,11 @@
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any
-from ..auth import get_aws_client
+from ..auth import get_aws_client, get_aws_client_for_region
 from ..logger import logger
+
+
+def _client(service: str, region: str | None):
+    return get_aws_client_for_region(service, region) if region else get_aws_client(service)
 
 _LAMBDA_STALE_DAYS = 180
 
@@ -27,9 +31,9 @@ def get_s3_inventory() -> List[Dict[str, Any]]:
         return [{"error": str(e)}]
 
 
-def get_ec2_inventory() -> List[Dict[str, Any]]:
+def get_ec2_inventory(region: str | None = None) -> List[Dict[str, Any]]:
     """Retrieve all EC2 instances and state."""
-    ec2 = get_aws_client("ec2")
+    ec2 = _client("ec2", region)
     instances = []
     try:
         response = ec2.describe_instances()
@@ -60,9 +64,9 @@ def get_ec2_inventory() -> List[Dict[str, Any]]:
         return [{"error": str(e)}]
 
 
-def get_rds_inventory() -> List[Dict[str, Any]]:
+def get_rds_inventory(region: str | None = None) -> List[Dict[str, Any]]:
     """Retrieve all RDS instances and basic metrics."""
-    rds = get_aws_client("rds")
+    rds = _client("rds", region)
     instances = []
     try:
         response = rds.describe_db_instances()
@@ -82,9 +86,9 @@ def get_rds_inventory() -> List[Dict[str, Any]]:
         return [{"error": str(e)}]
 
 
-def get_lambda_inventory() -> List[Dict[str, Any]]:
+def get_lambda_inventory(region: str | None = None) -> List[Dict[str, Any]]:
     """List all Lambda functions with runtime, memory, timeout, code size, and staleness flag."""
-    lmb = get_aws_client("lambda")
+    lmb = _client("lambda", region)
     functions = []
     cutoff = datetime.now(timezone.utc) - timedelta(days=_LAMBDA_STALE_DAYS)
     try:

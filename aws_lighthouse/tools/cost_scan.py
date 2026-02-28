@@ -1,17 +1,16 @@
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List
 
-from ..auth import get_aws_client
+from ..auth import get_aws_client, get_aws_client_for_region
 from ..logger import logger
 
 _SNAPSHOT_AGE_DAYS = 90
 
 
-def _check_unattached_ebs() -> List[Dict[str, Any]]:
+def _check_unattached_ebs(ec2) -> List[Dict[str, Any]]:
     """Flag EBS volumes that are not attached to any instance."""
     findings = []
     try:
-        ec2 = get_aws_client("ec2")
         response = ec2.describe_volumes(
             Filters=[{"Name": "status", "Values": ["available"]}]
         )
@@ -29,11 +28,10 @@ def _check_unattached_ebs() -> List[Dict[str, Any]]:
     return findings
 
 
-def _check_stopped_ec2() -> List[Dict[str, Any]]:
+def _check_stopped_ec2(ec2) -> List[Dict[str, Any]]:
     """Flag EC2 instances that are stopped but still incurring EBS costs."""
     findings = []
     try:
-        ec2 = get_aws_client("ec2")
         response = ec2.describe_instances(
             Filters=[{"Name": "instance-state-name", "Values": ["stopped"]}]
         )
@@ -52,11 +50,10 @@ def _check_stopped_ec2() -> List[Dict[str, Any]]:
     return findings
 
 
-def _check_old_snapshots() -> List[Dict[str, Any]]:
+def _check_old_snapshots(ec2) -> List[Dict[str, Any]]:
     """Flag owned EBS snapshots older than 90 days."""
     findings = []
     try:
-        ec2 = get_aws_client("ec2")
         response = ec2.describe_snapshots(OwnerIds=["self"])
         cutoff = datetime.now(timezone.utc) - timedelta(days=_SNAPSHOT_AGE_DAYS)
         for snap in response.get("Snapshots", []):
@@ -74,11 +71,10 @@ def _check_old_snapshots() -> List[Dict[str, Any]]:
     return findings
 
 
-def _check_unassociated_eips() -> List[Dict[str, Any]]:
+def _check_unassociated_eips(ec2) -> List[Dict[str, Any]]:
     """Flag Elastic IPs that are allocated but not associated with any resource."""
     findings = []
     try:
-        ec2 = get_aws_client("ec2")
         response = ec2.describe_addresses()
         for addr in response.get("Addresses", []):
             if "AssociationId" not in addr:
@@ -93,11 +89,12 @@ def _check_unassociated_eips() -> List[Dict[str, Any]]:
     return findings
 
 
-def run_cost_scan() -> List[Dict[str, Any]]:
+def run_cost_scan(region: str | None = None) -> List[Dict[str, Any]]:
     """Run all cost waste checks and return a unified list of findings."""
+    ec2 = get_aws_client_for_region("ec2", region) if region else get_aws_client("ec2")
     findings = []
-    findings.extend(_check_unattached_ebs())
-    findings.extend(_check_stopped_ec2())
-    findings.extend(_check_old_snapshots())
-    findings.extend(_check_unassociated_eips())
+    findings.extend(_check_unattached_ebs(ec2))
+    findings.extend(_check_stopped_ec2(ec2))
+    findings.extend(_check_old_snapshots(ec2))
+    findings.extend(_check_unassociated_eips(ec2))
     return findings

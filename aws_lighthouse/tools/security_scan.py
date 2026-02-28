@@ -3,7 +3,7 @@ from typing import Any, Dict, List
 
 from botocore.exceptions import ClientError
 
-from ..auth import get_aws_client
+from ..auth import get_aws_client, get_aws_client_for_region
 from ..logger import logger
 
 
@@ -19,11 +19,10 @@ def _check_root_mfa() -> List[Dict[str, Any]]:
     return []
 
 
-def _check_open_security_groups() -> List[Dict[str, Any]]:
+def _check_open_security_groups(ec2) -> List[Dict[str, Any]]:
     """Flag security groups that allow unrestricted ingress on SSH (22) or RDP (3389)."""
     findings = []
     try:
-        ec2 = get_aws_client("ec2")
         for sg in ec2.describe_security_groups().get("SecurityGroups", []):
             for perm in sg.get("IpPermissions", []):
                 from_port = perm.get("FromPort", 0)
@@ -122,11 +121,10 @@ def _check_s3_block_public_access(s3s: List[Dict[str, Any]]) -> List[Dict[str, A
     return findings
 
 
-def _check_cloudtrail() -> List[Dict[str, Any]]:
+def _check_cloudtrail(ct) -> List[Dict[str, Any]]:
     """Check that CloudTrail is configured and actively logging in this region."""
     findings = []
     try:
-        ct = get_aws_client("cloudtrail")
         trails = ct.describe_trails(includeShadowTrails=False).get("trailList", [])
         if not trails:
             return [{"severity": "HIGH", "resource": "cloudtrail", "finding": "No CloudTrail trails configured in this region"}]
@@ -143,13 +141,29 @@ def _check_cloudtrail() -> List[Dict[str, Any]]:
     return findings
 
 
-def run_security_scan(s3s: List[Dict[str, Any]], rdss: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Run all security checks and return a unified list of findings."""
+def run_security_scan(
+    s3s: List[Dict[str, Any]],
+    rdss: List[Dict[str, Any]],
+    region: str | None = None,
+    include_global: bool = True,
+) -> List[Dict[str, Any]]:
+    """Run security checks and return a unified list of findings.
+
+    include_global controls whether account-wide checks (root MFA, IAM key age,
+    S3 block public access) are executed.  Set to False when looping over
+    multiple regions to avoid duplicate global findings.
+    """
+    _cl = (
+        (lambda svc: get_aws_client_for_region(svc, region))
+        if region
+        else (lambda svc: get_aws_client(svc))
+    )
     findings = []
-    findings.extend(_check_root_mfa())
-    findings.extend(_check_open_security_groups())
-    findings.extend(_check_iam_key_age())
+    if include_global:
+        findings.extend(_check_root_mfa())
+        findings.extend(_check_iam_key_age())
+        findings.extend(_check_s3_block_public_access(s3s))
+    findings.extend(_check_open_security_groups(_cl("ec2")))
     findings.extend(_check_public_rds(rdss))
-    findings.extend(_check_s3_block_public_access(s3s))
-    findings.extend(_check_cloudtrail())
+    findings.extend(_check_cloudtrail(_cl("cloudtrail")))
     return findings

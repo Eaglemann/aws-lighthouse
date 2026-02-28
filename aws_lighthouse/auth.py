@@ -87,3 +87,8 @@ def get_aws_session() -> boto3.Session:
 def get_aws_client(service_name: str):
     """Provides a Boto3 client for a specific service."""
     return get_aws_session().client(service_name)
+
+
+def get_aws_client_for_region(service_name: str, region: str):
+    """Provides a Boto3 client for a specific service in an explicit region."""
+    return get_aws_session().client(service_name, region_name=region)

@@ -2,7 +2,7 @@ from typing import Any, Dict, List
 
 from botocore.exceptions import ClientError
 
-from ..auth import get_aws_client
+from ..auth import get_aws_client, get_aws_client_for_region
 from ..logger import logger
 
 # Default tags every resource should carry
@@ -11,19 +11,25 @@ DEFAULT_REQUIRED_TAGS = ["Environment", "Owner"]
 
 def check_tagging_compliance(
     required_tags: List[str] | None = None,
+    region: str | None = None,
+    include_s3: bool = True,
 ) -> List[Dict[str, Any]]:
     """
     Check EC2 instances, RDS databases, and S3 buckets for missing required tags.
     Returns one finding per resource that is missing at least one required tag.
+
+    include_s3 can be set to False when looping over multiple regions to avoid
+    duplicate S3 findings (S3 is a global service).
     """
     if required_tags is None:
         required_tags = DEFAULT_REQUIRED_TAGS
 
+    _cl = (lambda svc: get_aws_client_for_region(svc, region)) if region else get_aws_client
     findings: List[Dict[str, Any]] = []
 
     # ── EC2 ──────────────────────────────────────────────────────────────────
     try:
-        ec2 = get_aws_client("ec2")
+        ec2 = _cl("ec2")
         for reservation in ec2.describe_instances().get("Reservations", []):
             for inst in reservation.get("Instances", []):
                 # Skip terminated instances — they can't be tagged anyway
@@ -47,7 +53,7 @@ def check_tagging_compliance(
 
     # ── RDS ──────────────────────────────────────────────────────────────────
     try:
-        rds = get_aws_client("rds")
+        rds = _cl("rds")
         for db in rds.describe_db_instances().get("DBInstances", []):
             existing = {t["Key"] for t in db.get("TagList", [])}
             missing = [tag for tag in required_tags if tag not in existing]
@@ -61,7 +67,9 @@ def check_tagging_compliance(
     except Exception as e:
         logger.error(f"Failed to check RDS tags: {e}")
 
-    # ── S3 ───────────────────────────────────────────────────────────────────
+    # ── S3 (global service — skip when iterating per-region to avoid duplicates) ──
+    if not include_s3:
+        return findings
     try:
         s3 = get_aws_client("s3")
         for bucket in s3.list_buckets().get("Buckets", []):

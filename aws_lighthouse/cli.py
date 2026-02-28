@@ -72,12 +72,45 @@ def analyze(
     )
     c.print()
 
-    # ── 2. Inventory ─────────────────────────────────────────────────────────
-    with c.status("[cyan]Scanning resources...[/cyan]", spinner="dots"):
-        ec2s = get_ec2_inventory()
-        rdss = get_rds_inventory()
-        s3s = get_s3_inventory()
-        lambdas = get_lambda_inventory()
+    # ── 2. Regions ───────────────────────────────────────────────────────────
+    from .tools.multi_region import get_enabled_regions
+    with c.status("[cyan]Detecting enabled regions...[/cyan]", spinner="dots"):
+        regions = get_enabled_regions()
+    if not regions:
+        regions = [None]  # fallback: scan default region only
+
+    multi_region = len(regions) > 1
+    if multi_region:
+        c.print(
+            f"  [dim]Scanning [bold]{len(regions)}[/bold] regions:[/dim] "
+            + ", ".join(r for r in regions if r)
+        )
+        c.print()
+
+    # ── 3. Inventory ─────────────────────────────────────────────────────────
+    s3s: list = []
+    ec2s: list = []
+    rdss: list = []
+    lambdas: list = []
+
+    with c.status("[cyan]Scanning S3...[/cyan]", spinner="dots") as status:
+        s3s = get_s3_inventory()  # always global
+        for region in regions:
+            label = region or "default region"
+            status.update(f"[cyan]Scanning {label}...[/cyan]")
+            _ec2 = get_ec2_inventory(region=region)
+            _rds = get_rds_inventory(region=region)
+            _lmb = get_lambda_inventory(region=region)
+            if multi_region:
+                for item in _ec2:
+                    item["region"] = region
+                for item in _rds:
+                    item["region"] = region
+                for item in _lmb:
+                    item["region"] = region
+            ec2s.extend(_ec2)
+            rdss.extend(_rds)
+            lambdas.extend(_lmb)
 
     cur_bucket_exists = False
     if s3s and "error" not in s3s[0]:
@@ -136,10 +169,11 @@ def analyze(
 
     period_label = costs.get("period", "—") if "error" not in costs else "—"
 
+    inv_region_note = f"  [dim]· {len(regions)} regions[/dim]" if multi_region else ""
     c.print(Columns([
         Panel(
             inv_table,
-            title="[bold blue]Inventory[/bold blue]",
+            title=f"[bold blue]Inventory[/bold blue]{inv_region_note}",
             border_style="blue",
             padding=(0, 1),
         ),
@@ -188,17 +222,35 @@ def analyze(
     c.print()
 
     # ── 6. Security scan ─────────────────────────────────────────────────────
-    with c.status("[cyan]Running security checks...[/cyan]", spinner="dots"):
-        sec_findings = run_security_scan(s3s=s3s, rdss=rdss)
+    sec_findings = []
+    with c.status("[cyan]Running security checks...[/cyan]", spinner="dots") as status:
+        for i, region in enumerate(regions):
+            if multi_region:
+                status.update(f"[cyan]Security checks — {region}...[/cyan]")
+            # Global checks (root MFA, IAM key age, S3) only on the first pass
+            _rdss_r = [r for r in rdss if r.get("region") == region] if multi_region else rdss
+            _sec = run_security_scan(
+                s3s=s3s, rdss=_rdss_r, region=region, include_global=(i == 0)
+            )
+            if multi_region:
+                for f in _sec:
+                    f.setdefault("region", region)
+            sec_findings.extend(_sec)
 
     sec_count = len(sec_findings)
     if sec_count:
         sec_table = Table(box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False)
         sec_table.add_column("Severity",  no_wrap=True)
+        if multi_region:
+            sec_table.add_column("Region", style="dim", no_wrap=True)
         sec_table.add_column("Resource",  style="cyan", no_wrap=True)
         sec_table.add_column("Finding")
         for f in sec_findings:
-            sec_table.add_row(_severity_text(f["severity"]), f["resource"], f["finding"])
+            row = [_severity_text(f["severity"])]
+            if multi_region:
+                row.append(f.get("region", "global"))
+            row += [f["resource"], f["finding"]]
+            sec_table.add_row(*row)
         c.print(Panel(
             sec_table,
             title=f"[bold red]Security[/bold red]  [dim]{sec_count} finding{'s' if sec_count != 1 else ''}[/dim]",
@@ -253,21 +305,31 @@ def analyze(
     c.print()
 
     # ── 6c. CloudWatch alarm gaps ─────────────────────────────────────────────
-    with c.status("[cyan]Checking CloudWatch alarm coverage...[/cyan]", spinner="dots"):
-        cw_findings = detect_cloudwatch_gaps()
+    cw_findings = []
+    with c.status("[cyan]Checking CloudWatch alarm coverage...[/cyan]", spinner="dots") as status:
+        for region in regions:
+            if multi_region:
+                status.update(f"[cyan]CloudWatch alarm coverage — {region}...[/cyan]")
+            _cw = detect_cloudwatch_gaps(region=region)
+            if multi_region:
+                for f in _cw:
+                    f["region"] = region
+            cw_findings.extend(_cw)
 
     cw_count = len(cw_findings)
     if cw_count:
         cw_table = Table(box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False)
         cw_table.add_column("Type",     style="dim",  no_wrap=True)
+        if multi_region:
+            cw_table.add_column("Region", style="dim", no_wrap=True)
         cw_table.add_column("Resource", style="cyan", no_wrap=True)
         cw_table.add_column("Missing Alarms")
         for f in cw_findings:
-            cw_table.add_row(
-                f["resource_type"],
-                f["resource_name"],
-                "[yellow]" + ", ".join(f["missing_alarms"]) + "[/yellow]",
-            )
+            row = [f["resource_type"]]
+            if multi_region:
+                row.append(f.get("region", ""))
+            row += [f["resource_name"], "[yellow]" + ", ".join(f["missing_alarms"]) + "[/yellow]"]
+            cw_table.add_row(*row)
         c.print(Panel(
             cw_table,
             title=f"[bold yellow]CloudWatch Alarm Gaps[/bold yellow]  [dim]{cw_count} resource{'s' if cw_count != 1 else ''} unmonitored[/dim]",
@@ -285,16 +347,30 @@ def analyze(
     c.print()
 
     # ── 7. Cost waste scan ───────────────────────────────────────────────────
-    with c.status("[cyan]Scanning for cost waste...[/cyan]", spinner="dots"):
-        cost_findings = run_cost_scan()
+    cost_findings = []
+    with c.status("[cyan]Scanning for cost waste...[/cyan]", spinner="dots") as status:
+        for region in regions:
+            if multi_region:
+                status.update(f"[cyan]Cost waste scan — {region}...[/cyan]")
+            _cost = run_cost_scan(region=region)
+            if multi_region:
+                for f in _cost:
+                    f["region"] = region
+            cost_findings.extend(_cost)
 
     waste_count = len(cost_findings)
     if waste_count:
         waste_table = Table(box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False)
+        if multi_region:
+            waste_table.add_column("Region", style="dim", no_wrap=True)
         waste_table.add_column("Resource", style="cyan", no_wrap=True)
         waste_table.add_column("Finding")
         for f in cost_findings:
-            waste_table.add_row(f["resource"], f["finding"])
+            row = []
+            if multi_region:
+                row.append(f.get("region", ""))
+            row += [f["resource"], f["finding"]]
+            waste_table.add_row(*row)
         c.print(Panel(
             waste_table,
             title=f"[bold yellow]Cost Waste[/bold yellow]  [dim]{waste_count} finding{'s' if waste_count != 1 else ''}[/dim]",
@@ -312,21 +388,31 @@ def analyze(
     c.print()
 
     # ── 7. Tagging compliance ─────────────────────────────────────────────────
-    with c.status("[cyan]Checking tag compliance...[/cyan]", spinner="dots"):
-        tag_findings = check_tagging_compliance()
+    tag_findings = []
+    with c.status("[cyan]Checking tag compliance...[/cyan]", spinner="dots") as status:
+        for i, region in enumerate(regions):
+            if multi_region:
+                status.update(f"[cyan]Tag compliance — {region}...[/cyan]")
+            _tag = check_tagging_compliance(region=region, include_s3=(i == 0))
+            if multi_region:
+                for f in _tag:
+                    f.setdefault("region", region)
+            tag_findings.extend(_tag)
 
     tag_count = len(tag_findings)
     if tag_count:
         tag_table = Table(box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False)
         tag_table.add_column("Type",     style="dim",  no_wrap=True)
+        if multi_region:
+            tag_table.add_column("Region", style="dim", no_wrap=True)
         tag_table.add_column("Resource", style="cyan", no_wrap=True)
         tag_table.add_column("Missing Tags")
         for f in tag_findings:
-            tag_table.add_row(
-                f["resource_type"],
-                f["resource_name"],
-                "[yellow]" + ", ".join(f["missing_tags"]) + "[/yellow]",
-            )
+            row = [f["resource_type"]]
+            if multi_region:
+                row.append(f.get("region", "global"))
+            row += [f["resource_name"], "[yellow]" + ", ".join(f["missing_tags"]) + "[/yellow]"]
+            tag_table.add_row(*row)
         c.print(Panel(
             tag_table,
             title=f"[bold yellow]Tagging Compliance[/bold yellow]  [dim]{tag_count} resource{'s' if tag_count != 1 else ''} untagged[/dim]",
@@ -506,7 +592,10 @@ def shell():
                 "You MUST execute live AWS operations yourself using tools — never ask the user "
                 "to run commands manually.\n"
                 "Before calling any tool, output a concise explanation of what you are about to "
-                "do and why. This is shown to the user before they approve."
+                "do and why. This is shown to the user before they approve.\n"
+                "When the user asks for an analysis or inventory of their AWS environment, "
+                "first call tool_get_enabled_regions to discover all active regions, then run "
+                "the relevant inventory and scan tools for each region to give complete coverage."
             )
         )
         config = {"configurable": {"thread_id": "main"}}
