@@ -68,11 +68,13 @@ from .tools.inventory import (
     get_lambda_inventory as _get_lambda_inventory,
 )
 from .tools.cost_anomaly import detect_cost_anomalies as _detect_cost_anomalies
+from .tools.cost_scan import run_cost_scan as _run_cost_scan
 from .tools.tagging import check_tagging_compliance as _check_tagging_compliance
 from .tools.iam_scan import detect_overpermissive_iam as _detect_overpermissive_iam
 from .tools.cloudwatch_scan import detect_cloudwatch_gaps as _detect_cloudwatch_gaps
 from .tools.multi_region import get_enabled_regions as _get_enabled_regions
 from .tools.ri_sp_coverage import get_ri_sp_coverage as _get_ri_sp_coverage
+from .tools.security_scan import run_security_scan as _run_security_scan
 
 
 @tool
@@ -171,6 +173,40 @@ def tool_detect_cost_anomalies(threshold_pct: float = 50.0) -> str:
     return json.dumps(_detect_cost_anomalies(threshold_pct=threshold_pct))
 
 
+@tool
+def tool_run_security_scan(region: str = "", include_global: bool = True) -> str:
+    """
+    Run a comprehensive security scan against the current AWS account.
+    Checks: root MFA, open security groups (SSH/RDP), IAM access key age,
+    publicly accessible RDS instances, S3 Block Public Access, and CloudTrail logging.
+
+    Pass a region name to target a specific region; leave empty for the default region.
+    Set include_global=False when calling in a loop over multiple regions to avoid
+    duplicate account-wide findings (root MFA, IAM key age, S3).
+
+    Returns a list of findings, each with severity (HIGH/MEDIUM), resource, and finding.
+    """
+    r = region or None
+    s3s = _get_s3_inventory() if include_global else []
+    rdss = _get_rds_inventory(region=r)
+    return json.dumps(
+        _run_security_scan(s3s=s3s, rdss=rdss, region=r, include_global=include_global)
+    )
+
+
+@tool
+def tool_run_cost_scan(region: str = "") -> str:
+    """
+    Scan for cost waste in the AWS account.
+    Checks: unattached EBS volumes, stopped EC2 instances (still paying for EBS),
+    EBS snapshots older than 90 days, and unassociated Elastic IPs (~$0.005/hr each).
+
+    Pass a region name to target a specific region; leave empty for the default region.
+    Returns a list of findings with resource ID, description, and remediation hints.
+    """
+    return json.dumps(_run_cost_scan(region=region or None))
+
+
 tools = [
     tool_read_file,
     tool_write_file,
@@ -186,9 +222,11 @@ tools = [
     tool_get_lambda_inventory,
     tool_get_ri_sp_coverage,
     tool_detect_cost_anomalies,
+    tool_run_cost_scan,
     tool_check_tagging_compliance,
     tool_detect_overpermissive_iam,
     tool_detect_cloudwatch_gaps,
+    tool_run_security_scan,
 ]
 
 llm_with_tools = llm.bind_tools(tools)
@@ -257,9 +295,11 @@ SAFE_TOOLS = {
     "tool_get_lambda_inventory",
     "tool_get_ri_sp_coverage",
     "tool_detect_cost_anomalies",
+    "tool_run_cost_scan",
     "tool_check_tagging_compliance",
     "tool_detect_overpermissive_iam",
     "tool_detect_cloudwatch_gaps",
+    "tool_run_security_scan",
 }
 
 
