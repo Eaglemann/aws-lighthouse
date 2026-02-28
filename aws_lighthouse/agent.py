@@ -1,5 +1,6 @@
 # ruff: noqa: E402
 import json
+import os
 from typing import TypedDict, Annotated, Sequence
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_ollama import ChatOllama
@@ -20,8 +21,10 @@ class AgentState(TypedDict):
 
 
 # 2. LLM Initialization
-# Using the model strictly defined by the user for complex orchestration
-llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=0)
+# OLLAMA_HOST lets you point to a remote or Docker-networked Ollama instance.
+# Defaults to the standard local address.
+_OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=0, base_url=_OLLAMA_HOST)
 
 
 # 3. Tool Binding
