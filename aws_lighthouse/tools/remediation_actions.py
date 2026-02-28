@@ -44,3 +44,61 @@ def release_eip(allocation_id: str) -> bool:
     except Exception as e:
         logger.error(f"Failed to release Elastic IP {allocation_id}: {e}")
         return False
+
+
+def enable_guardduty(resource: str) -> bool:
+    """Enable GuardDuty: create a new detector or re-enable an existing one."""
+    try:
+        gd = get_aws_client("guardduty")
+        if resource == "guardduty":
+            gd.create_detector(Enable=True)
+        else:
+            gd.update_detector(DetectorId=resource, Enable=True)
+        return True
+    except Exception as e:
+        logger.error(f"Failed to enable GuardDuty ({resource}): {e}")
+        return False
+
+
+def enable_cloudtrail_logging(trail_name: str) -> bool:
+    """Start logging on an existing CloudTrail trail that has logging stopped."""
+    try:
+        ct = get_aws_client("cloudtrail")
+        ct.start_logging(Name=trail_name)
+        return True
+    except Exception as e:
+        logger.error(f"Failed to start CloudTrail logging for {trail_name}: {e}")
+        return False
+
+
+def enforce_imdsv2(instance_id: str) -> bool:
+    """Set HttpTokens=required on an EC2 instance to enforce IMDSv2."""
+    try:
+        ec2 = get_aws_client("ec2")
+        ec2.modify_instance_metadata_options(
+            InstanceId=instance_id,
+            HttpTokens="required",
+            HttpEndpoint="enabled",
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Failed to enforce IMDSv2 on {instance_id}: {e}")
+        return False
+
+
+def apply_s3_default_encryption(bucket_name: str) -> bool:
+    """Apply AES256 default server-side encryption to an S3 bucket."""
+    try:
+        s3 = get_aws_client("s3")
+        s3.put_bucket_encryption(
+            Bucket=bucket_name,
+            ServerSideEncryptionConfiguration={
+                "Rules": [
+                    {"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}
+                ]
+            },
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Failed to apply default encryption to {bucket_name}: {e}")
+        return False

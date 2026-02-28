@@ -615,7 +615,11 @@ def analyze(
     if remediable:
         from .tools.remediation_actions import (
             apply_s3_block_public_access,
+            apply_s3_default_encryption,
             delete_ebs_volume,
+            enable_cloudtrail_logging,
+            enable_guardduty,
+            enforce_imdsv2,
             release_eip,
         )
 
@@ -623,6 +627,10 @@ def analyze(
             "s3_block_public_access": apply_s3_block_public_access,
             "delete_ebs_volume": delete_ebs_volume,
             "release_eip": release_eip,
+            "enable_guardduty": enable_guardduty,
+            "enable_cloudtrail_logging": enable_cloudtrail_logging,
+            "enforce_imdsv2": enforce_imdsv2,
+            "s3_default_encryption": apply_s3_default_encryption,
         }
 
         rem_table = Table(

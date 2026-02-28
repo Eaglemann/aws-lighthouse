@@ -211,6 +211,8 @@ def _check_s3_encryption(s3s: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                             "severity": "MEDIUM",
                             "resource": name,
                             "finding": "S3 bucket has no default server-side encryption rule",
+                            "remediation_type": "s3_default_encryption",
+                            "remediation_label": "Enable S3 Default Encryption",
                         }
                     )
     except Exception as e:
@@ -243,6 +245,8 @@ def _check_imdsv2(ec2) -> List[Dict[str, Any]]:
                                 f"Instance '{name}' allows IMDSv1 (HttpTokens=optional)"
                                 " — vulnerable to SSRF credential theft"
                             ),
+                            "remediation_type": "enforce_imdsv2",
+                            "remediation_label": "Enforce IMDSv2",
                         }
                     )
     except Exception as e:
@@ -292,6 +296,8 @@ def _check_cloudtrail(ct) -> List[Dict[str, Any]]:
                         "severity": "HIGH",
                         "resource": trail.get("Name"),
                         "finding": "CloudTrail trail exists but is not actively logging",
+                        "remediation_type": "enable_cloudtrail_logging",
+                        "remediation_label": "Start CloudTrail Logging",
                     }
                 )
     except Exception as e:
@@ -309,6 +315,8 @@ def _check_guardduty_enabled(gd) -> List[Dict[str, Any]]:
                     "severity": "HIGH",
                     "resource": "guardduty",
                     "finding": "GuardDuty is not enabled in this region",
+                    "remediation_type": "enable_guardduty",
+                    "remediation_label": "Enable GuardDuty",
                 }
             ]
         for detector_id in detector_ids:
@@ -319,6 +327,8 @@ def _check_guardduty_enabled(gd) -> List[Dict[str, Any]]:
                         "severity": "HIGH",
                         "resource": detector_id,
                         "finding": "GuardDuty detector exists but is not enabled",
+                        "remediation_type": "enable_guardduty",
+                        "remediation_label": "Enable GuardDuty",
                     }
                 ]
     except Exception as e:
