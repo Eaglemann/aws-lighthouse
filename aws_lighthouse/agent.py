@@ -124,16 +124,21 @@ def approval_node(state: AgentState):
     return None  # Proceed down the state graph
 
 
+SAFE_TOOLS = {"tool_read_file", "parse_terraform_context"}
+
+
 def should_require_approval(state: AgentState) -> str:
     """Routing logic to intercept dangerous tools before they hit ToolNode."""
     last_message = state["messages"][-1]
-    # If no tools called, we end.
     if not last_message.tool_calls:
         return "end"
 
-    # Example logic: We require approval for writing files or executing bash
-    # For safe tools like reading files, maybe we skip, but for now we approve everything
-    return "approval"
+    # Only require approval if at least one called tool is destructive
+    for tc in last_message.tool_calls:
+        if tc["name"] not in SAFE_TOOLS:
+            return "approval"
+
+    return "tools"
 
 
 def create_agent_graph() -> StateGraph:
@@ -146,9 +151,9 @@ def create_agent_graph() -> StateGraph:
 
     workflow.set_entry_point("agent")
 
-    # After the agent thinks, it either ends or goes to approval
+    # After the agent thinks, it either ends, goes to approval, or runs safe tools directly
     workflow.add_conditional_edges(
-        "agent", should_require_approval, {"end": END, "approval": "approval"}
+        "agent", should_require_approval, {"end": END, "approval": "approval", "tools": "tools"}
     )
 
     # After approval, we execute tools
