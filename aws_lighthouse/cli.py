@@ -104,9 +104,29 @@ def analyze(
             color = "red" if pct_change > 0 else "green"
             trend_msg = f"Cost changed by [{color}]{pct_change:+.1f}%[/{color}] since last scan on {prev_snapshot['recorded_at']}."
 
+    # Security Findings
+    public_rds = [
+        db for db in rdss
+        if "error" not in db and db.get("PubliclyAccessible")
+    ]
+    sec_table = Table(title="Security Findings")
+    sec_table.add_column("Severity", style="red")
+    sec_table.add_column("Resource", style="cyan")
+    sec_table.add_column("Finding")
+    for db in public_rds:
+        sec_table.add_row(
+            "HIGH",
+            db["DBInstanceIdentifier"],
+            f"RDS instance is publicly accessible (engine: {db['Engine']}, class: {db['Class']})",
+        )
+    if not public_rds:
+        sec_table.add_row("[green]OK[/green]", "-", "No publicly accessible RDS instances found.")
+
     logger.console.print()
     logger.console.print(Columns([inv_table, cost_table]))
     logger.console.print(f"\n[bold]Trend:[/bold] {trend_msg}")
+    logger.console.print()
+    logger.console.print(sec_table)
 
     # CUR Upsell
     if not cur_bucket_exists:
