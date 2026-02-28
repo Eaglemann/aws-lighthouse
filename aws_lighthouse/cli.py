@@ -18,6 +18,7 @@ def analyze(
     from .db import db_manager
     from .tools.inventory import get_ec2_inventory, get_rds_inventory, get_s3_inventory
     from .tools.cost import get_monthly_cost_summary
+    from .tools.security_scan import run_security_scan
     from rich.table import Table
     from rich.columns import Columns
     from rich.panel import Panel
@@ -49,6 +50,12 @@ def analyze(
         f"[cyan]Aggregating Costs for the last {days} days...[/cyan]", spinner="dots"
     ):
         costs = get_monthly_cost_summary(days=days)
+
+    # 3b. Security Scan
+    with logger.console.status(
+        "[cyan]Running security posture checks...[/cyan]", spinner="dots"
+    ):
+        sec_findings = run_security_scan(s3s=s3s, rdss=rdss)
 
     # 4. Capture previous snapshot before saving the new one, then save
     prev_snapshot = db_manager.get_latest_cost_snapshot(account_id)
@@ -105,22 +112,15 @@ def analyze(
             trend_msg = f"Cost changed by [{color}]{pct_change:+.1f}%[/{color}] since last scan on {prev_snapshot['recorded_at']}."
 
     # Security Findings
-    public_rds = [
-        db for db in rdss
-        if "error" not in db and db.get("PubliclyAccessible")
-    ]
     sec_table = Table(title="Security Findings")
     sec_table.add_column("Severity", style="red")
     sec_table.add_column("Resource", style="cyan")
     sec_table.add_column("Finding")
-    for db in public_rds:
-        sec_table.add_row(
-            "HIGH",
-            db["DBInstanceIdentifier"],
-            f"RDS instance is publicly accessible (engine: {db['Engine']}, class: {db['Class']})",
-        )
-    if not public_rds:
-        sec_table.add_row("[green]OK[/green]", "-", "No publicly accessible RDS instances found.")
+    if sec_findings:
+        for f in sec_findings:
+            sec_table.add_row(f["severity"], f["resource"], f["finding"])
+    else:
+        sec_table.add_row("[green]OK[/green]", "-", "No security findings detected.")
 
     logger.console.print()
     logger.console.print(Columns([inv_table, cost_table]))
@@ -153,7 +153,6 @@ def analyze(
             cust_id = typer.prompt("1. Lighthouse customer resource ID (e.g. cust-abc123)")
             ext_id = typer.prompt("2. External ID for trust relationship")
             
-            # Hardcoded parameters required by user
             s3_bucket = f"cur-data-lighthouse-{uuid.uuid4().hex[:8]}"
             sub_url = "NONE (Not required for now)"
             
