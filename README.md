@@ -173,16 +173,21 @@ Coverage and utilization are colour-coded: ≥80% green, 60–80% yellow, <60% r
 
 ### Security
 
-Six checks run across every enabled region:
+Eleven checks run across every enabled region:
 
 | Check | Severity | Scope |
 |---|---|---|
 | Root account MFA | HIGH | Global |
-| Open security groups (SSH/RDP from 0.0.0.0/0 or ::/0) | HIGH | Regional |
+| IAM users with console access but no MFA | HIGH | Global |
 | IAM access keys older than 90 days | MEDIUM | Global |
+| Open security groups (SSH/RDP from 0.0.0.0/0 or ::/0) | HIGH | Regional |
 | RDS instances with Public Accessibility enabled | HIGH | Regional |
 | S3 buckets missing Block Public Access | HIGH | Global |
+| S3 buckets missing default server-side encryption | MEDIUM | Global |
+| EC2 instances allowing IMDSv2 metadata service bypass | MEDIUM | Regional |
+| EBS volumes not encrypted at rest | MEDIUM | Regional |
 | CloudTrail not configured or not logging | HIGH | Regional |
+| GuardDuty not enabled or disabled | HIGH | Regional |
 
 ### IAM Over-Permissive Policies
 
@@ -227,9 +232,13 @@ After all panels, Lighthouse presents a numbered list of findings that can be fi
 
 | Action | Triggered by |
 |---|---|
-| Enable S3 Block Public Access | S3 security finding |
-| Delete EBS Volume | Unattached EBS finding |
-| Release Elastic IP | Unassociated EIP finding |
+| Enable S3 Block Public Access | S3 missing Block Public Access finding |
+| Enable S3 Default Encryption | S3 missing default encryption finding |
+| Enable GuardDuty | GuardDuty not enabled / disabled finding |
+| Start CloudTrail Logging | CloudTrail trail not logging finding |
+| Enforce IMDSv2 | EC2 instance allowing IMDSv1 finding |
+| Delete EBS Volume | Unattached EBS cost-waste finding |
+| Release Elastic IP | Unassociated EIP cost-waste finding |
 
 Each fix requires individual confirmation before it calls the AWS API.
 
