@@ -31,8 +31,15 @@ packages = ["aws_lighthouse"]
 dev = [
     "mypy>=1.19.1",
     "pytest>=9.0.2",
+    "pytest-cov>=6.0.0",
+    "pytest-timeout>=2.3.1",
     "ruff>=0.15.2",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 30
+addopts = "--cov=aws_lighthouse --cov-fail-under=70"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "B", "S", "UP", "I"]
