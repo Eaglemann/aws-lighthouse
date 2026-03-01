@@ -1,9 +1,10 @@
 import asyncio
-from typing import List
+
 from langchain_core.tools import BaseTool
+from langchain_mcp_adapters.tools import load_mcp_tools
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from langchain_mcp_adapters.tools import load_mcp_tools
+
 from ..logger import logger
 
 
@@ -14,9 +15,9 @@ class AWSMCPManager:
         self._server_params = StdioServerParameters(
             command="npx", args=["-y", "@aws-mcp/server"], env=None
         )
-        self.tools: List[BaseTool] = []
+        self.tools: list[BaseTool] = []
 
-    async def initialize_tools(self) -> List[BaseTool]:
+    async def initialize_tools(self) -> list[BaseTool]:
         """Spins up the MCP server and extracts Langchain-compatible tools."""
         if self.tools:
             return self.tools
@@ -42,7 +43,7 @@ class AWSMCPManager:
 mcp_manager = AWSMCPManager()
 
 
-def get_mcp_tools() -> List[BaseTool]:
+def get_mcp_tools() -> list[BaseTool]:
     """Sync wrapper to fetch the MCP tools."""
     # This assumes we are in a running event loop, or we can use asyncio.run
     try:

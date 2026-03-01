@@ -21,9 +21,9 @@ services:
       - OLLAMA_HOST=http://ollama:11434
     volumes:
       # Host AWS credentials (read-only) — supports profiles and SSO.
-      - ~/.aws:/root/.aws:ro
+      - ~/.aws:/home/lighthouse/.aws:ro
       # Persist cost-trend SQLite database across container restarts.
-      - lighthouse-data:/root/.aws-lighthouse
+      - lighthouse-data:/home/lighthouse/.aws-lighthouse
     depends_on:
       ollama:
         condition: service_healthy

@@ -1,10 +1,11 @@
 from datetime import datetime, timedelta
-from typing import Dict, Any
+from typing import Any
+
 from ..auth import get_aws_client
 from ..logger import logger
 
 
-def get_monthly_cost_summary(days: int = 14) -> Dict[str, Any]:
+def get_monthly_cost_summary(days: int = 14) -> dict[str, Any]:
     """Retrieve AWS Unblended costs for the past N days, grouped by service."""
     ce = get_aws_client("ce")
     str_end = datetime.today().strftime("%Y-%m-%d")
@@ -19,7 +20,7 @@ def get_monthly_cost_summary(days: int = 14) -> Dict[str, Any]:
             GroupBy=[{"Type": "DIMENSION", "Key": "SERVICE"}],
         )
 
-        service_costs: Dict[str, float] = {}
+        service_costs: dict[str, float] = {}
         total_cost = 0.0
 
         # Aggregate the daily results

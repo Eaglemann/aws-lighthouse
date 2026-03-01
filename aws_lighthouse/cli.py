@@ -1,8 +1,11 @@
-import typer
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+
+import typer
 from rich import box
 from rich.align import Align
 from rich.columns import Columns
+from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt
@@ -10,7 +13,25 @@ from rich.rule import Rule
 from rich.table import Table
 from rich.text import Text
 
+from .auth import get_aws_session
+from .db import db_manager
 from .logger import logger
+from .tools.cloudwatch_scan import detect_cloudwatch_gaps
+from .tools.cost import get_monthly_cost_summary
+from .tools.cost_anomaly import detect_cost_anomalies
+from .tools.cost_scan import run_cost_scan
+from .tools.iam_scan import detect_overpermissive_iam
+from .tools.inventory import (
+    get_ec2_inventory,
+    get_lambda_inventory,
+    get_rds_inventory,
+    get_s3_inventory,
+)
+from .tools.multi_region import get_enabled_regions
+from .tools.ri_sp_coverage import get_ri_sp_coverage
+from .tools.security_scan import run_security_scan
+from .tools.tagging import check_tagging_compliance
+from .types import CostFinding, SecurityFinding
 
 app = typer.Typer(
     help="AWS Lighthouse: Terminal-first FinOps, Security, and Scaffolding Agent.",
@@ -20,11 +41,14 @@ app = typer.Typer(
 
 
 @app.callback()
-def main(ctx: typer.Context):
+def main(ctx: typer.Context) -> None:
     """AWS Lighthouse: Terminal-first FinOps, Security, and Scaffolding Agent."""
     if ctx.invoked_subcommand is None:
         shell()
 
+
+# Max parallel region workers — balances throughput against boto3 connection pool
+_MAX_WORKERS = 5
 
 # ── Severity colour map ──────────────────────────────────────────────────────
 _SEV_STYLE = {"HIGH": "bold red", "MEDIUM": "bold yellow", "LOW": "bold blue"}
@@ -34,112 +58,65 @@ def _severity_text(sev: str) -> Text:
     return Text(sev, style=_SEV_STYLE.get(sev, "white"))
 
 
+def _count(lst: list) -> str:
+    """Return count string, or '[red]Error[/red]' if list is empty/errored."""
+    return str(len(lst)) if lst and "error" not in lst[0] else "[red]Error[/red]"
+
+
+def _pct_style(val: float | None, low: float = 60.0, high: float = 80.0) -> str:
+    """Return a colored percentage string based on thresholds."""
+    if val is None:
+        return "[dim]N/A[/dim]"
+    color = "green" if val >= high else ("yellow" if val >= low else "red")
+    return f"[{color}]{val:.1f}%[/{color}]"
+
+
+def _dollar(val: float | None) -> str:
+    return f"${val:,.2f}" if val is not None else "[dim]N/A[/dim]"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# analyze command
+# Section functions
 # ─────────────────────────────────────────────────────────────────────────────
-@app.command()
-def analyze(
-    days: int = typer.Option(
-        14, "--days", "-d", help="Days of cost history to analyze"
-    ),
-    region: str | None = typer.Option(
-        None,
-        "--region",
-        "-r",
-        help="Scan a single region (default: all enabled regions)",
-    ),
-):
-    """Retrieve read-only state (inventory, cost, security) and render a dashboard."""
-    from .auth import get_aws_session
-    from .db import db_manager
-    from .tools.inventory import (
-        get_ec2_inventory,
-        get_rds_inventory,
-        get_s3_inventory,
-        get_lambda_inventory,
-    )
-    from .tools.cost import get_monthly_cost_summary
-    from .tools.security_scan import run_security_scan
-    from .tools.cost_scan import run_cost_scan
-    from .tools.cost_anomaly import detect_cost_anomalies
-    from .tools.tagging import check_tagging_compliance
-    from .tools.iam_scan import detect_overpermissive_iam
-    from .tools.cloudwatch_scan import detect_cloudwatch_gaps
-    from .tools.ri_sp_coverage import get_ri_sp_coverage
 
-    c = logger.console
 
-    # ── Header ───────────────────────────────────────────────────────────────
-    c.print()
-    c.print(Rule("[bold cyan]AWS LIGHTHOUSE[/bold cyan]", style="cyan"))
-    c.print()
-
-    # ── 1. Auth ──────────────────────────────────────────────────────────────
-    with c.status("[cyan]Authenticating...[/cyan]", spinner="dots"):
-        session = get_aws_session()
-        sts = session.client("sts")
-        account_id = sts.get_caller_identity()["Account"]
-
-    c.print(
-        f"  [dim]Account[/dim]  [bold]{account_id}[/bold]  "
-        f"[dim]·  Scanned[/dim]  {datetime.now().strftime('%Y-%m-%d  %H:%M')}"
-    )
-    c.print()
-
-    # ── 2. Regions ───────────────────────────────────────────────────────────
-    from .tools.multi_region import get_enabled_regions
-
-    if region:
-        regions: list[str | None] = [region]
-        c.print(f"  [dim]Region[/dim]  [bold]{region}[/bold]")
-        c.print()
-    else:
-        with c.status("[cyan]Detecting enabled regions...[/cyan]", spinner="dots"):
-            regions = list(get_enabled_regions())
-        if not regions:
-            regions = [None]  # fallback: scan default region only
-
-    multi_region = len(regions) > 1
-    if multi_region:
-        c.print(
-            f"  [dim]Scanning [bold]{len(regions)}[/bold] regions:[/dim] "
-            + ", ".join(r for r in regions if r)
-        )
-        c.print()
-
-    # ── 3. Inventory ─────────────────────────────────────────────────────────
+def _section_inventory(
+    c: Console,
+    regions: list[str | None],
+    multi_region: bool,
+) -> tuple[Table, list, list, list, list, bool]:
+    """Fetch inventory across all regions; return data for downstream sections."""
     s3s: list = []
     ec2s: list = []
     rdss: list = []
     lambdas: list = []
 
-    with c.status("[cyan]Scanning S3...[/cyan]", spinner="dots") as status:
-        s3s = get_s3_inventory()  # always global
-        for region in regions:
-            label = region or "default region"
-            status.update(f"[cyan]Scanning {label}...[/cyan]")
-            _ec2 = get_ec2_inventory(region=region)
-            _rds = get_rds_inventory(region=region)
-            _lmb = get_lambda_inventory(region=region)
-            if multi_region:
-                for item in _ec2:
-                    item["region"] = region
-                for item in _rds:
-                    item["region"] = region
-                for item in _lmb:
-                    item["region"] = region
-            ec2s.extend(_ec2)
-            rdss.extend(_rds)
-            lambdas.extend(_lmb)
+    def _inv_region(reg: str | None) -> tuple[list, list, list]:
+        _ec2 = get_ec2_inventory(region=reg)
+        _rds = get_rds_inventory(region=reg)
+        _lmb = get_lambda_inventory(region=reg)
+        if multi_region and reg is not None:
+            for item in _ec2:
+                item["region"] = reg
+            for item in _rds:
+                item["region"] = reg
+            for item in _lmb:
+                item["region"] = reg
+        return _ec2, _rds, _lmb
+
+    with c.status("[cyan]Scanning inventory...[/cyan]", spinner="dots"):
+        s3s = get_s3_inventory()
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+            for _ec2, _rds, _lmb in pool.map(_inv_region, regions):
+                ec2s.extend(_ec2)
+                rdss.extend(_rds)
+                lambdas.extend(_lmb)
 
     cur_bucket_exists = False
     if s3s and "error" not in s3s[0]:
         cur_bucket_exists = any(
             b.get("BucketName", "").startswith("cur-data-lighthouse-") for b in s3s
         )
-
-    def _count(lst):
-        return str(len(lst)) if lst and "error" not in lst[0] else "[red]Error[/red]"
 
     inv_table = Table(
         box=box.SIMPLE_HEAD, show_header=False, padding=(0, 1), show_edge=False
@@ -151,7 +128,18 @@ def analyze(
     inv_table.add_row("S3 Buckets", _count(s3s))
     inv_table.add_row("Lambda Functions", _count(lambdas))
 
-    # ── 3. Costs ─────────────────────────────────────────────────────────────
+    return inv_table, s3s, ec2s, rdss, lambdas, cur_bucket_exists
+
+
+def _section_cost_columns(
+    c: Console,
+    inv_table: Table,
+    days: int,
+    account_id: str,
+    regions: list[str | None],
+    multi_region: bool,
+) -> dict:
+    """Fetch costs, build trend, and render inventory + cost side-by-side."""
     with c.status(f"[cyan]Fetching costs ({days}d)...[/cyan]", spinner="dots"):
         costs = get_monthly_cost_summary(days=days)
 
@@ -170,7 +158,6 @@ def analyze(
     else:
         cost_table.add_row("Error", costs["error"])
 
-    # ── 4. Trend ─────────────────────────────────────────────────────────────
     prev_snapshot = db_manager.get_latest_cost_snapshot(account_id)
     if "error" not in costs:
         db_manager.record_cost_snapshot(
@@ -194,7 +181,6 @@ def analyze(
             )
 
     period_label = costs.get("period", "—") if "error" not in costs else "—"
-
     inv_region_note = f"  [dim]· {len(regions)} regions[/dim]" if multi_region else ""
     c.print(
         Columns(
@@ -215,13 +201,15 @@ def analyze(
         )
     )
     c.print()
+    return costs
 
-    # ── 5. Cost anomaly detection ─────────────────────────────────────────────
+
+def _section_cost_anomalies(c: Console) -> None:
+    """Detect and render cost anomaly panel."""
     with c.status("[cyan]Detecting cost anomalies...[/cyan]", spinner="dots"):
         anomalies = detect_cost_anomalies(threshold_pct=50.0)
 
-    valid_anomalies = anomalies
-    if valid_anomalies:
+    if anomalies:
         anomaly_table = Table(
             box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False
         )
@@ -229,7 +217,7 @@ def analyze(
         anomaly_table.add_column("Baseline 7d", justify="right", style="dim")
         anomaly_table.add_column("Recent 7d", justify="right")
         anomaly_table.add_column("Change", justify="right")
-        for a in valid_anomalies:
+        for a in anomalies:
             anomaly_table.add_row(
                 a["service"],
                 f"${a['baseline_7d']:,.2f}",
@@ -239,7 +227,7 @@ def analyze(
         c.print(
             Panel(
                 anomaly_table,
-                title=f"[bold red]Cost Anomalies[/bold red]  [dim]{len(valid_anomalies)} spike{'s' if len(valid_anomalies) != 1 else ''} vs prior 7d[/dim]",
+                title=f"[bold red]Cost Anomalies[/bold red]  [dim]{len(anomalies)} spike{'s' if len(anomalies) != 1 else ''} vs prior 7d[/dim]",
                 border_style="red",
                 padding=(0, 1),
             )
@@ -253,30 +241,20 @@ def analyze(
                 padding=(0, 1),
             )
         )
-
     c.print()
 
-    # ── 5b. RI / Savings Plan coverage ───────────────────────────────────────
+
+def _section_ri_sp_coverage(c: Console, days: int) -> None:
+    """Fetch and render RI / Savings Plan coverage panel."""
     with c.status(
         "[cyan]Checking RI / Savings Plan coverage...[/cyan]", spinner="dots"
     ):
         ri_sp = get_ri_sp_coverage(days=days)
 
-    def _pct_style(val: float | None, low: float = 60.0, high: float = 80.0) -> str:
-        """Return a colored percentage string based on thresholds."""
-        if val is None:
-            return "[dim]N/A[/dim]"
-        color = "green" if val >= high else ("yellow" if val >= low else "red")
-        return f"[{color}]{val:.1f}%[/{color}]"
-
-    def _dollar(val: float | None) -> str:
-        return f"${val:,.2f}" if val is not None else "[dim]N/A[/dim]"
-
     ri_cov = ri_sp.get("ri_coverage_pct")
     ri_util = ri_sp.get("ri_utilization_pct")
     sp_cov = ri_sp.get("sp_coverage_pct")
     sp_util = ri_sp.get("sp_utilization_pct")
-
     has_any = any(v and v > 0 for v in [ri_cov, ri_util, sp_cov, sp_util])
 
     ri_sp_table = Table(
@@ -320,23 +298,34 @@ def analyze(
     )
     c.print()
 
-    # ── 6. Security scan ─────────────────────────────────────────────────────
-    sec_findings = []
-    with c.status("[cyan]Running security checks...[/cyan]", spinner="dots") as status:
-        for i, region in enumerate(regions):
-            if multi_region:
-                status.update(f"[cyan]Security checks — {region}...[/cyan]")
-            # Global checks (root MFA, IAM key age, S3) only on the first pass
-            _rdss_r = (
-                [r for r in rdss if r.get("region") == region] if multi_region else rdss
-            )
-            _sec = run_security_scan(
-                s3s=s3s, rdss=_rdss_r, region=region, include_global=(i == 0)
-            )
-            if multi_region:
-                for f in _sec:
-                    f.setdefault("region", region)
-            sec_findings.extend(_sec)
+
+def _section_security(
+    c: Console,
+    s3s: list,
+    rdss: list,
+    regions: list[str | None],
+    multi_region: bool,
+) -> list[SecurityFinding]:
+    """Run security scan across all regions and render findings panel."""
+    sec_findings: list[SecurityFinding] = []
+
+    def _sec_region(args: tuple[str | None, bool]) -> list[SecurityFinding]:
+        reg, include_global = args
+        _rdss_r = [r for r in rdss if r.get("region") == reg] if multi_region else rdss
+        _sec = run_security_scan(
+            s3s=s3s, rdss=_rdss_r, region=reg, include_global=include_global
+        )
+        if multi_region and reg is not None:
+            for f in _sec:
+                if "region" not in f:
+                    f["region"] = reg
+        return _sec
+
+    region_args = [(reg, i == 0) for i, reg in enumerate(regions)]
+    with c.status("[cyan]Running security checks...[/cyan]", spinner="dots"):
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+            for items in pool.map(_sec_region, region_args):
+                sec_findings.extend(items)
 
     sec_count = len(sec_findings)
     if sec_count:
@@ -371,10 +360,12 @@ def analyze(
                 padding=(0, 1),
             )
         )
-
     c.print()
+    return sec_findings
 
-    # ── 6b. IAM over-permissive scan ──────────────────────────────────────────
+
+def _section_iam(c: Console) -> None:
+    """Scan for over-permissive IAM policies and render findings panel."""
     with c.status("[cyan]Scanning IAM policies...[/cyan]", spinner="dots"):
         iam_findings = detect_overpermissive_iam()
 
@@ -414,22 +405,28 @@ def analyze(
                 padding=(0, 1),
             )
         )
-
     c.print()
 
-    # ── 6c. CloudWatch alarm gaps ─────────────────────────────────────────────
-    cw_findings = []
-    with c.status(
-        "[cyan]Checking CloudWatch alarm coverage...[/cyan]", spinner="dots"
-    ) as status:
-        for region in regions:
-            if multi_region:
-                status.update(f"[cyan]CloudWatch alarm coverage — {region}...[/cyan]")
-            _cw = detect_cloudwatch_gaps(region=region)
-            if multi_region:
-                for f in _cw:
-                    f["region"] = region
-            cw_findings.extend(_cw)
+
+def _section_cloudwatch(
+    c: Console,
+    regions: list[str | None],
+    multi_region: bool,
+) -> None:
+    """Check CloudWatch alarm coverage across all regions and render panel."""
+    cw_findings: list = []
+
+    def _cw_region(reg: str | None) -> list:
+        _cw = detect_cloudwatch_gaps(region=reg)
+        if multi_region and reg is not None:
+            for f in _cw:
+                f["region"] = reg
+        return _cw
+
+    with c.status("[cyan]Checking CloudWatch alarm coverage...[/cyan]", spinner="dots"):
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+            for items in pool.map(_cw_region, regions):
+                cw_findings.extend(items)
 
     cw_count = len(cw_findings)
     if cw_count:
@@ -442,7 +439,7 @@ def analyze(
         cw_table.add_column("Resource", style="cyan", no_wrap=True)
         cw_table.add_column("Missing Alarms")
         for f in cw_findings:
-            row = [f["resource_type"]]
+            row: list[str] = [f["resource_type"]]
             if multi_region:
                 row.append(f.get("region", ""))
             row += [
@@ -467,20 +464,28 @@ def analyze(
                 padding=(0, 1),
             )
         )
-
     c.print()
 
-    # ── 7. Cost waste scan ───────────────────────────────────────────────────
-    cost_findings = []
-    with c.status("[cyan]Scanning for cost waste...[/cyan]", spinner="dots") as status:
-        for region in regions:
-            if multi_region:
-                status.update(f"[cyan]Cost waste scan — {region}...[/cyan]")
-            _cost = run_cost_scan(region=region)
-            if multi_region:
-                for f in _cost:
-                    f["region"] = region
-            cost_findings.extend(_cost)
+
+def _section_cost_waste(
+    c: Console,
+    regions: list[str | None],
+    multi_region: bool,
+) -> list[CostFinding]:
+    """Scan for cost waste across all regions and render findings panel."""
+    cost_findings: list[CostFinding] = []
+
+    def _cost_region(reg: str | None) -> list[CostFinding]:
+        _cost = run_cost_scan(region=reg)
+        if multi_region and reg is not None:
+            for f in _cost:
+                f["region"] = reg
+        return _cost
+
+    with c.status("[cyan]Scanning for cost waste...[/cyan]", spinner="dots"):
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+            for items in pool.map(_cost_region, regions):
+                cost_findings.extend(items)
 
     waste_count = len(cost_findings)
     if waste_count:
@@ -492,7 +497,7 @@ def analyze(
         waste_table.add_column("Resource", style="cyan", no_wrap=True)
         waste_table.add_column("Finding")
         for f in cost_findings:
-            row = []
+            row: list[str] = []
             if multi_region:
                 row.append(f.get("region", ""))
             row += [f["resource"], f["finding"]]
@@ -514,20 +519,32 @@ def analyze(
                 padding=(0, 1),
             )
         )
-
     c.print()
+    return cost_findings
 
-    # ── 7. Tagging compliance ─────────────────────────────────────────────────
-    tag_findings = []
-    with c.status("[cyan]Checking tag compliance...[/cyan]", spinner="dots") as status:
-        for i, region in enumerate(regions):
-            if multi_region:
-                status.update(f"[cyan]Tag compliance — {region}...[/cyan]")
-            _tag = check_tagging_compliance(region=region, include_s3=(i == 0))
-            if multi_region:
-                for f in _tag:
-                    f.setdefault("region", region)
-            tag_findings.extend(_tag)
+
+def _section_tagging(
+    c: Console,
+    regions: list[str | None],
+    multi_region: bool,
+) -> None:
+    """Check tagging compliance across all regions and render panel."""
+    tag_findings: list = []
+
+    def _tag_region(args: tuple[str | None, bool]) -> list:
+        reg, include_s3 = args
+        _tag = check_tagging_compliance(region=reg, include_s3=include_s3)
+        if multi_region and reg is not None:
+            for f in _tag:
+                if "region" not in f:
+                    f["region"] = reg
+        return _tag
+
+    tag_args = [(reg, i == 0) for i, reg in enumerate(regions)]
+    with c.status("[cyan]Checking tag compliance...[/cyan]", spinner="dots"):
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+            for items in pool.map(_tag_region, tag_args):
+                tag_findings.extend(items)
 
     tag_count = len(tag_findings)
     if tag_count:
@@ -540,7 +557,7 @@ def analyze(
         tag_table.add_column("Resource", style="cyan", no_wrap=True)
         tag_table.add_column("Missing Tags")
         for f in tag_findings:
-            row = [f["resource_type"]]
+            row: list[str] = [f["resource_type"]]
             if multi_region:
                 row.append(f.get("region", "global"))
             row += [
@@ -565,173 +582,253 @@ def analyze(
                 padding=(0, 1),
             )
         )
-
     c.print()
 
-    # ── 8. Lambda detail ─────────────────────────────────────────────────────
+
+def _section_lambda_detail(c: Console, lambdas: list) -> None:
+    """Render Lambda function detail panel if any valid functions exist."""
     valid_lambdas = [fn for fn in lambdas if "error" not in fn]
-    if valid_lambdas:
-        lambda_table = Table(
-            box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False
-        )
-        lambda_table.add_column("Function", style="cyan", no_wrap=True)
-        lambda_table.add_column("Runtime", style="dim")
-        lambda_table.add_column("Memory (MB)", justify="right")
-        lambda_table.add_column("Code (MB)", justify="right", style="dim")
-        lambda_table.add_column("Last Deploy", style="dim")
-        for fn in valid_lambdas:
-            name = fn["FunctionName"]
-            if fn.get("Stale"):
-                name = f"[yellow]{name}[/yellow]"
-            memory_str = (
-                f"[yellow]{fn['MemorySize']}[/yellow]"
-                if fn["MemorySize"] >= 1024
-                else str(fn["MemorySize"])
-            )
-            lambda_table.add_row(
-                name,
-                fn["Runtime"],
-                memory_str,
-                str(fn["CodeSizeMB"]),
-                fn["LastModified"],
-            )
-        stale_count = sum(1 for fn in valid_lambdas if fn.get("Stale"))
-        stale_note = (
-            f"  [dim]· {stale_count} stale (>{180}d)[/dim]" if stale_count else ""
-        )
-        c.print(
-            Panel(
-                lambda_table,
-                title=f"[bold blue]Lambda Functions[/bold blue]  [dim]{len(valid_lambdas)} total[/dim]{stale_note}",
-                border_style="blue",
-                padding=(0, 1),
-            )
-        )
-        c.print()
+    if not valid_lambdas:
+        return
 
-    # ── 9. One-click remediation ──────────────────────────────────────────────
+    lambda_table = Table(
+        box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False
+    )
+    lambda_table.add_column("Function", style="cyan", no_wrap=True)
+    lambda_table.add_column("Runtime", style="dim")
+    lambda_table.add_column("Memory (MB)", justify="right")
+    lambda_table.add_column("Code (MB)", justify="right", style="dim")
+    lambda_table.add_column("Last Deploy", style="dim")
+    for fn in valid_lambdas:
+        name = fn["FunctionName"]
+        if fn.get("Stale"):
+            name = f"[yellow]{name}[/yellow]"
+        memory_str = (
+            f"[yellow]{fn['MemorySize']}[/yellow]"
+            if fn["MemorySize"] >= 1024
+            else str(fn["MemorySize"])
+        )
+        lambda_table.add_row(
+            name,
+            fn["Runtime"],
+            memory_str,
+            str(fn["CodeSizeMB"]),
+            fn["LastModified"],
+        )
+    stale_count = sum(1 for fn in valid_lambdas if fn.get("Stale"))
+    stale_note = f"  [dim]· {stale_count} stale (>{180}d)[/dim]" if stale_count else ""
+    c.print(
+        Panel(
+            lambda_table,
+            title=f"[bold blue]Lambda Functions[/bold blue]  [dim]{len(valid_lambdas)} total[/dim]{stale_note}",
+            border_style="blue",
+            padding=(0, 1),
+        )
+    )
+    c.print()
+
+
+def _section_remediation(
+    c: Console,
+    sec_findings: list[SecurityFinding],
+    cost_findings: list[CostFinding],
+) -> None:
+    """Offer one-click remediation for actionable findings."""
     remediable = [f for f in sec_findings + cost_findings if f.get("remediation_type")]
-    if remediable:
-        from .tools.remediation_actions import (
-            apply_s3_block_public_access,
-            apply_s3_default_encryption,
-            delete_ebs_volume,
-            enable_cloudtrail_logging,
-            enable_guardduty,
-            enforce_imdsv2,
-            release_eip,
+    if not remediable:
+        return
+
+    from .tools.remediation_actions import (
+        apply_s3_block_public_access,
+        apply_s3_default_encryption,
+        delete_ebs_volume,
+        enable_cloudtrail_logging,
+        enable_guardduty,
+        enforce_imdsv2,
+        release_eip,
+    )
+
+    _ACTIONS = {
+        "s3_block_public_access": apply_s3_block_public_access,
+        "delete_ebs_volume": delete_ebs_volume,
+        "release_eip": release_eip,
+        "enable_guardduty": enable_guardduty,
+        "enable_cloudtrail_logging": enable_cloudtrail_logging,
+        "enforce_imdsv2": enforce_imdsv2,
+        "s3_default_encryption": apply_s3_default_encryption,
+    }
+
+    rem_table = Table(
+        box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False
+    )
+    rem_table.add_column("#", justify="right", style="dim", no_wrap=True)
+    rem_table.add_column("Action", style="bold cyan", no_wrap=True)
+    rem_table.add_column("Resource", no_wrap=True)
+    for i, f in enumerate(remediable, 1):
+        rem_table.add_row(str(i), f["remediation_label"], f["resource"])
+
+    c.print(
+        Panel(
+            rem_table,
+            title=(
+                f"[bold cyan]One-Click Remediation[/bold cyan]  "
+                f"[dim]{len(remediable)} fix{'es' if len(remediable) != 1 else ''} available[/dim]"
+            ),
+            border_style="cyan",
+            padding=(0, 1),
         )
+    )
+    c.print()
 
-        _ACTIONS = {
-            "s3_block_public_access": apply_s3_block_public_access,
-            "delete_ebs_volume": delete_ebs_volume,
-            "release_eip": release_eip,
-            "enable_guardduty": enable_guardduty,
-            "enable_cloudtrail_logging": enable_cloudtrail_logging,
-            "enforce_imdsv2": enforce_imdsv2,
-            "s3_default_encryption": apply_s3_default_encryption,
-        }
+    raw = Prompt.ask(
+        "  [bold cyan]Apply fixes[/bold cyan] [dim](e.g. 1,3 — or Enter to skip)[/dim]",
+        default="",
+    )
 
-        rem_table = Table(
-            box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False
-        )
-        rem_table.add_column("#", justify="right", style="dim", no_wrap=True)
-        rem_table.add_column("Action", style="bold cyan", no_wrap=True)
-        rem_table.add_column("Resource", no_wrap=True)
-        for i, f in enumerate(remediable, 1):
-            rem_table.add_row(str(i), f["remediation_label"], f["resource"])
-
-        c.print(
-            Panel(
-                rem_table,
-                title=(
-                    f"[bold cyan]One-Click Remediation[/bold cyan]  "
-                    f"[dim]{len(remediable)} fix{'es' if len(remediable) != 1 else ''} available[/dim]"
-                ),
-                border_style="cyan",
-                padding=(0, 1),
-            )
-        )
-        c.print()
-
-        raw = Prompt.ask(
-            "  [bold cyan]Apply fixes[/bold cyan] [dim](e.g. 1,3 — or Enter to skip)[/dim]",
-            default="",
-        )
-
-        if raw.strip():
-            indices = [
-                int(x.strip()) - 1 for x in raw.split(",") if x.strip().isdigit()
-            ]
-            for idx in indices:
-                if 0 <= idx < len(remediable):
-                    f = remediable[idx]
-                    label = f["remediation_label"]
-                    resource = f["resource"]
-                    action = _ACTIONS.get(f["remediation_type"])
-                    if not action:
-                        logger.error(
-                            f"Unknown remediation type: {f['remediation_type']}"
-                        )
-                        continue
-                    if typer.confirm(
-                        f"  Apply '{label}' on {resource}?", default=False
-                    ):
-                        with c.status(
-                            f"[cyan]Applying {label}...[/cyan]", spinner="dots"
-                        ):
-                            ok = action(resource)
-                        if ok:
-                            logger.success(f"{label} applied to {resource}.")
-                        else:
-                            logger.error(f"Failed to apply {label} on {resource}.")
+    if raw.strip():
+        indices = [int(x.strip()) - 1 for x in raw.split(",") if x.strip().isdigit()]
+        for idx in indices:
+            if 0 <= idx < len(remediable):
+                f = remediable[idx]
+                label = f["remediation_label"]
+                resource = f["resource"]
+                action = _ACTIONS.get(f["remediation_type"])
+                if not action:
+                    logger.error(f"Unknown remediation type: {f['remediation_type']}")
+                    continue
+                if typer.confirm(f"  Apply '{label}' on {resource}?", default=False):
+                    with c.status(f"[cyan]Applying {label}...[/cyan]", spinner="dots"):
+                        ok = action(resource)
+                    if ok:
+                        logger.success(f"{label} applied to {resource}.")
                     else:
-                        c.print(f"  [dim]Skipped {resource}.[/dim]")
+                        logger.error(f"Failed to apply {label} on {resource}.")
+                else:
+                    c.print(f"  [dim]Skipped {resource}.[/dim]")
+    c.print()
+
+
+def _section_cur_upsell(
+    c: Console,
+    cur_bucket_exists: bool,
+    account_id: str,
+) -> None:
+    """Show CUR upsell panel and optionally deploy the CloudFormation stack."""
+    if cur_bucket_exists:
+        return
+
+    c.print(
+        Panel(
+            "AWS Cost Explorer shows only daily service-level totals. "
+            "Enable [bold]Cost & Usage Reports (CUR)[/bold] for per-resource attribution and long-term FinOps analysis.\n\n"
+            "[bold cyan]Ask the agent:[/bold cyan]  [italic]'Deploy CUR Export'[/italic]",
+            title="[bold yellow]⚡ Enable Deep FinOps[/bold yellow]",
+            border_style="yellow",
+            padding=(1, 2),
+        )
+    )
+
+    if typer.confirm("\nDeploy the CUR CloudFormation stack now?"):
+        import uuid
+
+        cust_id = typer.prompt("Customer resource ID (e.g. cust-abc123)")
+        ext_id = typer.prompt("External ID for trust relationship")
+        s3_bucket = f"cur-data-lighthouse-{uuid.uuid4().hex[:8]}"
+
+        from .tools.cfn_deploy import deploy_cur_template
+
+        logger.action_start("Deploying CUR CloudFormation stack...")
+        success = deploy_cur_template(
+            account_id=account_id,
+            cust_id=cust_id,
+            ext_id=ext_id,
+            s3_bucket=s3_bucket,
+        )
+        if success:
+            logger.success("CUR deployment initiated successfully.")
+        else:
+            logger.error("CUR deployment failed.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# analyze command
+# ─────────────────────────────────────────────────────────────────────────────
+@app.command()
+def analyze(
+    days: int = typer.Option(
+        14, "--days", "-d", help="Days of cost history to analyze"
+    ),
+    region: str | None = typer.Option(
+        None,
+        "--region",
+        "-r",
+        help="Scan a single region (default: all enabled regions)",
+    ),
+) -> None:
+    """Retrieve read-only state (inventory, cost, security) and render a dashboard."""
+    c = logger.console
+
+    # Header
+    c.print()
+    c.print(Rule("[bold cyan]AWS LIGHTHOUSE[/bold cyan]", style="cyan"))
+    c.print()
+
+    # Auth
+    with c.status("[cyan]Authenticating...[/cyan]", spinner="dots"):
+        session = get_aws_session()
+        account_id = session.client("sts").get_caller_identity()["Account"]
+
+    c.print(
+        f"  [dim]Account[/dim]  [bold]{account_id}[/bold]  "
+        f"[dim]·  Scanned[/dim]  {datetime.now().strftime('%Y-%m-%d  %H:%M')}"
+    )
+    c.print()
+
+    # Regions
+    if region:
+        regions: list[str | None] = [region]
+        c.print(f"  [dim]Region[/dim]  [bold]{region}[/bold]")
+        c.print()
+    else:
+        with c.status("[cyan]Detecting enabled regions...[/cyan]", spinner="dots"):
+            regions = list(get_enabled_regions())
+        if not regions:
+            regions = [None]
+
+    multi_region = len(regions) > 1
+    if multi_region:
+        c.print(
+            f"  [dim]Scanning [bold]{len(regions)}[/bold] regions:[/dim] "
+            + ", ".join(r for r in regions if r)
+        )
         c.print()
 
-    # ── 10. CUR upsell ────────────────────────────────────────────────────────
-    if not cur_bucket_exists:
-        c.print(
-            Panel(
-                "AWS Cost Explorer shows only daily service-level totals. "
-                "Enable [bold]Cost & Usage Reports (CUR)[/bold] for per-resource attribution and long-term FinOps analysis.\n\n"
-                "[bold cyan]Ask the agent:[/bold cyan]  [italic]'Deploy CUR Export'[/italic]",
-                title="[bold yellow]⚡ Enable Deep FinOps[/bold yellow]",
-                border_style="yellow",
-                padding=(1, 2),
-            )
-        )
-
-        if typer.confirm("\nDeploy the CUR CloudFormation stack now?"):
-            import uuid
-
-            cust_id = typer.prompt("Customer resource ID (e.g. cust-abc123)")
-            ext_id = typer.prompt("External ID for trust relationship")
-            s3_bucket = f"cur-data-lighthouse-{uuid.uuid4().hex[:8]}"
-
-            from .tools.cfn_deploy import deploy_cur_template
-
-            logger.action_start("Deploying CUR CloudFormation stack...")
-            success = deploy_cur_template(
-                account_id=account_id,
-                cust_id=cust_id,
-                ext_id=ext_id,
-                s3_bucket=s3_bucket,
-            )
-            if success:
-                logger.success("CUR deployment initiated successfully.")
-            else:
-                logger.error("CUR deployment failed.")
+    # Sections
+    inv_table, s3s, ec2s, rdss, lambdas, cur_bucket_exists = _section_inventory(
+        c, regions, multi_region
+    )
+    _section_cost_columns(c, inv_table, days, account_id, regions, multi_region)
+    _section_cost_anomalies(c)
+    _section_ri_sp_coverage(c, days)
+    sec_findings = _section_security(c, s3s, rdss, regions, multi_region)
+    _section_iam(c)
+    _section_cloudwatch(c, regions, multi_region)
+    cost_findings = _section_cost_waste(c, regions, multi_region)
+    _section_tagging(c, regions, multi_region)
+    _section_lambda_detail(c, lambdas)
+    _section_remediation(c, sec_findings, cost_findings)
+    _section_cur_upsell(c, cur_bucket_exists, account_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # shell command
 # ─────────────────────────────────────────────────────────────────────────────
 @app.command()
-def shell():
+def shell() -> None:
     """Start the interactive AI agent shell."""
-    from .agent import create_agent_graph
     from langchain_core.messages import HumanMessage, SystemMessage
+
+    from .agent import create_agent_graph
 
     c = logger.console
 

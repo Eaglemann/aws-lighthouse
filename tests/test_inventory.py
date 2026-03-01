@@ -1,4 +1,4 @@
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 from botocore.exceptions import ClientError
@@ -34,7 +34,7 @@ def _fn(name, last_modified, memory=128, timeout=3, code_size=1_048_576):
 
 
 def test_lambda_inventory_returns_expected_fields():
-    recent = (datetime.now(timezone.utc) - timedelta(days=10)).strftime(
+    recent = (datetime.now(UTC) - timedelta(days=10)).strftime(
         "%Y-%m-%dT%H:%M:%S.000+0000"
     )
     lmb = _make_lambda([_fn("my-fn", recent)])
@@ -54,7 +54,7 @@ def test_lambda_inventory_returns_expected_fields():
 
 
 def test_lambda_stale_after_180_days():
-    old = (datetime.now(timezone.utc) - timedelta(days=200)).strftime(
+    old = (datetime.now(UTC) - timedelta(days=200)).strftime(
         "%Y-%m-%dT%H:%M:%S.000+0000"
     )
     lmb = _make_lambda([_fn("old-fn", old)])
@@ -64,7 +64,7 @@ def test_lambda_stale_after_180_days():
 
 
 def test_lambda_not_stale_when_recent():
-    recent = (datetime.now(timezone.utc) - timedelta(days=30)).strftime(
+    recent = (datetime.now(UTC) - timedelta(days=30)).strftime(
         "%Y-%m-%dT%H:%M:%S.000+0000"
     )
     lmb = _make_lambda([_fn("fresh-fn", recent)])
@@ -118,7 +118,7 @@ def _inst(instance_id, name=None, instance_type="t3.micro", state="running"):
         "InstanceId": instance_id,
         "InstanceType": instance_type,
         "State": {"Name": state},
-        "LaunchTime": datetime(2025, 1, 1, tzinfo=timezone.utc),
+        "LaunchTime": datetime(2025, 1, 1, tzinfo=UTC),
         "KeyName": "my-key",
         "Tags": tags,
     }

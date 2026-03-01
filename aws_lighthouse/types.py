@@ -1,4 +1,4 @@
-from typing import List, NotRequired, TypedDict
+from typing import NotRequired, TypedDict
 
 
 class SecurityFinding(TypedDict):
@@ -9,6 +9,7 @@ class SecurityFinding(TypedDict):
     finding: str
     remediation_type: NotRequired[str]
     remediation_label: NotRequired[str]
+    region: NotRequired[str]
 
 
 class CostFinding(TypedDict):
@@ -18,6 +19,7 @@ class CostFinding(TypedDict):
     finding: str
     remediation_type: NotRequired[str]
     remediation_label: NotRequired[str]
+    region: NotRequired[str]
 
 
 class TagFinding(TypedDict):
@@ -26,7 +28,8 @@ class TagFinding(TypedDict):
     resource_type: str
     resource_id: str
     resource_name: str
-    missing_tags: List[str]
+    missing_tags: list[str]
+    region: NotRequired[str]
 
 
 class CloudWatchFinding(TypedDict):
@@ -35,7 +38,8 @@ class CloudWatchFinding(TypedDict):
     resource_type: str
     resource_id: str
     resource_name: str
-    missing_alarms: List[str]
+    missing_alarms: list[str]
+    region: NotRequired[str]
 
 
 class IAMFinding(TypedDict):

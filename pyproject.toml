@@ -30,16 +30,25 @@ packages = ["aws_lighthouse"]
 [dependency-groups]
 dev = [
     "mypy>=1.19.1",
+    "pip-audit>=2.9.0",
     "pytest>=9.0.2",
+    "pytest-cov>=6.0.0",
+    "pytest-timeout>=2.3.1",
     "ruff>=0.15.2",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 30
+addopts = "--cov=aws_lighthouse --cov-fail-under=70"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "S", "UP", "I"]
+ignore = ["E501"]  # line-length enforced by formatter, not linter
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]  # assert is idiomatic in pytest
 
 [tool.mypy]
 ignore_missing_imports = true
 
-# cli.py is a 700-line monolith (see NEXT_STEPS.md item #8) that mixes
-# finding types and adds runtime keys (e.g. "region") to TypedDicts for
-# display.  Suppress type errors there until the refactor is complete.
-[[tool.mypy.overrides]]
-module = "aws_lighthouse.cli"
-ignore_errors = true

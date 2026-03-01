@@ -1,4 +1,4 @@
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 from botocore.exceptions import ClientError
@@ -114,7 +114,7 @@ def _make_snapshots_ec2(snapshots):
 
 
 def test_old_snapshot_flagged():
-    old = datetime.now(timezone.utc) - timedelta(days=100)
+    old = datetime.now(UTC) - timedelta(days=100)
     ec2 = _make_snapshots_ec2(
         [
             {
@@ -132,7 +132,7 @@ def test_old_snapshot_flagged():
 
 
 def test_recent_snapshot_not_flagged():
-    recent = datetime.now(timezone.utc) - timedelta(days=10)
+    recent = datetime.now(UTC) - timedelta(days=10)
     ec2 = _make_snapshots_ec2(
         [
             {
@@ -239,7 +239,7 @@ def test_run_cost_scan_aggregates_all_checks():
             "Snapshots": [
                 {
                     "SnapshotId": "snap-ccc",
-                    "StartTime": datetime.now(timezone.utc) - timedelta(days=100),
+                    "StartTime": datetime.now(UTC) - timedelta(days=100),
                     "VolumeSize": 20,
                     "Description": "old",
                 }

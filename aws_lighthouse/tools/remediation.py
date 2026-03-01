@@ -1,12 +1,12 @@
-from typing import List
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
+
 from ..auth import get_aws_client
 from ..logger import logger
 
 
 class TerminateEC2Input(BaseModel):
-    instance_ids: List[str] = Field(
+    instance_ids: list[str] = Field(
         description="A list of EC2 Instance IDs to terminate. This is a destructive action."
     )
 
@@ -28,7 +28,7 @@ def terminate_ec2(args: TerminateEC2Input) -> str:
 
 
 class DeleteEBSInput(BaseModel):
-    volume_ids: List[str] = Field(
+    volume_ids: list[str] = Field(
         description="A list of unused/orphaned EBS Volume IDs to delete. This is a destructive action."
     )
 

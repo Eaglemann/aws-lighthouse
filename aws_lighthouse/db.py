@@ -1,7 +1,8 @@
-import sqlite3
 import json
+import sqlite3
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any
+
 from .logger import logger
 
 DB_DIR = Path.home() / ".aws-lighthouse"
@@ -56,7 +57,7 @@ class DatabaseManager:
         start: str,
         end: str,
         total: float,
-        breakdown: Dict[str, float],
+        breakdown: dict[str, float],
     ):
         """Save a cost snapshot to track trends over time."""
         try:
@@ -70,7 +71,7 @@ class DatabaseManager:
         except sqlite3.Error as e:
             logger.error(f"Failed to record cost snapshot: {str(e)}")
 
-    def get_latest_cost_snapshot(self, account_id: str) -> Optional[Dict[str, Any]]:
+    def get_latest_cost_snapshot(self, account_id: str) -> dict[str, Any] | None:
         """Retrieve the most recent cost snapshot for comparison."""
         try:
             with sqlite3.connect(DB_PATH) as conn:

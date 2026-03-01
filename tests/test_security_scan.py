@@ -1,4 +1,4 @@
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 from botocore.exceptions import ClientError
@@ -151,7 +151,7 @@ def _make_iam_key_age(username, keys):
 
 
 def test_iam_key_old_flagged():
-    old_date = datetime.now(timezone.utc) - timedelta(days=91)
+    old_date = datetime.now(UTC) - timedelta(days=91)
     mock_iam = _make_iam_key_age(
         "alice",
         [{"AccessKeyId": "AKIA123", "Status": "Active", "CreateDate": old_date}],
@@ -164,7 +164,7 @@ def test_iam_key_old_flagged():
 
 
 def test_iam_key_recent_not_flagged():
-    recent_date = datetime.now(timezone.utc) - timedelta(days=10)
+    recent_date = datetime.now(UTC) - timedelta(days=10)
     mock_iam = _make_iam_key_age(
         "bob",
         [{"AccessKeyId": "AKIA456", "Status": "Active", "CreateDate": recent_date}],
@@ -175,7 +175,7 @@ def test_iam_key_recent_not_flagged():
 
 
 def test_iam_key_inactive_skipped():
-    old_date = datetime.now(timezone.utc) - timedelta(days=200)
+    old_date = datetime.now(UTC) - timedelta(days=200)
     mock_iam = _make_iam_key_age(
         "carol",
         [{"AccessKeyId": "AKIA789", "Status": "Inactive", "CreateDate": old_date}],

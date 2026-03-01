@@ -1,5 +1,4 @@
 from datetime import date, timedelta
-from typing import Dict, List
 
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -12,7 +11,7 @@ from ..types import CostAnomaly
 _MIN_BASELINE_USD = 1.0
 
 
-def detect_cost_anomalies(threshold_pct: float = 50.0) -> List[CostAnomaly]:
+def detect_cost_anomalies(threshold_pct: float = 50.0) -> list[CostAnomaly]:
     """
     Compare the last 7 days of per-service spend against the prior 7-day baseline.
     Returns services whose recent spend exceeds the baseline by more than threshold_pct.
@@ -36,8 +35,8 @@ def detect_cost_anomalies(threshold_pct: float = 50.0) -> List[CostAnomaly]:
         logger.error(f"Failed to fetch cost data for anomaly detection: {e}")
         return []
 
-    baseline: Dict[str, float] = {}
-    recent: Dict[str, float] = {}
+    baseline: dict[str, float] = {}
+    recent: dict[str, float] = {}
 
     for day in response.get("ResultsByTime", []):
         day_start = day["TimePeriod"]["Start"]
@@ -47,7 +46,7 @@ def detect_cost_anomalies(threshold_pct: float = 50.0) -> List[CostAnomaly]:
             amount = float(group["Metrics"]["UnblendedCost"]["Amount"])
             bucket[service] = bucket.get(service, 0.0) + amount
 
-    anomalies: List[CostAnomaly] = []
+    anomalies: list[CostAnomaly] = []
     for service, recent_total in recent.items():
         baseline_total = baseline.get(service, 0.0)
 

@@ -1,7 +1,13 @@
 import boto3
-from botocore.exceptions import NoCredentialsError, ClientError
 import typer
+from botocore.config import Config
+from botocore.exceptions import ClientError, NoCredentialsError
+
 from .logger import logger
+
+# Applied to every boto3 client so throttled calls are retried automatically
+# instead of silently dropping findings.
+_RETRY_CONFIG = Config(retries={"mode": "adaptive"})
 
 
 class AuthManager:
@@ -23,7 +29,7 @@ class AuthManager:
         # 1. Attempt implicit/environment credentials first
         try:
             temp_session = boto3.Session()
-            sts = temp_session.client("sts")
+            sts = temp_session.client("sts", config=_RETRY_CONFIG)
             identity = sts.get_caller_identity()
             self._session = temp_session
             logger.success(f"Authenticated as {identity['Arn']}")
@@ -51,7 +57,7 @@ class AuthManager:
             session = boto3.Session(**kwargs)
 
             if role_arn:
-                sts_client = session.client("sts")
+                sts_client = session.client("sts", config=_RETRY_CONFIG)
                 logger.step(f"Assuming role {role_arn}...")
                 assumed_role = sts_client.assume_role(
                     RoleArn=role_arn, RoleSessionName="aws-lighthouse-session"
@@ -65,14 +71,14 @@ class AuthManager:
                 )
 
             # Final validation
-            sts = session.client("sts")
+            sts = session.client("sts", config=_RETRY_CONFIG)
             identity = sts.get_caller_identity()
             self._session = session
             logger.success(f"Successfully authenticated as: {identity['Arn']}")
 
         except Exception as e:
             logger.error(f"Authentication failed: {str(e)}")
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=1) from e
 
 
 # Global singleton
@@ -86,12 +92,14 @@ def get_aws_session() -> boto3.Session:
 
 def get_aws_client(service_name: str):
     """Provides a Boto3 client for a specific service."""
-    return get_aws_session().client(service_name)
+    return get_aws_session().client(service_name, config=_RETRY_CONFIG)
 
 
 def get_aws_client_for_region(service_name: str, region: str):
     """Provides a Boto3 client for a specific service in an explicit region."""
-    return get_aws_session().client(service_name, region_name=region)
+    return get_aws_session().client(
+        service_name, region_name=region, config=_RETRY_CONFIG
+    )
 
 
 def get_client(service_name: str, region: str | None = None):

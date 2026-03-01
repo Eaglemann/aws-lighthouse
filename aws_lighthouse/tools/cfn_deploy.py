@@ -1,4 +1,5 @@
 from botocore.exceptions import ClientError
+
 from ..auth import get_aws_session
 from ..logger import logger
 
@@ -14,7 +15,7 @@ def deploy_cur_template(
 
     # 1. Read the template
     try:
-        with open(template_path, "r") as f:
+        with open(template_path) as f:
             template_body = f.read()
     except FileNotFoundError:
         logger.error(f"Could not find template at {template_path}")

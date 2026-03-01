@@ -5,13 +5,13 @@ and the approval_node approval/denial paths.
 
 from unittest.mock import MagicMock, patch
 
+from langchain_core.messages import AIMessage, ToolMessage
+
 from aws_lighthouse.agent import (
     SAFE_TOOLS,
     approval_node,
     should_require_approval,
 )
-from langchain_core.messages import AIMessage, ToolMessage
-
 
 # ---------------------------------------------------------------------------
 # Helpers
