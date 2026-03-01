@@ -38,7 +38,7 @@ def test_lambda_inventory_returns_expected_fields():
         "%Y-%m-%dT%H:%M:%S.000+0000"
     )
     lmb = _make_lambda([_fn("my-fn", recent)])
-    with patch(f"{MOD}.get_aws_client", return_value=lmb):
+    with patch(f"{MOD}.get_client", return_value=lmb):
         result = get_lambda_inventory()
     assert len(result) == 1
     fn = result[0]
@@ -58,7 +58,7 @@ def test_lambda_stale_after_180_days():
         "%Y-%m-%dT%H:%M:%S.000+0000"
     )
     lmb = _make_lambda([_fn("old-fn", old)])
-    with patch(f"{MOD}.get_aws_client", return_value=lmb):
+    with patch(f"{MOD}.get_client", return_value=lmb):
         result = get_lambda_inventory()
     assert result[0]["Stale"] is True
 
@@ -68,14 +68,14 @@ def test_lambda_not_stale_when_recent():
         "%Y-%m-%dT%H:%M:%S.000+0000"
     )
     lmb = _make_lambda([_fn("fresh-fn", recent)])
-    with patch(f"{MOD}.get_aws_client", return_value=lmb):
+    with patch(f"{MOD}.get_client", return_value=lmb):
         result = get_lambda_inventory()
     assert result[0]["Stale"] is False
 
 
 def test_lambda_bad_date_format_stale_false():
     lmb = _make_lambda([_fn("broken-fn", "not-a-date")])
-    with patch(f"{MOD}.get_aws_client", return_value=lmb):
+    with patch(f"{MOD}.get_client", return_value=lmb):
         result = get_lambda_inventory()
     assert result[0]["Stale"] is False
 
@@ -88,7 +88,7 @@ def test_lambda_api_error_returns_error_list():
     lmb.get_paginator.side_effect = ClientError(
         {"Error": {"Code": "AccessDenied", "Message": ""}}, "ListFunctions"
     )
-    with patch(f"{MOD}.get_aws_client", return_value=lmb):
+    with patch(f"{MOD}.get_client", return_value=lmb):
         result = get_lambda_inventory()
     assert len(result) == 1
     assert "error" in result[0]
@@ -96,7 +96,7 @@ def test_lambda_api_error_returns_error_list():
 
 def test_lambda_empty_account_returns_empty_list():
     lmb = _make_lambda([])
-    with patch(f"{MOD}.get_aws_client", return_value=lmb):
+    with patch(f"{MOD}.get_client", return_value=lmb):
         result = get_lambda_inventory()
     assert result == []
 
@@ -126,7 +126,7 @@ def _inst(instance_id, name=None, instance_type="t3.micro", state="running"):
 
 def test_ec2_inventory_returns_expected_fields():
     ec2 = _make_ec2([{"Instances": [_inst("i-111", name="web")]}])
-    with patch(f"{MOD}.get_aws_client", return_value=ec2):
+    with patch(f"{MOD}.get_client", return_value=ec2):
         result = get_ec2_inventory()
     assert len(result) == 1
     assert result[0]["InstanceId"] == "i-111"
@@ -138,14 +138,14 @@ def test_ec2_inventory_returns_expected_fields():
 
 def test_ec2_inventory_unknown_name_when_no_tag():
     ec2 = _make_ec2([{"Instances": [_inst("i-222")]}])
-    with patch(f"{MOD}.get_aws_client", return_value=ec2):
+    with patch(f"{MOD}.get_client", return_value=ec2):
         result = get_ec2_inventory()
     assert result[0]["Name"] == "Unknown"
 
 
 def test_ec2_inventory_empty_account():
     ec2 = _make_ec2([])
-    with patch(f"{MOD}.get_aws_client", return_value=ec2):
+    with patch(f"{MOD}.get_client", return_value=ec2):
         result = get_ec2_inventory()
     assert result == []
 
@@ -155,7 +155,7 @@ def test_ec2_inventory_api_error_returns_error_list():
     ec2.get_paginator.side_effect = ClientError(
         {"Error": {"Code": "AccessDenied", "Message": ""}}, "DescribeInstances"
     )
-    with patch(f"{MOD}.get_aws_client", return_value=ec2):
+    with patch(f"{MOD}.get_client", return_value=ec2):
         result = get_ec2_inventory()
     assert len(result) == 1
     assert "error" in result[0]
@@ -184,7 +184,7 @@ def _db(identifier, engine="mysql", db_class="db.t3.micro", public=False):
 
 def test_rds_inventory_returns_expected_fields():
     rds = _make_rds([_db("prod-db", public=True)])
-    with patch(f"{MOD}.get_aws_client", return_value=rds):
+    with patch(f"{MOD}.get_client", return_value=rds):
         result = get_rds_inventory()
     assert len(result) == 1
     assert result[0]["DBInstanceIdentifier"] == "prod-db"
@@ -195,7 +195,7 @@ def test_rds_inventory_returns_expected_fields():
 
 def test_rds_inventory_empty_account():
     rds = _make_rds([])
-    with patch(f"{MOD}.get_aws_client", return_value=rds):
+    with patch(f"{MOD}.get_client", return_value=rds):
         result = get_rds_inventory()
     assert result == []
 
@@ -205,7 +205,7 @@ def test_rds_inventory_api_error_returns_error_list():
     rds.get_paginator.side_effect = ClientError(
         {"Error": {"Code": "AccessDenied", "Message": ""}}, "DescribeDBInstances"
     )
-    with patch(f"{MOD}.get_aws_client", return_value=rds):
+    with patch(f"{MOD}.get_client", return_value=rds):
         result = get_rds_inventory()
     assert len(result) == 1
     assert "error" in result[0]

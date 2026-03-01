@@ -646,14 +646,17 @@ def _make_clean_clients():
 def test_run_security_scan_clean_environment_no_findings():
     iam, ec2, s3, ct, gd = _make_clean_clients()
 
-    def get_client(svc):
+    def _dispatch(svc, region=None):
         return {"iam": iam, "ec2": ec2, "s3": s3, "cloudtrail": ct, "guardduty": gd}[
             svc
         ]
 
     s3s = [{"BucketName": "my-bucket"}]
 
-    with patch(f"{MOD}.get_aws_client", side_effect=get_client):
+    with (
+        patch(f"{MOD}.get_aws_client", side_effect=_dispatch),
+        patch(f"{MOD}.get_client", side_effect=_dispatch),
+    ):
         findings = run_security_scan(s3s=s3s, rdss=[], include_global=True)
 
     assert findings == []
@@ -664,12 +667,15 @@ def test_run_security_scan_include_global_false_skips_root_mfa():
     # If include_global were True, this would produce a finding
     iam.get_account_summary.return_value = {"SummaryMap": {"AccountMFAEnabled": 0}}
 
-    def get_client(svc):
+    def _dispatch(svc, region=None):
         return {"iam": iam, "ec2": ec2, "s3": s3, "cloudtrail": ct, "guardduty": gd}[
             svc
         ]
 
-    with patch(f"{MOD}.get_aws_client", side_effect=get_client):
+    with (
+        patch(f"{MOD}.get_aws_client", side_effect=_dispatch),
+        patch(f"{MOD}.get_client", side_effect=_dispatch),
+    ):
         findings = run_security_scan(s3s=[], rdss=[], include_global=False)
 
     assert not any(f.get("resource") == "root" for f in findings)
@@ -679,12 +685,15 @@ def test_run_security_scan_guardduty_disabled_produces_finding():
     iam, ec2, s3, ct, gd = _make_clean_clients()
     gd.list_detectors.return_value = {"DetectorIds": []}
 
-    def get_client(svc):
+    def _dispatch(svc, region=None):
         return {"iam": iam, "ec2": ec2, "s3": s3, "cloudtrail": ct, "guardduty": gd}[
             svc
         ]
 
-    with patch(f"{MOD}.get_aws_client", side_effect=get_client):
+    with (
+        patch(f"{MOD}.get_aws_client", side_effect=_dispatch),
+        patch(f"{MOD}.get_client", side_effect=_dispatch),
+    ):
         findings = run_security_scan(s3s=[], rdss=[], include_global=False)
 
     gd_findings = [f for f in findings if f["resource"] == "guardduty"]

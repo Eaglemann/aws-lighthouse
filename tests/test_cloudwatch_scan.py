@@ -71,12 +71,12 @@ def _make_lambda_client(functions=None):
 def _run(cw, ec2, rds, lmb=None):
     lmb = lmb or _make_lambda_client()
 
-    def get_client(svc):
+    def _dispatch(svc, region=None):
         return {"cloudwatch": cw, "ec2": ec2, "rds": rds, "lambda": lmb}.get(
             svc, MagicMock()
         )
 
-    with patch(f"{MOD}.get_aws_client", side_effect=get_client):
+    with patch(f"{MOD}.get_client", side_effect=_dispatch):
         return detect_cloudwatch_gaps()
 
 

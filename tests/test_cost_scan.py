@@ -216,7 +216,7 @@ def _make_clean_ec2():
 
 def test_run_cost_scan_clean_returns_empty():
     ec2 = _make_clean_ec2()
-    with patch(f"{MOD}.get_aws_client", return_value=ec2):
+    with patch(f"{MOD}.get_client", return_value=ec2):
         findings = run_cost_scan()
     assert findings == []
 
@@ -257,7 +257,7 @@ def test_run_cost_scan_aggregates_all_checks():
     ec2.describe_addresses.return_value = {
         "Addresses": [{"AllocationId": "eipalloc-ddd", "PublicIp": "1.2.3.4"}]
     }
-    with patch(f"{MOD}.get_aws_client", return_value=ec2):
+    with patch(f"{MOD}.get_client", return_value=ec2):
         findings = run_cost_scan()
 
     resources = [f["resource"] for f in findings]

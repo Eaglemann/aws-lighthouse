@@ -58,7 +58,7 @@ def _run(ec2=None, rds=None, s3=None, lmb=None, required_tags=None):
     s3 = s3 or _make_s3([])
     lmb = lmb or _make_lambda([])
 
-    def get_client(svc):
+    def _dispatch(svc, region=None):
         if svc == "ec2":
             return ec2
         if svc == "rds":
@@ -69,12 +69,8 @@ def _run(ec2=None, rds=None, s3=None, lmb=None, required_tags=None):
             return lmb
         return MagicMock()
 
-    with patch(f"{MOD}.get_aws_client", side_effect=get_client):
-        with patch(
-            f"{MOD}.get_aws_client_for_region",
-            side_effect=lambda svc, r: get_client(svc),
-        ):
-            return check_tagging_compliance(required_tags=required_tags)
+    with patch(f"{MOD}.get_client", side_effect=_dispatch):
+        return check_tagging_compliance(required_tags=required_tags)
 
 
 # ── EC2 ───────────────────────────────────────────────────────────────────────
@@ -158,12 +154,12 @@ def test_s3_fully_tagged_not_flagged():
 def test_s3_skipped_when_include_s3_false():
     s3 = _make_s3(["some-bucket"], tag_map={})
 
-    def get_client(svc):
+    def _dispatch(svc, region=None):
         if svc == "s3":
             return s3
         return MagicMock()
 
-    with patch(f"{MOD}.get_aws_client", side_effect=get_client):
+    with patch(f"{MOD}.get_client", side_effect=_dispatch):
         findings = check_tagging_compliance(required_tags=["Owner"], include_s3=False)
     assert not any(f["resource_type"] == "S3" for f in findings)
 
