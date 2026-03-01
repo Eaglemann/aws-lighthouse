@@ -115,12 +115,15 @@ def test_results_sorted_by_pct_change_descending():
     assert results[1]["service"] == "S3"
 
 
-def test_api_error_returns_error_entry():
+def test_api_error_returns_empty():
+    from botocore.exceptions import ClientError
+
     mock_ce = MagicMock()
-    mock_ce.get_cost_and_usage.side_effect = Exception("access denied")
+    mock_ce.get_cost_and_usage.side_effect = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": ""}}, "GetCostAndUsage"
+    )
     with patch(f"{MOD}.get_aws_client", return_value=mock_ce):
         with patch(f"{MOD}.date") as mock_date:
             mock_date.today.return_value = _TODAY
             results = detect_cost_anomalies()
-    assert len(results) == 1
-    assert "error" in results[0]
+    assert results == []
