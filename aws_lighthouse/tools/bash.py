@@ -1,3 +1,4 @@
+import re
 import subprocess
 import os
 from pathlib import Path
@@ -8,8 +9,6 @@ from pydantic import BaseModel, Field
 # so they can be easily tested and reused. We will wrap them in `@tool` later.
 
 # Paths the LLM must never read or write — checked after symlink/.. resolution.
-# WARNING: shell=True in execute_bash has no command blocklist beyond this.
-# See NEXT_STEPS.md item 3 for the planned _DANGEROUS_PATTERNS guard.
 _BLOCKED_PREFIXES: tuple[str, ...] = tuple(
     str(Path(p).expanduser())
     for p in (
@@ -40,6 +39,70 @@ def _is_blocked_path(filepath: str) -> bool:
         resolved == prefix or resolved.startswith(prefix + os.sep)
         for prefix in _BLOCKED_PREFIXES
     )
+
+
+# Regex patterns for catastrophically destructive shell commands.
+# Each entry: (compiled pattern, human-readable description shown in the error).
+# The guard fires BEFORE the approval step — these commands are never presented
+# to the user for approval, regardless of how the LLM was prompted.
+_DANGEROUS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    # rm with recursive flag targeting / or /* — wipes the root filesystem
+    (
+        re.compile(
+            r"\brm\b"
+            r"(?=.*\s(-[a-zA-Z]*[rR]|--recursive))"  # must have -r/-R/--recursive
+            r".+\s/(?![a-zA-Z0-9_.~])",  # final path resolves to / (not /tmp/... etc.)
+            re.DOTALL,
+        ),
+        "recursive delete of the root filesystem ('rm -rf /')",
+    ),
+    # curl/wget piped directly to a shell interpreter — arbitrary remote code execution
+    (
+        re.compile(
+            r"\b(curl|wget)\b[^|&;\n]*\|\s*(bash|sh|zsh|ksh|fish|python3?|perl|ruby)\b",
+            re.IGNORECASE,
+        ),
+        "piping remote content to a shell interpreter (remote code execution risk)",
+    ),
+    # mkfs — immediately formats a disk partition, irreversible data loss
+    (
+        re.compile(r"\bmkfs\b"),
+        "filesystem format command (mkfs)",
+    ),
+    # dd writing to a raw block device — overwrites disk data sector by sector
+    (
+        re.compile(r"\bdd\b.*\bof=/dev/\w", re.IGNORECASE),
+        "raw disk write via dd (of=/dev/...)",
+    ),
+    # Redirect stdout directly to a block device node
+    (
+        re.compile(
+            r">\s*/dev/(sd[a-z]|hd[a-z]|vd[a-z]|nvme|xvd[a-z]|disk)",
+            re.IGNORECASE,
+        ),
+        "stdout redirect to raw block device",
+    ),
+    # Fork bomb :(){:|:&};:
+    (
+        re.compile(r":\s*\(\s*\)\s*\{"),
+        "fork bomb",
+    ),
+    # shred on a device node — destroys all data on the disk
+    (
+        re.compile(r"\bshred\b.+/dev/\w", re.IGNORECASE),
+        "disk shred (shred /dev/...)",
+    ),
+]
+
+
+def _is_dangerous_command(command: str) -> Optional[str]:
+    """Return a human-readable description if the command matches a blocked dangerous
+    pattern, or None if the command is safe to present for approval.
+    """
+    for pattern, description in _DANGEROUS_PATTERNS:
+        if pattern.search(command):
+            return description
+    return None
 
 
 class ReadFileInput(BaseModel):
@@ -103,6 +166,14 @@ class ExecuteBashInput(BaseModel):
 
 def execute_bash(args: ExecuteBashInput) -> Dict[str, Any]:
     """Executes a bash command and returns stdout, stderr, and return code."""
+    danger = _is_dangerous_command(args.command)
+    if danger:
+        return {
+            "stdout": "",
+            "stderr": f"Blocked: command matches a dangerous pattern — {danger}.",
+            "returncode": -1,
+            "error": f"Blocked: {danger}",
+        }
     try:
         result = subprocess.run(
             args.command,
