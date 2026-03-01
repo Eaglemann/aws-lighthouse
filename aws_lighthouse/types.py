@@ -9,6 +9,7 @@ class SecurityFinding(TypedDict):
     finding: str
     remediation_type: NotRequired[str]
     remediation_label: NotRequired[str]
+    region: NotRequired[str]
 
 
 class CostFinding(TypedDict):
@@ -18,6 +19,7 @@ class CostFinding(TypedDict):
     finding: str
     remediation_type: NotRequired[str]
     remediation_label: NotRequired[str]
+    region: NotRequired[str]
 
 
 class TagFinding(TypedDict):
@@ -27,6 +29,7 @@ class TagFinding(TypedDict):
     resource_id: str
     resource_name: str
     missing_tags: List[str]
+    region: NotRequired[str]
 
 
 class CloudWatchFinding(TypedDict):
@@ -36,6 +39,7 @@ class CloudWatchFinding(TypedDict):
     resource_id: str
     resource_name: str
     missing_alarms: List[str]
+    region: NotRequired[str]
 
 
 class IAMFinding(TypedDict):
