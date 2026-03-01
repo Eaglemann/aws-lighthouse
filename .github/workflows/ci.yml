@@ -11,17 +11,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Install uv
       uses: astral-sh/setup-uv@v5
       with:
         enable-cache: true
-        
+
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version-file: ".python-version"
-        
+
     - name: Install dependencies
       run: uv sync --all-extras --dev
 
@@ -37,3 +37,48 @@ jobs:
     - name: Test with pytest
       run: |
         uv run pytest
+
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v5
+      with:
+        enable-cache: true
+
+    - name: Install dependencies
+      run: uv sync --all-extras --dev
+
+    - name: Audit Python dependencies with pip-audit
+      run: uv run pip-audit --require-hashes -r <(uv export --no-dev --format requirements-txt)
+
+  container-scan:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Build Docker image
+      run: docker build -t aws-lighthouse:ci .
+
+    - name: Scan container image with Trivy
+      uses: aquasecurity/trivy-action@0.30.0
+      with:
+        image-ref: aws-lighthouse:ci
+        format: table
+        exit-code: "1"
+        severity: CRITICAL,HIGH
+        ignore-unfixed: true
+
+  secrets-scan:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Scan for secrets with Gitleaks
+      uses: gitleaks/gitleaks-action@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

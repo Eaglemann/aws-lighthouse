@@ -30,6 +30,7 @@ packages = ["aws_lighthouse"]
 [dependency-groups]
 dev = [
     "mypy>=1.19.1",
+    "pip-audit>=2.9.0",
     "pytest>=9.0.2",
     "pytest-cov>=6.0.0",
     "pytest-timeout>=2.3.1",
