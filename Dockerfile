@@ -19,6 +19,11 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 # Copy-mode avoids hard-link issues across Docker layer filesystems
 ENV UV_LINK_MODE=copy
 
+# ── Non-root user ─────────────────────────────────────────────────────────────
+RUN groupadd --gid 1001 lighthouse \
+    && useradd --uid 1001 --gid lighthouse --shell /bin/bash \
+       --create-home lighthouse
+
 WORKDIR /app
 
 # ── Dependency layer (cached unless pyproject.toml / uv.lock changes) ────────
@@ -30,7 +35,10 @@ COPY aws_lighthouse/ ./aws_lighthouse/
 RUN uv sync --frozen --no-dev
 
 # Persistent SQLite directory for cost-trend snapshots
-RUN mkdir -p /root/.aws-lighthouse
+RUN mkdir -p /home/lighthouse/.aws-lighthouse \
+    && chown -R lighthouse:lighthouse /app /home/lighthouse/.aws-lighthouse
+
+USER lighthouse
 
 # ── Entrypoint ────────────────────────────────────────────────────────────────
 # Default: run the read-only analysis dashboard.
