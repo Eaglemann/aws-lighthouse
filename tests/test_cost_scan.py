@@ -1,7 +1,7 @@
 from datetime import datetime, timezone, timedelta
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
-from unittest.mock import patch
+from botocore.exceptions import ClientError
 
 from aws_lighthouse.tools.cost_scan import (
     _check_old_snapshots,
@@ -39,7 +39,9 @@ def test_unattached_ebs_none():
 
 def test_unattached_ebs_api_error_returns_empty():
     ec2 = MagicMock()
-    ec2.get_paginator.side_effect = Exception("denied")
+    ec2.get_paginator.side_effect = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": ""}}, "DescribeVolumes"
+    )
     assert _check_unattached_ebs(ec2) == []
 
 
@@ -96,7 +98,9 @@ def test_stopped_ec2_none():
 
 def test_stopped_ec2_api_error_returns_empty():
     ec2 = MagicMock()
-    ec2.get_paginator.side_effect = Exception("denied")
+    ec2.get_paginator.side_effect = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": ""}}, "DescribeInstances"
+    )
     assert _check_stopped_ec2(ec2) == []
 
 
@@ -144,7 +148,9 @@ def test_recent_snapshot_not_flagged():
 
 def test_old_snapshots_api_error_returns_empty():
     ec2 = MagicMock()
-    ec2.get_paginator.side_effect = Exception("denied")
+    ec2.get_paginator.side_effect = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": ""}}, "DescribeSnapshots"
+    )
     assert _check_old_snapshots(ec2) == []
 
 
@@ -179,7 +185,9 @@ def test_associated_eip_not_flagged():
 
 def test_unassociated_eips_api_error_returns_empty():
     ec2 = MagicMock()
-    ec2.describe_addresses.side_effect = Exception("denied")
+    ec2.describe_addresses.side_effect = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": ""}}, "DescribeAddresses"
+    )
     assert _check_unassociated_eips(ec2) == []
 
 

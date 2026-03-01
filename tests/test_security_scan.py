@@ -48,7 +48,7 @@ def test_root_mfa_enabled():
 
 def test_root_mfa_api_error_returns_empty():
     mock_iam = MagicMock()
-    mock_iam.get_account_summary.side_effect = Exception("denied")
+    mock_iam.get_account_summary.side_effect = make_client_error("AccessDenied")
     with patch(f"{MOD}.get_aws_client", return_value=mock_iam):
         findings = _check_root_mfa()
     assert findings == []
@@ -133,7 +133,7 @@ def test_open_sg_restricted_not_flagged():
 
 def test_open_sg_api_error_returns_empty():
     ec2 = MagicMock()
-    ec2.get_paginator.side_effect = Exception("denied")
+    ec2.get_paginator.side_effect = make_client_error("AccessDenied")
     findings = _check_open_security_groups(ec2)
     assert findings == []
 
@@ -370,7 +370,7 @@ def test_imdsv2_no_name_uses_instance_id():
 
 def test_imdsv2_api_error_returns_empty():
     ec2 = MagicMock()
-    ec2.get_paginator.side_effect = Exception("denied")
+    ec2.get_paginator.side_effect = make_client_error("AccessDenied")
     assert _check_imdsv2(ec2) == []
 
 
@@ -420,7 +420,7 @@ def test_ebs_mixed_only_flags_unencrypted():
 
 def test_ebs_api_error_returns_empty():
     ec2 = MagicMock()
-    ec2.get_paginator.side_effect = Exception("denied")
+    ec2.get_paginator.side_effect = make_client_error("AccessDenied")
     assert _check_ebs_encryption(ec2) == []
 
 
@@ -488,7 +488,7 @@ def test_s3_encryption_error_bucket_skipped():
 
 def test_s3_encryption_api_error_returns_empty():
     mock_s3 = MagicMock()
-    mock_s3.get_bucket_encryption.side_effect = Exception("connection error")
+    mock_s3.get_bucket_encryption.side_effect = make_client_error("AccessDenied")
     s3s = [{"BucketName": "any-bucket"}]
     with patch(f"{MOD}.get_aws_client", return_value=mock_s3):
         findings = _check_s3_encryption(s3s)
@@ -543,7 +543,7 @@ def test_iam_user_no_console_access_skipped():
 
 def test_iam_user_mfa_api_error_returns_empty():
     iam = MagicMock()
-    iam.get_paginator.side_effect = Exception("denied")
+    iam.get_paginator.side_effect = make_client_error("AccessDenied")
     with patch(f"{MOD}.get_aws_client", return_value=iam):
         findings = _check_iam_users_mfa()
     assert findings == []
@@ -583,7 +583,7 @@ def test_guardduty_enabled_not_flagged():
 
 def test_guardduty_api_error_returns_empty():
     gd = MagicMock()
-    gd.list_detectors.side_effect = Exception("denied")
+    gd.list_detectors.side_effect = make_client_error("AccessDenied")
     assert _check_guardduty_enabled(gd) == []
 
 

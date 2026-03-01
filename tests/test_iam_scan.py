@@ -1,6 +1,8 @@
 from unittest.mock import MagicMock, patch
 from urllib.parse import quote
 
+from botocore.exceptions import ClientError
+
 from aws_lighthouse.tools.iam_scan import (
     _check_statements,
     _get_managed_policy_doc,
@@ -101,7 +103,9 @@ def test_get_managed_policy_doc_fetches_and_caches():
 
 def test_get_managed_policy_doc_api_error_returns_none():
     iam = MagicMock()
-    iam.get_policy.side_effect = Exception("access denied")
+    iam.get_policy.side_effect = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": ""}}, "GetPolicy"
+    )
     cache = {}
     doc = _get_managed_policy_doc(iam, "arn:aws:iam::123:policy/Bad", cache)
     assert doc is None

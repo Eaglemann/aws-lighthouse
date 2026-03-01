@@ -1,6 +1,8 @@
 from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock, patch
 
+from botocore.exceptions import ClientError
+
 from aws_lighthouse.tools.inventory import (
     get_ec2_inventory,
     get_lambda_inventory,
@@ -83,7 +85,9 @@ def test_lambda_bad_date_format_stale_false():
 
 def test_lambda_api_error_returns_error_list():
     lmb = MagicMock()
-    lmb.get_paginator.side_effect = Exception("denied")
+    lmb.get_paginator.side_effect = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": ""}}, "ListFunctions"
+    )
     with patch(f"{MOD}.get_aws_client", return_value=lmb):
         result = get_lambda_inventory()
     assert len(result) == 1
@@ -148,7 +152,9 @@ def test_ec2_inventory_empty_account():
 
 def test_ec2_inventory_api_error_returns_error_list():
     ec2 = MagicMock()
-    ec2.get_paginator.side_effect = Exception("denied")
+    ec2.get_paginator.side_effect = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": ""}}, "DescribeInstances"
+    )
     with patch(f"{MOD}.get_aws_client", return_value=ec2):
         result = get_ec2_inventory()
     assert len(result) == 1
@@ -196,7 +202,9 @@ def test_rds_inventory_empty_account():
 
 def test_rds_inventory_api_error_returns_error_list():
     rds = MagicMock()
-    rds.get_paginator.side_effect = Exception("denied")
+    rds.get_paginator.side_effect = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": ""}}, "DescribeDBInstances"
+    )
     with patch(f"{MOD}.get_aws_client", return_value=rds):
         result = get_rds_inventory()
     assert len(result) == 1
