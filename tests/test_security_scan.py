@@ -57,10 +57,17 @@ def test_root_mfa_api_error_returns_empty():
 # ── _check_open_security_groups ───────────────────────────────────────────────
 
 
-def test_open_sg_ssh_flagged():
+def _make_sg_ec2(security_groups):
     ec2 = MagicMock()
-    ec2.describe_security_groups.return_value = {
-        "SecurityGroups": [
+    ec2.get_paginator.return_value.paginate.return_value = [
+        {"SecurityGroups": security_groups}
+    ]
+    return ec2
+
+
+def test_open_sg_ssh_flagged():
+    ec2 = _make_sg_ec2(
+        [
             {
                 "GroupId": "sg-111",
                 "GroupName": "wide-open",
@@ -74,7 +81,7 @@ def test_open_sg_ssh_flagged():
                 ],
             }
         ]
-    }
+    )
     findings = _check_open_security_groups(ec2)
     assert len(findings) == 1
     assert findings[0]["resource"] == "sg-111"
@@ -82,9 +89,8 @@ def test_open_sg_ssh_flagged():
 
 
 def test_open_sg_rdp_flagged():
-    ec2 = MagicMock()
-    ec2.describe_security_groups.return_value = {
-        "SecurityGroups": [
+    ec2 = _make_sg_ec2(
+        [
             {
                 "GroupId": "sg-222",
                 "GroupName": "rdp-open",
@@ -98,16 +104,15 @@ def test_open_sg_rdp_flagged():
                 ],
             }
         ]
-    }
+    )
     findings = _check_open_security_groups(ec2)
     assert len(findings) == 1
     assert "3389" in findings[0]["finding"]
 
 
 def test_open_sg_restricted_not_flagged():
-    ec2 = MagicMock()
-    ec2.describe_security_groups.return_value = {
-        "SecurityGroups": [
+    ec2 = _make_sg_ec2(
+        [
             {
                 "GroupId": "sg-333",
                 "GroupName": "restricted",
@@ -121,14 +126,14 @@ def test_open_sg_restricted_not_flagged():
                 ],
             }
         ]
-    }
+    )
     findings = _check_open_security_groups(ec2)
     assert findings == []
 
 
 def test_open_sg_api_error_returns_empty():
     ec2 = MagicMock()
-    ec2.describe_security_groups.side_effect = Exception("denied")
+    ec2.get_paginator.side_effect = Exception("denied")
     findings = _check_open_security_groups(ec2)
     assert findings == []
 
@@ -136,19 +141,21 @@ def test_open_sg_api_error_returns_empty():
 # ── _check_iam_key_age ────────────────────────────────────────────────────────
 
 
-def test_iam_key_old_flagged():
+def _make_iam_key_age(username, keys):
     mock_iam = MagicMock()
+    mock_iam.get_paginator.return_value.paginate.return_value = [
+        {"Users": [{"UserName": username}]}
+    ]
+    mock_iam.list_access_keys.return_value = {"AccessKeyMetadata": keys}
+    return mock_iam
+
+
+def test_iam_key_old_flagged():
     old_date = datetime.now(timezone.utc) - timedelta(days=91)
-    mock_iam.list_users.return_value = {"Users": [{"UserName": "alice"}]}
-    mock_iam.list_access_keys.return_value = {
-        "AccessKeyMetadata": [
-            {
-                "AccessKeyId": "AKIA123",
-                "Status": "Active",
-                "CreateDate": old_date,
-            }
-        ]
-    }
+    mock_iam = _make_iam_key_age(
+        "alice",
+        [{"AccessKeyId": "AKIA123", "Status": "Active", "CreateDate": old_date}],
+    )
     with patch(f"{MOD}.get_aws_client", return_value=mock_iam):
         findings = _check_iam_key_age()
     assert len(findings) == 1
@@ -157,28 +164,22 @@ def test_iam_key_old_flagged():
 
 
 def test_iam_key_recent_not_flagged():
-    mock_iam = MagicMock()
     recent_date = datetime.now(timezone.utc) - timedelta(days=10)
-    mock_iam.list_users.return_value = {"Users": [{"UserName": "bob"}]}
-    mock_iam.list_access_keys.return_value = {
-        "AccessKeyMetadata": [
-            {"AccessKeyId": "AKIA456", "Status": "Active", "CreateDate": recent_date}
-        ]
-    }
+    mock_iam = _make_iam_key_age(
+        "bob",
+        [{"AccessKeyId": "AKIA456", "Status": "Active", "CreateDate": recent_date}],
+    )
     with patch(f"{MOD}.get_aws_client", return_value=mock_iam):
         findings = _check_iam_key_age()
     assert findings == []
 
 
 def test_iam_key_inactive_skipped():
-    mock_iam = MagicMock()
     old_date = datetime.now(timezone.utc) - timedelta(days=200)
-    mock_iam.list_users.return_value = {"Users": [{"UserName": "carol"}]}
-    mock_iam.list_access_keys.return_value = {
-        "AccessKeyMetadata": [
-            {"AccessKeyId": "AKIA789", "Status": "Inactive", "CreateDate": old_date}
-        ]
-    }
+    mock_iam = _make_iam_key_age(
+        "carol",
+        [{"AccessKeyId": "AKIA789", "Status": "Inactive", "CreateDate": old_date}],
+    )
     with patch(f"{MOD}.get_aws_client", return_value=mock_iam):
         findings = _check_iam_key_age()
     assert findings == []
@@ -331,7 +332,9 @@ def _make_ec2_instance(instance_id, http_tokens, state="running", name=None):
 
 def _ec2_with_instances(instances):
     ec2 = MagicMock()
-    ec2.describe_instances.return_value = {"Reservations": [{"Instances": instances}]}
+    ec2.get_paginator.return_value.paginate.return_value = [
+        {"Reservations": [{"Instances": instances}]}
+    ]
     return ec2
 
 
@@ -367,20 +370,23 @@ def test_imdsv2_no_name_uses_instance_id():
 
 def test_imdsv2_api_error_returns_empty():
     ec2 = MagicMock()
-    ec2.describe_instances.side_effect = Exception("denied")
+    ec2.get_paginator.side_effect = Exception("denied")
     assert _check_imdsv2(ec2) == []
 
 
 # ── _check_ebs_encryption ─────────────────────────────────────────────────────
 
 
-def test_ebs_unencrypted_flagged():
+def _make_volumes_ec2(volumes):
     ec2 = MagicMock()
-    ec2.describe_volumes.return_value = {
-        "Volumes": [
-            {"VolumeId": "vol-abc", "Encrypted": False, "Size": 50, "VolumeType": "gp3"}
-        ]
-    }
+    ec2.get_paginator.return_value.paginate.return_value = [{"Volumes": volumes}]
+    return ec2
+
+
+def test_ebs_unencrypted_flagged():
+    ec2 = _make_volumes_ec2(
+        [{"VolumeId": "vol-abc", "Encrypted": False, "Size": 50, "VolumeType": "gp3"}]
+    )
     findings = _check_ebs_encryption(ec2)
     assert len(findings) == 1
     assert findings[0]["resource"] == "vol-abc"
@@ -389,19 +395,15 @@ def test_ebs_unencrypted_flagged():
 
 
 def test_ebs_encrypted_not_flagged():
-    ec2 = MagicMock()
-    ec2.describe_volumes.return_value = {
-        "Volumes": [
-            {"VolumeId": "vol-xyz", "Encrypted": True, "Size": 100, "VolumeType": "gp3"}
-        ]
-    }
+    ec2 = _make_volumes_ec2(
+        [{"VolumeId": "vol-xyz", "Encrypted": True, "Size": 100, "VolumeType": "gp3"}]
+    )
     assert _check_ebs_encryption(ec2) == []
 
 
 def test_ebs_mixed_only_flags_unencrypted():
-    ec2 = MagicMock()
-    ec2.describe_volumes.return_value = {
-        "Volumes": [
+    ec2 = _make_volumes_ec2(
+        [
             {
                 "VolumeId": "vol-bad",
                 "Encrypted": False,
@@ -410,7 +412,7 @@ def test_ebs_mixed_only_flags_unencrypted():
             },
             {"VolumeId": "vol-ok", "Encrypted": True, "Size": 20, "VolumeType": "gp2"},
         ]
-    }
+    )
     findings = _check_ebs_encryption(ec2)
     assert len(findings) == 1
     assert findings[0]["resource"] == "vol-bad"
@@ -418,7 +420,7 @@ def test_ebs_mixed_only_flags_unencrypted():
 
 def test_ebs_api_error_returns_empty():
     ec2 = MagicMock()
-    ec2.describe_volumes.side_effect = Exception("denied")
+    ec2.get_paginator.side_effect = Exception("denied")
     assert _check_ebs_encryption(ec2) == []
 
 
@@ -498,7 +500,9 @@ def test_s3_encryption_api_error_returns_empty():
 
 def _make_iam_user_mfa(username, has_login_profile=True, mfa_devices=None):
     iam = MagicMock()
-    iam.list_users.return_value = {"Users": [{"UserName": username}]}
+    iam.get_paginator.return_value.paginate.return_value = [
+        {"Users": [{"UserName": username}]}
+    ]
     if not has_login_profile:
         iam.get_login_profile.side_effect = ClientError(
             {"Error": {"Code": "NoSuchEntity", "Message": ""}}, "GetLoginProfile"
@@ -539,7 +543,7 @@ def test_iam_user_no_console_access_skipped():
 
 def test_iam_user_mfa_api_error_returns_empty():
     iam = MagicMock()
-    iam.list_users.side_effect = Exception("denied")
+    iam.get_paginator.side_effect = Exception("denied")
     with patch(f"{MOD}.get_aws_client", return_value=iam):
         findings = _check_iam_users_mfa()
     assert findings == []
@@ -590,13 +594,22 @@ def _make_clean_clients():
     """Return mocks representing a fully-compliant AWS environment."""
     iam = MagicMock()
     iam.get_account_summary.return_value = {"SummaryMap": {"AccountMFAEnabled": 1}}
-    iam.list_users.return_value = {"Users": []}
+    iam.get_paginator.return_value.paginate.return_value = [{"Users": []}]
     iam.list_access_keys.return_value = {"AccessKeyMetadata": []}
 
+    _ec2_pages = {
+        "describe_security_groups": {"SecurityGroups": []},
+        "describe_instances": {"Reservations": []},
+        "describe_volumes": {"Volumes": []},
+    }
+
+    def _ec2_get_paginator(name):
+        pag = MagicMock()
+        pag.paginate.return_value = [_ec2_pages[name]]
+        return pag
+
     ec2 = MagicMock()
-    ec2.describe_security_groups.return_value = {"SecurityGroups": []}
-    ec2.describe_instances.return_value = {"Reservations": []}
-    ec2.describe_volumes.return_value = {"Volumes": []}
+    ec2.get_paginator.side_effect = _ec2_get_paginator
 
     s3 = MagicMock()
     s3.get_public_access_block.return_value = {

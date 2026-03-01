@@ -17,11 +17,14 @@ MOD = "aws_lighthouse.tools.cost_scan"
 # ── _check_unattached_ebs ─────────────────────────────────────────────────────
 
 
-def test_unattached_ebs_found():
+def _make_volumes_ec2(volumes):
     ec2 = MagicMock()
-    ec2.describe_volumes.return_value = {
-        "Volumes": [{"VolumeId": "vol-abc", "Size": 100, "VolumeType": "gp3"}]
-    }
+    ec2.get_paginator.return_value.paginate.return_value = [{"Volumes": volumes}]
+    return ec2
+
+
+def test_unattached_ebs_found():
+    ec2 = _make_volumes_ec2([{"VolumeId": "vol-abc", "Size": 100, "VolumeType": "gp3"}])
     findings = _check_unattached_ebs(ec2)
     assert len(findings) == 1
     assert findings[0]["resource"] == "vol-abc"
@@ -30,24 +33,30 @@ def test_unattached_ebs_found():
 
 
 def test_unattached_ebs_none():
-    ec2 = MagicMock()
-    ec2.describe_volumes.return_value = {"Volumes": []}
+    ec2 = _make_volumes_ec2([])
     assert _check_unattached_ebs(ec2) == []
 
 
 def test_unattached_ebs_api_error_returns_empty():
     ec2 = MagicMock()
-    ec2.describe_volumes.side_effect = Exception("denied")
+    ec2.get_paginator.side_effect = Exception("denied")
     assert _check_unattached_ebs(ec2) == []
 
 
 # ── _check_stopped_ec2 ────────────────────────────────────────────────────────
 
 
-def test_stopped_ec2_found():
+def _make_instances_ec2(reservations):
     ec2 = MagicMock()
-    ec2.describe_instances.return_value = {
-        "Reservations": [
+    ec2.get_paginator.return_value.paginate.return_value = [
+        {"Reservations": reservations}
+    ]
+    return ec2
+
+
+def test_stopped_ec2_found():
+    ec2 = _make_instances_ec2(
+        [
             {
                 "Instances": [
                     {
@@ -58,7 +67,7 @@ def test_stopped_ec2_found():
                 ]
             }
         ]
-    }
+    )
     findings = _check_stopped_ec2(ec2)
     assert len(findings) == 1
     assert findings[0]["resource"] == "i-111"
@@ -66,41 +75,44 @@ def test_stopped_ec2_found():
 
 
 def test_stopped_ec2_uses_instance_id_when_no_name():
-    ec2 = MagicMock()
-    ec2.describe_instances.return_value = {
-        "Reservations": [
+    ec2 = _make_instances_ec2(
+        [
             {
                 "Instances": [
                     {"InstanceId": "i-222", "InstanceType": "t3.small", "Tags": []}
                 ]
             }
         ]
-    }
+    )
     findings = _check_stopped_ec2(ec2)
     assert len(findings) == 1
     assert "i-222" in findings[0]["finding"]
 
 
 def test_stopped_ec2_none():
-    ec2 = MagicMock()
-    ec2.describe_instances.return_value = {"Reservations": []}
+    ec2 = _make_instances_ec2([])
     assert _check_stopped_ec2(ec2) == []
 
 
 def test_stopped_ec2_api_error_returns_empty():
     ec2 = MagicMock()
-    ec2.describe_instances.side_effect = Exception("denied")
+    ec2.get_paginator.side_effect = Exception("denied")
     assert _check_stopped_ec2(ec2) == []
 
 
 # ── _check_old_snapshots ──────────────────────────────────────────────────────
 
 
-def test_old_snapshot_flagged():
+def _make_snapshots_ec2(snapshots):
     ec2 = MagicMock()
+    ec2.get_paginator.return_value.paginate.return_value = [{"Snapshots": snapshots}]
+    return ec2
+
+
+def test_old_snapshot_flagged():
     old = datetime.now(timezone.utc) - timedelta(days=100)
-    ec2.describe_snapshots.return_value = {
-        "Snapshots": [
+    ec2 = _make_snapshots_ec2(
+        [
             {
                 "SnapshotId": "snap-abc",
                 "StartTime": old,
@@ -108,7 +120,7 @@ def test_old_snapshot_flagged():
                 "Description": "old backup",
             }
         ]
-    }
+    )
     findings = _check_old_snapshots(ec2)
     assert len(findings) == 1
     assert findings[0]["resource"] == "snap-abc"
@@ -116,10 +128,9 @@ def test_old_snapshot_flagged():
 
 
 def test_recent_snapshot_not_flagged():
-    ec2 = MagicMock()
     recent = datetime.now(timezone.utc) - timedelta(days=10)
-    ec2.describe_snapshots.return_value = {
-        "Snapshots": [
+    ec2 = _make_snapshots_ec2(
+        [
             {
                 "SnapshotId": "snap-xyz",
                 "StartTime": recent,
@@ -127,13 +138,13 @@ def test_recent_snapshot_not_flagged():
                 "Description": "fresh",
             }
         ]
-    }
+    )
     assert _check_old_snapshots(ec2) == []
 
 
 def test_old_snapshots_api_error_returns_empty():
     ec2 = MagicMock()
-    ec2.describe_snapshots.side_effect = Exception("denied")
+    ec2.get_paginator.side_effect = Exception("denied")
     assert _check_old_snapshots(ec2) == []
 
 
@@ -178,10 +189,19 @@ MOD = "aws_lighthouse.tools.cost_scan"
 
 
 def _make_clean_ec2():
+    _pages = {
+        "describe_volumes": {"Volumes": []},
+        "describe_instances": {"Reservations": []},
+        "describe_snapshots": {"Snapshots": []},
+    }
+
+    def _get_paginator(name):
+        pag = MagicMock()
+        pag.paginate.return_value = [_pages[name]]
+        return pag
+
     ec2 = MagicMock()
-    ec2.describe_volumes.return_value = {"Volumes": []}
-    ec2.describe_instances.return_value = {"Reservations": []}
-    ec2.describe_snapshots.return_value = {"Snapshots": []}
+    ec2.get_paginator.side_effect = _get_paginator
     ec2.describe_addresses.return_value = {"Addresses": []}
     return ec2
 
@@ -194,30 +214,38 @@ def test_run_cost_scan_clean_returns_empty():
 
 
 def test_run_cost_scan_aggregates_all_checks():
+    _pages = {
+        "describe_volumes": {
+            "Volumes": [{"VolumeId": "vol-aaa", "Size": 10, "VolumeType": "gp2"}]
+        },
+        "describe_instances": {
+            "Reservations": [
+                {
+                    "Instances": [
+                        {"InstanceId": "i-bbb", "InstanceType": "t3.micro", "Tags": []}
+                    ]
+                }
+            ]
+        },
+        "describe_snapshots": {
+            "Snapshots": [
+                {
+                    "SnapshotId": "snap-ccc",
+                    "StartTime": datetime.now(timezone.utc) - timedelta(days=100),
+                    "VolumeSize": 20,
+                    "Description": "old",
+                }
+            ]
+        },
+    }
+
+    def _get_paginator(name):
+        pag = MagicMock()
+        pag.paginate.return_value = [_pages[name]]
+        return pag
+
     ec2 = MagicMock()
-    # One finding from each sub-check
-    ec2.describe_volumes.return_value = {
-        "Volumes": [{"VolumeId": "vol-aaa", "Size": 10, "VolumeType": "gp2"}]
-    }
-    ec2.describe_instances.return_value = {
-        "Reservations": [
-            {
-                "Instances": [
-                    {"InstanceId": "i-bbb", "InstanceType": "t3.micro", "Tags": []}
-                ]
-            }
-        ]
-    }
-    ec2.describe_snapshots.return_value = {
-        "Snapshots": [
-            {
-                "SnapshotId": "snap-ccc",
-                "StartTime": datetime.now(timezone.utc) - timedelta(days=100),
-                "VolumeSize": 20,
-                "Description": "old",
-            }
-        ]
-    }
+    ec2.get_paginator.side_effect = _get_paginator
     ec2.describe_addresses.return_value = {
         "Addresses": [{"AllocationId": "eipalloc-ddd", "PublicIp": "1.2.3.4"}]
     }

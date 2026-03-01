@@ -9,13 +9,15 @@ MOD = "aws_lighthouse.tools.tagging"
 
 def _make_ec2(instances):
     ec2 = MagicMock()
-    ec2.describe_instances.return_value = {"Reservations": [{"Instances": instances}]}
+    ec2.get_paginator.return_value.paginate.return_value = [
+        {"Reservations": [{"Instances": instances}]}
+    ]
     return ec2
 
 
 def _make_rds(dbs):
     rds = MagicMock()
-    rds.describe_db_instances.return_value = {"DBInstances": dbs}
+    rds.get_paginator.return_value.paginate.return_value = [{"DBInstances": dbs}]
     return rds
 
 
