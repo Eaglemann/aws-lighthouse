@@ -1,3 +1,4 @@
+import json
 from unittest.mock import MagicMock, patch
 from urllib.parse import quote
 
@@ -5,7 +6,6 @@ from botocore.exceptions import ClientError
 
 from aws_lighthouse.tools.iam_scan import (
     _check_statements,
-    _get_managed_policy_doc,
     _normalise,
     _parse_inline_doc,
     detect_overpermissive_iam,
@@ -71,118 +71,92 @@ def test_parse_inline_doc_already_dict():
 
 
 def test_parse_inline_doc_url_encoded_string():
-    import json
-
     raw = quote(json.dumps({"Statement": []}))
     result = _parse_inline_doc(raw)
     assert result == {"Statement": []}
 
 
-# ── _get_managed_policy_doc ───────────────────────────────────────────────────
-
-
-def test_get_managed_policy_doc_cached():
-    iam = MagicMock()
-    cache = {"arn:aws:iam::123:policy/MyPolicy": {"Statement": []}}
-    doc = _get_managed_policy_doc(iam, "arn:aws:iam::123:policy/MyPolicy", cache)
-    assert doc == {"Statement": []}
-    iam.get_policy.assert_not_called()
-
-
-def test_get_managed_policy_doc_fetches_and_caches():
-    iam = MagicMock()
-    iam.get_policy.return_value = {"Policy": {"DefaultVersionId": "v1"}}
-    iam.get_policy_version.return_value = {
-        "PolicyVersion": {"Document": {"Statement": [{"Effect": "Allow"}]}}
-    }
-    cache = {}
-    doc = _get_managed_policy_doc(iam, "arn:aws:iam::123:policy/New", cache)
-    assert doc == {"Statement": [{"Effect": "Allow"}]}
-    assert "arn:aws:iam::123:policy/New" in cache
-
-
-def test_get_managed_policy_doc_api_error_returns_none():
-    iam = MagicMock()
-    iam.get_policy.side_effect = ClientError(
-        {"Error": {"Code": "AccessDenied", "Message": ""}}, "GetPolicy"
-    )
-    cache = {}
-    doc = _get_managed_policy_doc(iam, "arn:aws:iam::123:policy/Bad", cache)
-    assert doc is None
-    assert cache["arn:aws:iam::123:policy/Bad"] is None
-
-
 # ── detect_overpermissive_iam ─────────────────────────────────────────────────
 
 
-def _make_paginator(items):
-    pg = MagicMock()
-    pg.paginate.return_value.search.return_value = iter(items)
-    return pg
-
-
-def _build_mock_iam(users=None, roles=None, groups=None):
-    """Build a mock IAM client with no inline policies and empty attached policies."""
+def _make_mock_iam(pages: list[dict]) -> MagicMock:
+    """Build a mock IAM client whose get_account_authorization_details paginator
+    yields the given list of response pages."""
     mock_iam = MagicMock()
-
-    users = users or []
-    roles = roles or []
-    groups = groups or []
-
-    def paginator(name):
-        if name == "list_users":
-            return _make_paginator(users)
-        if name == "list_roles":
-            return _make_paginator(roles)
-        if name == "list_groups":
-            return _make_paginator(groups)
-        return _make_paginator([])
-
-    mock_iam.get_paginator.side_effect = paginator
-    mock_iam.list_user_policies.return_value = {"PolicyNames": []}
-    mock_iam.list_attached_user_policies.return_value = {"AttachedPolicies": []}
-    mock_iam.list_role_policies.return_value = {"PolicyNames": []}
-    mock_iam.list_attached_role_policies.return_value = {"AttachedPolicies": []}
-    mock_iam.list_group_policies.return_value = {"PolicyNames": []}
-    mock_iam.list_attached_group_policies.return_value = {"AttachedPolicies": []}
+    mock_paginator = MagicMock()
+    mock_paginator.paginate.return_value = iter(pages)
+    mock_iam.get_paginator.return_value = mock_paginator
     return mock_iam
 
 
+def _empty_page(**kwargs) -> dict:
+    base = {
+        "UserDetailList": [],
+        "RoleDetailList": [],
+        "GroupDetailList": [],
+        "Policies": [],
+    }
+    base.update(kwargs)
+    return base
+
+
 def test_no_principals_returns_empty():
-    mock_iam = _build_mock_iam()
+    mock_iam = _make_mock_iam([_empty_page()])
     with patch(f"{MOD}.get_aws_client", return_value=mock_iam):
-        findings = detect_overpermissive_iam()
-    assert findings == []
+        assert detect_overpermissive_iam() == []
+
+
+def test_api_error_returns_empty():
+    mock_iam = MagicMock()
+    mock_iam.get_paginator.side_effect = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": ""}},
+        "GetAccountAuthorizationDetails",
+    )
+    with patch(f"{MOD}.get_aws_client", return_value=mock_iam):
+        assert detect_overpermissive_iam() == []
 
 
 def test_user_with_admin_managed_policy_flagged():
-    mock_iam = _build_mock_iam(users=[{"UserName": "admin-user"}])
-    mock_iam.list_attached_user_policies.return_value = {
-        "AttachedPolicies": [
+    page = _empty_page(
+        UserDetailList=[
             {
-                "PolicyArn": "arn:aws:iam::aws:policy/AdministratorAccess",
-                "PolicyName": "AdministratorAccess",
+                "UserName": "admin-user",
+                "UserPolicyList": [],
+                "AttachedManagedPolicies": [
+                    {
+                        "PolicyArn": "arn:aws:iam::aws:policy/AdministratorAccess",
+                        "PolicyName": "AdministratorAccess",
+                    }
+                ],
             }
         ]
-    }
+    )
+    mock_iam = _make_mock_iam([page])
     with patch(f"{MOD}.get_aws_client", return_value=mock_iam):
         findings = detect_overpermissive_iam()
     assert len(findings) == 1
     assert findings[0]["severity"] == "HIGH"
     assert findings[0]["principal_name"] == "admin-user"
     assert findings[0]["policy_name"] == "AdministratorAccess"
+    assert findings[0]["policy_type"] == "AWS Managed"
 
 
 def test_user_with_power_user_is_medium():
-    mock_iam = _build_mock_iam(users=[{"UserName": "power-user"}])
-    mock_iam.list_attached_user_policies.return_value = {
-        "AttachedPolicies": [
+    page = _empty_page(
+        UserDetailList=[
             {
-                "PolicyArn": "arn:aws:iam::aws:policy/PowerUserAccess",
-                "PolicyName": "PowerUserAccess",
+                "UserName": "power-user",
+                "UserPolicyList": [],
+                "AttachedManagedPolicies": [
+                    {
+                        "PolicyArn": "arn:aws:iam::aws:policy/PowerUserAccess",
+                        "PolicyName": "PowerUserAccess",
+                    }
+                ],
             }
         ]
-    }
+    )
+    mock_iam = _make_mock_iam([page])
     with patch(f"{MOD}.get_aws_client", return_value=mock_iam):
         findings = detect_overpermissive_iam()
     assert len(findings) == 1
@@ -190,56 +164,225 @@ def test_user_with_power_user_is_medium():
 
 
 def test_service_linked_role_skipped():
-    role = {
-        "RoleName": "AWSServiceRoleForEC2",
-        "Path": "/aws-service-role/ec2.amazonaws.com/",
-    }
-    mock_iam = _build_mock_iam(roles=[role])
+    page = _empty_page(
+        RoleDetailList=[
+            {
+                "RoleName": "AWSServiceRoleForEC2",
+                "Path": "/aws-service-role/ec2.amazonaws.com/",
+                "RolePolicyList": [],
+                "AttachedManagedPolicies": [],
+            }
+        ]
+    )
+    mock_iam = _make_mock_iam([page])
     with patch(f"{MOD}.get_aws_client", return_value=mock_iam):
-        findings = detect_overpermissive_iam()
-    assert findings == []
+        assert detect_overpermissive_iam() == []
 
 
 def test_role_with_inline_star_policy_flagged():
-    role = {"RoleName": "bad-role", "Path": "/"}
-    mock_iam = _build_mock_iam(roles=[role])
-    mock_iam.list_role_policies.return_value = {"PolicyNames": ["StarPolicy"]}
     doc = {"Statement": [{"Effect": "Allow", "Action": "*", "Resource": "*"}]}
-    mock_iam.get_role_policy.return_value = {"PolicyDocument": doc}
-
+    page = _empty_page(
+        RoleDetailList=[
+            {
+                "RoleName": "bad-role",
+                "Path": "/",
+                "RolePolicyList": [
+                    {"PolicyName": "StarPolicy", "PolicyDocument": doc}
+                ],
+                "AttachedManagedPolicies": [],
+            }
+        ]
+    )
+    mock_iam = _make_mock_iam([page])
     with patch(f"{MOD}.get_aws_client", return_value=mock_iam):
         findings = detect_overpermissive_iam()
     assert len(findings) == 1
     assert findings[0]["severity"] == "HIGH"
     assert findings[0]["principal_name"] == "bad-role"
+    assert findings[0]["policy_type"] == "Inline"
+
+
+def test_group_with_inline_medium_policy_flagged():
+    doc = {"Statement": [{"Effect": "Allow", "Action": "s3:*", "Resource": "*"}]}
+    page = _empty_page(
+        GroupDetailList=[
+            {
+                "GroupName": "devs",
+                "GroupPolicyList": [
+                    {"PolicyName": "S3Star", "PolicyDocument": doc}
+                ],
+                "AttachedManagedPolicies": [],
+            }
+        ]
+    )
+    mock_iam = _make_mock_iam([page])
+    with patch(f"{MOD}.get_aws_client", return_value=mock_iam):
+        findings = detect_overpermissive_iam()
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "MEDIUM"
+    assert findings[0]["principal_name"] == "devs"
+    assert findings[0]["principal_type"] == "Group"
+
+
+def test_customer_managed_policy_via_policy_docs():
+    """Policy document comes from Policies[] in the same response page."""
+    doc = {"Statement": [{"Effect": "Allow", "Action": "*", "Resource": "*"}]}
+    page = _empty_page(
+        UserDetailList=[
+            {
+                "UserName": "dev",
+                "UserPolicyList": [],
+                "AttachedManagedPolicies": [
+                    {
+                        "PolicyArn": "arn:aws:iam::123456789012:policy/BroadPolicy",
+                        "PolicyName": "BroadPolicy",
+                    }
+                ],
+            }
+        ],
+        Policies=[
+            {
+                "Arn": "arn:aws:iam::123456789012:policy/BroadPolicy",
+                "PolicyVersionList": [
+                    {"IsDefaultVersion": True, "Document": doc}
+                ],
+            }
+        ],
+    )
+    mock_iam = _make_mock_iam([page])
+    with patch(f"{MOD}.get_aws_client", return_value=mock_iam):
+        findings = detect_overpermissive_iam()
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "HIGH"
+    assert findings[0]["policy_type"] == "Customer Managed"
+    assert findings[0]["policy_name"] == "BroadPolicy"
+
+
+def test_customer_managed_policy_url_encoded_document():
+    """Policy document can be a URL-encoded JSON string."""
+    doc = {"Statement": [{"Effect": "Allow", "Action": "*", "Resource": "*"}]}
+    page = _empty_page(
+        UserDetailList=[
+            {
+                "UserName": "dev",
+                "UserPolicyList": [],
+                "AttachedManagedPolicies": [
+                    {
+                        "PolicyArn": "arn:aws:iam::123456789012:policy/BroadPolicy",
+                        "PolicyName": "BroadPolicy",
+                    }
+                ],
+            }
+        ],
+        Policies=[
+            {
+                "Arn": "arn:aws:iam::123456789012:policy/BroadPolicy",
+                "PolicyVersionList": [
+                    {
+                        "IsDefaultVersion": True,
+                        "Document": quote(json.dumps(doc)),
+                    }
+                ],
+            }
+        ],
+    )
+    mock_iam = _make_mock_iam([page])
+    with patch(f"{MOD}.get_aws_client", return_value=mock_iam):
+        findings = detect_overpermissive_iam()
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "HIGH"
+
+
+def test_unknown_customer_managed_policy_skipped():
+    """Attached policy with no matching document in Policies[] is skipped silently."""
+    page = _empty_page(
+        UserDetailList=[
+            {
+                "UserName": "dev",
+                "UserPolicyList": [],
+                "AttachedManagedPolicies": [
+                    {
+                        "PolicyArn": "arn:aws:iam::123456789012:policy/Unknown",
+                        "PolicyName": "Unknown",
+                    }
+                ],
+            }
+        ]
+    )
+    mock_iam = _make_mock_iam([page])
+    with patch(f"{MOD}.get_aws_client", return_value=mock_iam):
+        assert detect_overpermissive_iam() == []
 
 
 def test_findings_sorted_high_before_medium():
-    mock_iam = _build_mock_iam(users=[{"UserName": "beta"}, {"UserName": "alpha"}])
-
-    def attached_policies(UserName):
-        if UserName == "beta":
-            return {
-                "AttachedPolicies": [
-                    {
-                        "PolicyArn": "arn:aws:iam::aws:policy/PowerUserAccess",
-                        "PolicyName": "PowerUserAccess",
-                    }
-                ]
-            }
-        return {
-            "AttachedPolicies": [
-                {
-                    "PolicyArn": "arn:aws:iam::aws:policy/AdministratorAccess",
-                    "PolicyName": "AdministratorAccess",
-                }
-            ]
-        }
-
-    mock_iam.list_attached_user_policies.side_effect = attached_policies
-
+    doc_high = {"Statement": [{"Effect": "Allow", "Action": "*", "Resource": "*"}]}
+    doc_medium = {"Statement": [{"Effect": "Allow", "Action": "s3:*", "Resource": "*"}]}
+    page = _empty_page(
+        UserDetailList=[
+            {
+                "UserName": "beta",
+                "UserPolicyList": [
+                    {"PolicyName": "MedPolicy", "PolicyDocument": doc_medium}
+                ],
+                "AttachedManagedPolicies": [],
+            },
+            {
+                "UserName": "alpha",
+                "UserPolicyList": [
+                    {"PolicyName": "HighPolicy", "PolicyDocument": doc_high}
+                ],
+                "AttachedManagedPolicies": [],
+            },
+        ]
+    )
+    mock_iam = _make_mock_iam([page])
     with patch(f"{MOD}.get_aws_client", return_value=mock_iam):
         findings = detect_overpermissive_iam()
-
     assert findings[0]["severity"] == "HIGH"
     assert findings[1]["severity"] == "MEDIUM"
+
+
+def test_multiple_pages_aggregated():
+    """Results from multiple paginator pages are combined."""
+    page1 = _empty_page(
+        UserDetailList=[
+            {
+                "UserName": "user-a",
+                "UserPolicyList": [],
+                "AttachedManagedPolicies": [
+                    {
+                        "PolicyArn": "arn:aws:iam::aws:policy/AdministratorAccess",
+                        "PolicyName": "AdministratorAccess",
+                    }
+                ],
+            }
+        ]
+    )
+    page2 = _empty_page(
+        UserDetailList=[
+            {
+                "UserName": "user-b",
+                "UserPolicyList": [],
+                "AttachedManagedPolicies": [
+                    {
+                        "PolicyArn": "arn:aws:iam::aws:policy/AdministratorAccess",
+                        "PolicyName": "AdministratorAccess",
+                    }
+                ],
+            }
+        ]
+    )
+    mock_iam = _make_mock_iam([page1, page2])
+    with patch(f"{MOD}.get_aws_client", return_value=mock_iam):
+        findings = detect_overpermissive_iam()
+    assert len(findings) == 2
+    names = {f["principal_name"] for f in findings}
+    assert names == {"user-a", "user-b"}
+
+
+def test_uses_single_paginator_call():
+    """Verify only one paginator is created (not one per entity type)."""
+    mock_iam = _make_mock_iam([_empty_page()])
+    with patch(f"{MOD}.get_aws_client", return_value=mock_iam):
+        detect_overpermissive_iam()
+    mock_iam.get_paginator.assert_called_once_with("get_account_authorization_details")
