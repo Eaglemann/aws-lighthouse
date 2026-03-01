@@ -1,5 +1,5 @@
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any
 from urllib.parse import unquote
 
 from botocore.exceptions import BotoCoreError, ClientError
@@ -10,13 +10,13 @@ from ..types import IAMFinding
 
 # AWS-managed policies that are inherently over-permissive — checked by name
 # rather than downloading their documents to save API calls.
-_DANGEROUS_AWS_MANAGED: Dict[str, str] = {
+_DANGEROUS_AWS_MANAGED: dict[str, str] = {
     "AdministratorAccess": "HIGH",
     "PowerUserAccess": "MEDIUM",
 }
 
 
-def _normalise(value: Any) -> List[str]:
+def _normalise(value: Any) -> list[str]:
     """Ensure Action / Resource values are always a list of strings."""
     if isinstance(value, str):
         return [value]
@@ -25,7 +25,7 @@ def _normalise(value: Any) -> List[str]:
     return []
 
 
-def _check_statements(statements: Any) -> Optional[str]:
+def _check_statements(statements: Any) -> str | None:
     """
     Scan a policy's Statement list for over-permissive Allow rules.
     Returns the highest severity found, or None if the policy is clean.
@@ -37,7 +37,7 @@ def _check_statements(statements: Any) -> Optional[str]:
     if isinstance(statements, dict):
         statements = [statements]
 
-    highest: Optional[str] = None
+    highest: str | None = None
 
     for stmt in statements:
         if stmt.get("Effect") != "Allow":
@@ -59,9 +59,7 @@ def _check_statements(statements: Any) -> Optional[str]:
     return highest
 
 
-def _get_managed_policy_doc(
-    iam, policy_arn: str, cache: Dict[str, Any]
-) -> Optional[Any]:
+def _get_managed_policy_doc(iam, policy_arn: str, cache: dict[str, Any]) -> Any | None:
     """Fetch and cache a managed policy's default-version document."""
     if policy_arn in cache:
         return cache[policy_arn]
@@ -89,7 +87,7 @@ def _parse_inline_doc(raw_doc: Any) -> Any:
     return raw_doc
 
 
-def detect_overpermissive_iam() -> List[IAMFinding]:
+def detect_overpermissive_iam() -> list[IAMFinding]:
     """
     Scan IAM users, roles, and groups for policies that grant
     Action:* on Resource:* (HIGH) or Action:<svc>:* on Resource:* (MEDIUM).
@@ -99,8 +97,8 @@ def detect_overpermissive_iam() -> List[IAMFinding]:
     AWS-managed policies are evaluated by name only (no document download).
     """
     iam = get_aws_client("iam")
-    findings: List[IAMFinding] = []
-    policy_cache: Dict[str, Any] = {}
+    findings: list[IAMFinding] = []
+    policy_cache: dict[str, Any] = {}
 
     def _add(
         severity, principal_type, principal_name, policy_type, policy_name, reason

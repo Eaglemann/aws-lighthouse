@@ -1,5 +1,4 @@
-from datetime import datetime, timezone, timedelta
-from typing import List
+from datetime import UTC, datetime, timedelta
 
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -10,9 +9,9 @@ from ..types import CostFinding
 _SNAPSHOT_AGE_DAYS = 90
 
 
-def _check_unattached_ebs(ec2) -> List[CostFinding]:
+def _check_unattached_ebs(ec2) -> list[CostFinding]:
     """Flag EBS volumes that are not attached to any instance."""
-    findings: List[CostFinding] = []
+    findings: list[CostFinding] = []
     try:
         paginator = ec2.get_paginator("describe_volumes")
         for page in paginator.paginate(
@@ -34,9 +33,9 @@ def _check_unattached_ebs(ec2) -> List[CostFinding]:
     return findings
 
 
-def _check_stopped_ec2(ec2) -> List[CostFinding]:
+def _check_stopped_ec2(ec2) -> list[CostFinding]:
     """Flag EC2 instances that are stopped but still incurring EBS costs."""
-    findings: List[CostFinding] = []
+    findings: list[CostFinding] = []
     try:
         paginator = ec2.get_paginator("describe_instances")
         for page in paginator.paginate(
@@ -63,17 +62,17 @@ def _check_stopped_ec2(ec2) -> List[CostFinding]:
     return findings
 
 
-def _check_old_snapshots(ec2) -> List[CostFinding]:
+def _check_old_snapshots(ec2) -> list[CostFinding]:
     """Flag owned EBS snapshots older than 90 days."""
-    findings: List[CostFinding] = []
+    findings: list[CostFinding] = []
     try:
         paginator = ec2.get_paginator("describe_snapshots")
-        cutoff = datetime.now(timezone.utc) - timedelta(days=_SNAPSHOT_AGE_DAYS)
+        cutoff = datetime.now(UTC) - timedelta(days=_SNAPSHOT_AGE_DAYS)
         for page in paginator.paginate(OwnerIds=["self"]):
             for snap in page.get("Snapshots", []):
                 start_time = snap.get("StartTime")
                 if start_time and start_time < cutoff:
-                    age = (datetime.now(timezone.utc) - start_time).days
+                    age = (datetime.now(UTC) - start_time).days
                     size = snap.get("VolumeSize", 0)
                     description = snap.get("Description", "")
                     findings.append(
@@ -87,9 +86,9 @@ def _check_old_snapshots(ec2) -> List[CostFinding]:
     return findings
 
 
-def _check_unassociated_eips(ec2) -> List[CostFinding]:
+def _check_unassociated_eips(ec2) -> list[CostFinding]:
     """Flag Elastic IPs that are allocated but not associated with any resource."""
-    findings: List[CostFinding] = []
+    findings: list[CostFinding] = []
     try:
         response = ec2.describe_addresses()
         for addr in response.get("Addresses", []):
@@ -107,10 +106,10 @@ def _check_unassociated_eips(ec2) -> List[CostFinding]:
     return findings
 
 
-def run_cost_scan(region: str | None = None) -> List[CostFinding]:
+def run_cost_scan(region: str | None = None) -> list[CostFinding]:
     """Run all cost waste checks and return a unified list of findings."""
     ec2 = get_client("ec2", region)
-    findings: List[CostFinding] = []
+    findings: list[CostFinding] = []
     findings.extend(_check_unattached_ebs(ec2))
     findings.extend(_check_stopped_ec2(ec2))
     findings.extend(_check_old_snapshots(ec2))

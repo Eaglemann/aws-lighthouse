@@ -1,15 +1,15 @@
-from datetime import datetime, timezone, timedelta
-from typing import List, Dict, Any
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
 from botocore.exceptions import BotoCoreError, ClientError
 
 from ..auth import get_client
 from ..logger import logger
 
-
 _LAMBDA_STALE_DAYS = 180
 
 
-def get_s3_inventory() -> List[Dict[str, Any]]:
+def get_s3_inventory() -> list[dict[str, Any]]:
     """List S3 buckets and basic stats."""
     s3 = get_client("s3")
     try:
@@ -30,7 +30,7 @@ def get_s3_inventory() -> List[Dict[str, Any]]:
         return [{"error": str(e)}]
 
 
-def get_ec2_inventory(region: str | None = None) -> List[Dict[str, Any]]:
+def get_ec2_inventory(region: str | None = None) -> list[dict[str, Any]]:
     """Retrieve all EC2 instances and state."""
     ec2 = get_client("ec2", region)
     instances = []
@@ -64,7 +64,7 @@ def get_ec2_inventory(region: str | None = None) -> List[Dict[str, Any]]:
         return [{"error": str(e)}]
 
 
-def get_rds_inventory(region: str | None = None) -> List[Dict[str, Any]]:
+def get_rds_inventory(region: str | None = None) -> list[dict[str, Any]]:
     """Retrieve all RDS instances and basic metrics."""
     rds = get_client("rds", region)
     instances = []
@@ -87,11 +87,11 @@ def get_rds_inventory(region: str | None = None) -> List[Dict[str, Any]]:
         return [{"error": str(e)}]
 
 
-def get_lambda_inventory(region: str | None = None) -> List[Dict[str, Any]]:
+def get_lambda_inventory(region: str | None = None) -> list[dict[str, Any]]:
     """List all Lambda functions with runtime, memory, timeout, code size, and staleness flag."""
     lmb = get_client("lambda", region)
     functions = []
-    cutoff = datetime.now(timezone.utc) - timedelta(days=_LAMBDA_STALE_DAYS)
+    cutoff = datetime.now(UTC) - timedelta(days=_LAMBDA_STALE_DAYS)
     try:
         paginator = lmb.get_paginator("list_functions")
         for page in paginator.paginate():

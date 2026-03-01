@@ -1,8 +1,9 @@
+import os
 import re
 import subprocess
-import os
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 # These are standard functions, not Langchain `@tool`s yet,
@@ -95,7 +96,7 @@ _DANGEROUS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 ]
 
 
-def _is_dangerous_command(command: str) -> Optional[str]:
+def _is_dangerous_command(command: str) -> str | None:
     """Return a human-readable description if the command matches a blocked dangerous
     pattern, or None if the command is safe to present for approval.
     """
@@ -109,7 +110,7 @@ class ReadFileInput(BaseModel):
     filepath: str = Field(
         description="The absolute or relative path to the file to read."
     )
-    max_lines: Optional[int] = Field(
+    max_lines: int | None = Field(
         None,
         description="Maximum number of lines to read to avoid blowing up context window.",
     )
@@ -122,7 +123,7 @@ def read_file(args: ReadFileInput) -> str:
     if not os.path.exists(args.filepath):
         return f"Error: File '{args.filepath}' does not exist."
     try:
-        with open(args.filepath, "r", encoding="utf-8") as f:
+        with open(args.filepath, encoding="utf-8") as f:
             lines = f.readlines()
             if args.max_lines and len(lines) > args.max_lines:
                 return "".join(lines[: args.max_lines]) + "\n...[TRUNCATED]..."
@@ -160,11 +161,11 @@ def write_file(args: WriteFileInput) -> str:
 
 class ExecuteBashInput(BaseModel):
     command: str = Field(description="The bash command string to execute.")
-    cwd: Optional[str] = Field(None, description="The working directory to execute in.")
+    cwd: str | None = Field(None, description="The working directory to execute in.")
     timeout_seconds: int = Field(60, description="Max execution time before aborting.")
 
 
-def execute_bash(args: ExecuteBashInput) -> Dict[str, Any]:
+def execute_bash(args: ExecuteBashInput) -> dict[str, Any]:
     """Executes a bash command and returns stdout, stderr, and return code."""
     danger = _is_dangerous_command(args.command)
     if danger:
@@ -175,7 +176,7 @@ def execute_bash(args: ExecuteBashInput) -> Dict[str, Any]:
             "error": f"Blocked: {danger}",
         }
     try:
-        result = subprocess.run(
+        result = subprocess.run(  # noqa: S602 — intentional: executes user-approved shell commands
             args.command,
             shell=True,
             cwd=args.cwd,

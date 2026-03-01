@@ -1,33 +1,31 @@
-from typing import List, Set, Tuple
-
 from ..auth import get_client
 from ..logger import logger
 from ..types import CloudWatchFinding
 
 # (namespace, metric_name, dimension_name) tuples required per resource type.
 # A resource is flagged only for the metrics it is actually missing.
-_EC2_REQUIRED: List[Tuple[str, str, str]] = [
+_EC2_REQUIRED: list[tuple[str, str, str]] = [
     ("AWS/EC2", "CPUUtilization", "InstanceId"),
     ("AWS/EC2", "StatusCheckFailed", "InstanceId"),
 ]
 
-_RDS_REQUIRED: List[Tuple[str, str, str]] = [
+_RDS_REQUIRED: list[tuple[str, str, str]] = [
     ("AWS/RDS", "CPUUtilization", "DBInstanceIdentifier"),
     ("AWS/RDS", "FreeStorageSpace", "DBInstanceIdentifier"),
 ]
 
-_LAMBDA_REQUIRED: List[Tuple[str, str, str]] = [
+_LAMBDA_REQUIRED: list[tuple[str, str, str]] = [
     ("AWS/Lambda", "Errors", "FunctionName"),
     ("AWS/Lambda", "Throttles", "FunctionName"),
 ]
 
 
-def _build_alarm_index(cw) -> Set[Tuple[str, str, str, str]]:
+def _build_alarm_index(cw) -> set[tuple[str, str, str, str]]:
     """
     Return a set of (namespace, metric_name, dimension_name, dimension_value)
     tuples representing every metric currently covered by at least one alarm.
     """
-    index: Set[Tuple[str, str, str, str]] = set()
+    index: set[tuple[str, str, str, str]] = set()
     try:
         paginator = cw.get_paginator("describe_alarms")
         for page in paginator.paginate(AlarmTypes=["MetricAlarm"]):
@@ -41,7 +39,7 @@ def _build_alarm_index(cw) -> Set[Tuple[str, str, str, str]]:
     return index
 
 
-def detect_cloudwatch_gaps(region: str | None = None) -> List[CloudWatchFinding]:
+def detect_cloudwatch_gaps(region: str | None = None) -> list[CloudWatchFinding]:
     """
     Find EC2 instances, RDS databases, and Lambda functions that have no
     CloudWatch alarm configured for one or more key metrics:
@@ -62,7 +60,7 @@ def detect_cloudwatch_gaps(region: str | None = None) -> List[CloudWatchFinding]
     rds = _cl("rds")
 
     alarm_index = _build_alarm_index(cw)
-    findings: List[CloudWatchFinding] = []
+    findings: list[CloudWatchFinding] = []
 
     # ── EC2 ──────────────────────────────────────────────────────────────────
     try:

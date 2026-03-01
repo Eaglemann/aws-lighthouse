@@ -1,6 +1,8 @@
 import os
+
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
+
 from ..logger import logger
 
 
@@ -24,7 +26,7 @@ def parse_terraform_context(args: ParseTerraformInput) -> str:
     for f in tf_files:
         filepath = os.path.join(args.directory, f)
         try:
-            with open(filepath, "r", encoding="utf-8") as file:
+            with open(filepath, encoding="utf-8") as file:
                 content = file.read()
                 context += f"--- {f} ---\n{content}\n\n"
         except Exception as e:

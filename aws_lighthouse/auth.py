@@ -1,7 +1,8 @@
 import boto3
-from botocore.config import Config
-from botocore.exceptions import NoCredentialsError, ClientError
 import typer
+from botocore.config import Config
+from botocore.exceptions import ClientError, NoCredentialsError
+
 from .logger import logger
 
 # Applied to every boto3 client so throttled calls are retried automatically
@@ -77,7 +78,7 @@ class AuthManager:
 
         except Exception as e:
             logger.error(f"Authentication failed: {str(e)}")
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=1) from e
 
 
 # Global singleton

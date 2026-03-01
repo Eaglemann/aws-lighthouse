@@ -1,11 +1,11 @@
-from datetime import datetime, timezone, timedelta
-from typing import Any, Dict
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from ..auth import get_aws_client
 from ..logger import logger
 
 
-def get_ri_sp_coverage(days: int = 30) -> Dict[str, Any]:
+def get_ri_sp_coverage(days: int = 30) -> dict[str, Any]:
     """
     Fetch Reserved Instance and Savings Plan coverage + utilization from
     AWS Cost Explorer for the given look-back window.
@@ -22,11 +22,11 @@ def get_ri_sp_coverage(days: int = 30) -> Dict[str, Any]:
     """
     ce = get_aws_client("ce")  # Cost Explorer is a global service
 
-    end = datetime.now(timezone.utc).date()
+    end = datetime.now(UTC).date()
     start = end - timedelta(days=days)
     period = {"Start": start.strftime("%Y-%m-%d"), "End": end.strftime("%Y-%m-%d")}
 
-    result: Dict[str, Any] = {"period": f"{period['Start']} → {period['End']}"}
+    result: dict[str, Any] = {"period": f"{period['Start']} → {period['End']}"}
 
     # ── RI Coverage ───────────────────────────────────────────────────────────
     try:

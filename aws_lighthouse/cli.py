@@ -1,5 +1,6 @@
-import typer
 from datetime import datetime
+
+import typer
 from rich import box
 from rich.align import Align
 from rich.columns import Columns
@@ -11,24 +12,24 @@ from rich.rule import Rule
 from rich.table import Table
 from rich.text import Text
 
-from .logger import logger
 from .auth import get_aws_session
 from .db import db_manager
-from .tools.multi_region import get_enabled_regions
+from .logger import logger
+from .tools.cloudwatch_scan import detect_cloudwatch_gaps
+from .tools.cost import get_monthly_cost_summary
+from .tools.cost_anomaly import detect_cost_anomalies
+from .tools.cost_scan import run_cost_scan
+from .tools.iam_scan import detect_overpermissive_iam
 from .tools.inventory import (
     get_ec2_inventory,
+    get_lambda_inventory,
     get_rds_inventory,
     get_s3_inventory,
-    get_lambda_inventory,
 )
-from .tools.cost import get_monthly_cost_summary
-from .tools.security_scan import run_security_scan
-from .tools.cost_scan import run_cost_scan
-from .tools.cost_anomaly import detect_cost_anomalies
-from .tools.tagging import check_tagging_compliance
-from .tools.iam_scan import detect_overpermissive_iam
-from .tools.cloudwatch_scan import detect_cloudwatch_gaps
+from .tools.multi_region import get_enabled_regions
 from .tools.ri_sp_coverage import get_ri_sp_coverage
+from .tools.security_scan import run_security_scan
+from .tools.tagging import check_tagging_compliance
 from .types import CostFinding, SecurityFinding
 
 app = typer.Typer(
@@ -811,8 +812,9 @@ def analyze(
 @app.command()
 def shell() -> None:
     """Start the interactive AI agent shell."""
-    from .agent import create_agent_graph
     from langchain_core.messages import HumanMessage, SystemMessage
+
+    from .agent import create_agent_graph
 
     c = logger.console
 

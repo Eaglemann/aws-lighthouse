@@ -1,15 +1,17 @@
 # ruff: noqa: E402
 import json
 import os
-from typing import TypedDict, Annotated, Sequence
+from collections.abc import Sequence
+from typing import Annotated, TypedDict
+
 from langchain_core.messages import AIMessage, BaseMessage
-from langchain_ollama import ChatOllama
-from langgraph.graph import StateGraph, END
-from langgraph.graph.message import add_messages
 from langchain_core.tools import tool
+from langchain_ollama import ChatOllama
+from langgraph.graph import END, StateGraph
+from langgraph.graph.message import add_messages
 
 from .logger import logger
-from .tools.bash import read_file, write_file, execute_bash
+from .tools.bash import execute_bash, read_file, write_file
 
 
 # 1. State Definition
@@ -54,23 +56,29 @@ def tool_execute_bash(
     return json.dumps(res)
 
 
-from .tools.remediation import terminate_ec2, delete_ebs
-from .tools.security import s3_block_public_access
-from .tools.terraform import parse_terraform_context
-from .tools.inventory import (
-    get_ec2_inventory as _get_ec2_inventory,
-    get_rds_inventory as _get_rds_inventory,
-    get_s3_inventory as _get_s3_inventory,
-    get_lambda_inventory as _get_lambda_inventory,
-)
+from .tools.cloudwatch_scan import detect_cloudwatch_gaps as _detect_cloudwatch_gaps
 from .tools.cost_anomaly import detect_cost_anomalies as _detect_cost_anomalies
 from .tools.cost_scan import run_cost_scan as _run_cost_scan
-from .tools.tagging import check_tagging_compliance as _check_tagging_compliance
 from .tools.iam_scan import detect_overpermissive_iam as _detect_overpermissive_iam
-from .tools.cloudwatch_scan import detect_cloudwatch_gaps as _detect_cloudwatch_gaps
+from .tools.inventory import (
+    get_ec2_inventory as _get_ec2_inventory,
+)
+from .tools.inventory import (
+    get_lambda_inventory as _get_lambda_inventory,
+)
+from .tools.inventory import (
+    get_rds_inventory as _get_rds_inventory,
+)
+from .tools.inventory import (
+    get_s3_inventory as _get_s3_inventory,
+)
 from .tools.multi_region import get_enabled_regions as _get_enabled_regions
+from .tools.remediation import delete_ebs, terminate_ec2
 from .tools.ri_sp_coverage import get_ri_sp_coverage as _get_ri_sp_coverage
+from .tools.security import s3_block_public_access
 from .tools.security_scan import run_security_scan as _run_security_scan
+from .tools.tagging import check_tagging_compliance as _check_tagging_compliance
+from .tools.terraform import parse_terraform_context
 
 
 @tool
@@ -229,7 +237,6 @@ tools = [
 ]
 
 from langgraph.prebuilt import ToolNode
-
 
 # The ToolNode executes the functions requested by the LLM
 tool_node = ToolNode(tools)
