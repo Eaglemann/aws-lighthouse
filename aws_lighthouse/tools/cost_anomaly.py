@@ -1,15 +1,18 @@
 from datetime import date, timedelta
-from typing import Any, Dict, List
+from typing import Dict, List
+
+from botocore.exceptions import BotoCoreError, ClientError
 
 from ..auth import get_aws_client
 from ..logger import logger
+from ..types import CostAnomaly
 
 # Minimum baseline spend (USD) for a service to be evaluated.
 # Avoids noise from $0.01 → $0.02 triggering a 100% "anomaly".
 _MIN_BASELINE_USD = 1.0
 
 
-def detect_cost_anomalies(threshold_pct: float = 50.0) -> List[Dict[str, Any]]:
+def detect_cost_anomalies(threshold_pct: float = 50.0) -> List[CostAnomaly]:
     """
     Compare the last 7 days of per-service spend against the prior 7-day baseline.
     Returns services whose recent spend exceeds the baseline by more than threshold_pct.
@@ -29,9 +32,9 @@ def detect_cost_anomalies(threshold_pct: float = 50.0) -> List[Dict[str, Any]]:
             Metrics=["UnblendedCost"],
             GroupBy=[{"Type": "DIMENSION", "Key": "SERVICE"}],
         )
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to fetch cost data for anomaly detection: {e}")
-        return [{"error": str(e)}]
+        return []
 
     baseline: Dict[str, float] = {}
     recent: Dict[str, float] = {}
@@ -44,7 +47,7 @@ def detect_cost_anomalies(threshold_pct: float = 50.0) -> List[Dict[str, Any]]:
             amount = float(group["Metrics"]["UnblendedCost"]["Amount"])
             bucket[service] = bucket.get(service, 0.0) + amount
 
-    anomalies: List[Dict[str, Any]] = []
+    anomalies: List[CostAnomaly] = []
     for service, recent_total in recent.items():
         baseline_total = baseline.get(service, 0.0)
 

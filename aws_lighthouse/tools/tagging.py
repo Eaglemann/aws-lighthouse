@@ -1,9 +1,10 @@
-from typing import Any, Dict, List
+from typing import List
 
 from botocore.exceptions import ClientError
 
 from ..auth import get_client
 from ..logger import logger
+from ..types import TagFinding
 
 # Default tags every resource should carry
 DEFAULT_REQUIRED_TAGS = ["Environment", "Owner"]
@@ -13,7 +14,7 @@ def check_tagging_compliance(
     required_tags: List[str] | None = None,
     region: str | None = None,
     include_s3: bool = True,
-) -> List[Dict[str, Any]]:
+) -> List[TagFinding]:
     """
     Check EC2 instances, RDS databases, Lambda functions, and S3 buckets for
     missing required tags. Returns one finding per resource that is missing at
@@ -28,7 +29,7 @@ def check_tagging_compliance(
     def _cl(svc):
         return get_client(svc, region)
 
-    findings: List[Dict[str, Any]] = []
+    findings: List[TagFinding] = []
 
     # ── EC2 ──────────────────────────────────────────────────────────────────
     try:

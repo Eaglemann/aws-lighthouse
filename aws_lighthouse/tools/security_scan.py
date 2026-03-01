@@ -5,9 +5,10 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from ..auth import get_aws_client, get_client
 from ..logger import logger
+from ..types import SecurityFinding
 
 
-def _check_root_mfa() -> List[Dict[str, Any]]:
+def _check_root_mfa() -> List[SecurityFinding]:
     """Check whether the root account has MFA enabled."""
     try:
         iam = get_aws_client("iam")
@@ -25,9 +26,9 @@ def _check_root_mfa() -> List[Dict[str, Any]]:
     return []
 
 
-def _check_open_security_groups(ec2) -> List[Dict[str, Any]]:
+def _check_open_security_groups(ec2) -> List[SecurityFinding]:
     """Flag security groups that allow unrestricted ingress on SSH (22) or RDP (3389)."""
-    findings = []
+    findings: List[SecurityFinding] = []
     try:
         paginator = ec2.get_paginator("describe_security_groups")
         for page in paginator.paginate():
@@ -63,9 +64,9 @@ def _check_open_security_groups(ec2) -> List[Dict[str, Any]]:
     return findings
 
 
-def _check_iam_users_mfa() -> List[Dict[str, Any]]:
+def _check_iam_users_mfa() -> List[SecurityFinding]:
     """Flag IAM users with console access (login profile) but no MFA device."""
-    findings = []
+    findings: List[SecurityFinding] = []
     try:
         iam = get_aws_client("iam")
         paginator = iam.get_paginator("list_users")
@@ -94,9 +95,9 @@ def _check_iam_users_mfa() -> List[Dict[str, Any]]:
     return findings
 
 
-def _check_iam_key_age() -> List[Dict[str, Any]]:
+def _check_iam_key_age() -> List[SecurityFinding]:
     """Flag active IAM access keys older than 90 days."""
-    findings = []
+    findings: List[SecurityFinding] = []
     try:
         iam = get_aws_client("iam")
         now = datetime.now(timezone.utc)
@@ -122,7 +123,7 @@ def _check_iam_key_age() -> List[Dict[str, Any]]:
     return findings
 
 
-def _check_public_rds(rdss: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _check_public_rds(rdss: List[Dict[str, Any]]) -> List[SecurityFinding]:
     """Flag RDS instances that are publicly accessible."""
     return [
         {
@@ -135,9 +136,9 @@ def _check_public_rds(rdss: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     ]
 
 
-def _check_s3_block_public_access(s3s: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _check_s3_block_public_access(s3s: List[Dict[str, Any]]) -> List[SecurityFinding]:
     """Flag S3 buckets that do not have Block Public Access fully enabled."""
-    findings = []
+    findings: List[SecurityFinding] = []
     try:
         s3 = get_aws_client("s3")
         for bucket in s3s:
@@ -184,9 +185,9 @@ def _check_s3_block_public_access(s3s: List[Dict[str, Any]]) -> List[Dict[str, A
     return findings
 
 
-def _check_s3_encryption(s3s: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _check_s3_encryption(s3s: List[Dict[str, Any]]) -> List[SecurityFinding]:
     """Flag S3 buckets that have no default server-side encryption rule."""
-    findings = []
+    findings: List[SecurityFinding] = []
     try:
         s3 = get_aws_client("s3")
         for bucket in s3s:
@@ -228,9 +229,9 @@ def _check_s3_encryption(s3s: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return findings
 
 
-def _check_imdsv2(ec2) -> List[Dict[str, Any]]:
+def _check_imdsv2(ec2) -> List[SecurityFinding]:
     """Flag EC2 instances that still allow IMDSv1 (HttpTokens != required)."""
-    findings = []
+    findings: List[SecurityFinding] = []
     try:
         paginator = ec2.get_paginator("describe_instances")
         for page in paginator.paginate():
@@ -264,9 +265,9 @@ def _check_imdsv2(ec2) -> List[Dict[str, Any]]:
     return findings
 
 
-def _check_ebs_encryption(ec2) -> List[Dict[str, Any]]:
+def _check_ebs_encryption(ec2) -> List[SecurityFinding]:
     """Flag EBS volumes that are not encrypted at rest."""
-    findings = []
+    findings: List[SecurityFinding] = []
     try:
         paginator = ec2.get_paginator("describe_volumes")
         for page in paginator.paginate():
@@ -287,9 +288,9 @@ def _check_ebs_encryption(ec2) -> List[Dict[str, Any]]:
     return findings
 
 
-def _check_cloudtrail(ct) -> List[Dict[str, Any]]:
+def _check_cloudtrail(ct) -> List[SecurityFinding]:
     """Check that CloudTrail is configured and actively logging in this region."""
-    findings = []
+    findings: List[SecurityFinding] = []
     try:
         trails = ct.describe_trails(includeShadowTrails=False).get("trailList", [])
         if not trails:
@@ -317,7 +318,7 @@ def _check_cloudtrail(ct) -> List[Dict[str, Any]]:
     return findings
 
 
-def _check_guardduty_enabled(gd) -> List[Dict[str, Any]]:
+def _check_guardduty_enabled(gd) -> List[SecurityFinding]:
     """Check that GuardDuty is enabled in this region."""
     try:
         detector_ids = gd.list_detectors().get("DetectorIds", [])
@@ -353,7 +354,7 @@ def run_security_scan(
     rdss: List[Dict[str, Any]],
     region: str | None = None,
     include_global: bool = True,
-) -> List[Dict[str, Any]]:
+) -> List[SecurityFinding]:
     """Run security checks and return a unified list of findings.
 
     include_global controls whether account-wide checks (root MFA, IAM key age,
@@ -364,7 +365,7 @@ def run_security_scan(
     def _cl(svc):
         return get_client(svc, region)
 
-    findings = []
+    findings: List[SecurityFinding] = []
     if include_global:
         findings.extend(_check_root_mfa())
         findings.extend(_check_iam_users_mfa())

@@ -220,8 +220,7 @@ def analyze(
     with c.status("[cyan]Detecting cost anomalies...[/cyan]", spinner="dots"):
         anomalies = detect_cost_anomalies(threshold_pct=50.0)
 
-    # Silently skip the panel on API errors so the dashboard still renders
-    valid_anomalies = [a for a in anomalies if "error" not in a]
+    valid_anomalies = anomalies
     if valid_anomalies:
         anomaly_table = Table(
             box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False

@@ -1,7 +1,8 @@
-from typing import Any, Dict, List, Set, Tuple
+from typing import List, Set, Tuple
 
 from ..auth import get_client
 from ..logger import logger
+from ..types import CloudWatchFinding
 
 # (namespace, metric_name, dimension_name) tuples required per resource type.
 # A resource is flagged only for the metrics it is actually missing.
@@ -40,7 +41,7 @@ def _build_alarm_index(cw) -> Set[Tuple[str, str, str, str]]:
     return index
 
 
-def detect_cloudwatch_gaps(region: str | None = None) -> List[Dict[str, Any]]:
+def detect_cloudwatch_gaps(region: str | None = None) -> List[CloudWatchFinding]:
     """
     Find EC2 instances, RDS databases, and Lambda functions that have no
     CloudWatch alarm configured for one or more key metrics:
@@ -61,7 +62,7 @@ def detect_cloudwatch_gaps(region: str | None = None) -> List[Dict[str, Any]]:
     rds = _cl("rds")
 
     alarm_index = _build_alarm_index(cw)
-    findings: List[Dict[str, Any]] = []
+    findings: List[CloudWatchFinding] = []
 
     # ── EC2 ──────────────────────────────────────────────────────────────────
     try:

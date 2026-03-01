@@ -6,6 +6,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from ..auth import get_aws_client
 from ..logger import logger
+from ..types import IAMFinding
 
 # AWS-managed policies that are inherently over-permissive — checked by name
 # rather than downloading their documents to save API calls.
@@ -88,7 +89,7 @@ def _parse_inline_doc(raw_doc: Any) -> Any:
     return raw_doc
 
 
-def detect_overpermissive_iam() -> List[Dict[str, Any]]:
+def detect_overpermissive_iam() -> List[IAMFinding]:
     """
     Scan IAM users, roles, and groups for policies that grant
     Action:* on Resource:* (HIGH) or Action:<svc>:* on Resource:* (MEDIUM).
@@ -98,7 +99,7 @@ def detect_overpermissive_iam() -> List[Dict[str, Any]]:
     AWS-managed policies are evaluated by name only (no document download).
     """
     iam = get_aws_client("iam")
-    findings: List[Dict[str, Any]] = []
+    findings: List[IAMFinding] = []
     policy_cache: Dict[str, Any] = {}
 
     def _add(

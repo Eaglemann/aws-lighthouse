@@ -1,17 +1,18 @@
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List
+from typing import List
 
 from botocore.exceptions import BotoCoreError, ClientError
 
 from ..auth import get_client
 from ..logger import logger
+from ..types import CostFinding
 
 _SNAPSHOT_AGE_DAYS = 90
 
 
-def _check_unattached_ebs(ec2) -> List[Dict[str, Any]]:
+def _check_unattached_ebs(ec2) -> List[CostFinding]:
     """Flag EBS volumes that are not attached to any instance."""
-    findings = []
+    findings: List[CostFinding] = []
     try:
         paginator = ec2.get_paginator("describe_volumes")
         for page in paginator.paginate(
@@ -33,9 +34,9 @@ def _check_unattached_ebs(ec2) -> List[Dict[str, Any]]:
     return findings
 
 
-def _check_stopped_ec2(ec2) -> List[Dict[str, Any]]:
+def _check_stopped_ec2(ec2) -> List[CostFinding]:
     """Flag EC2 instances that are stopped but still incurring EBS costs."""
-    findings = []
+    findings: List[CostFinding] = []
     try:
         paginator = ec2.get_paginator("describe_instances")
         for page in paginator.paginate(
@@ -62,9 +63,9 @@ def _check_stopped_ec2(ec2) -> List[Dict[str, Any]]:
     return findings
 
 
-def _check_old_snapshots(ec2) -> List[Dict[str, Any]]:
+def _check_old_snapshots(ec2) -> List[CostFinding]:
     """Flag owned EBS snapshots older than 90 days."""
-    findings = []
+    findings: List[CostFinding] = []
     try:
         paginator = ec2.get_paginator("describe_snapshots")
         cutoff = datetime.now(timezone.utc) - timedelta(days=_SNAPSHOT_AGE_DAYS)
@@ -86,9 +87,9 @@ def _check_old_snapshots(ec2) -> List[Dict[str, Any]]:
     return findings
 
 
-def _check_unassociated_eips(ec2) -> List[Dict[str, Any]]:
+def _check_unassociated_eips(ec2) -> List[CostFinding]:
     """Flag Elastic IPs that are allocated but not associated with any resource."""
-    findings = []
+    findings: List[CostFinding] = []
     try:
         response = ec2.describe_addresses()
         for addr in response.get("Addresses", []):
@@ -106,10 +107,10 @@ def _check_unassociated_eips(ec2) -> List[Dict[str, Any]]:
     return findings
 
 
-def run_cost_scan(region: str | None = None) -> List[Dict[str, Any]]:
+def run_cost_scan(region: str | None = None) -> List[CostFinding]:
     """Run all cost waste checks and return a unified list of findings."""
     ec2 = get_client("ec2", region)
-    findings = []
+    findings: List[CostFinding] = []
     findings.extend(_check_unattached_ebs(ec2))
     findings.extend(_check_stopped_ec2(ec2))
     findings.extend(_check_old_snapshots(ec2))
