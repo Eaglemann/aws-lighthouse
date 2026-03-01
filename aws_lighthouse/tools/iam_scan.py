@@ -135,9 +135,7 @@ def detect_overpermissive_iam() -> list[IAMFinding]:
                         else "Action:<svc>:* on Resource:*",
                     )
             except (ValueError, KeyError) as e:
-                logger.error(
-                    f"Failed to parse inline policy on {principal_name}: {e}"
-                )
+                logger.error(f"Failed to parse inline policy on {principal_name}: {e}")
 
     def _check_attached_list(
         principal_type: str, principal_name: str, attached: list[Any]

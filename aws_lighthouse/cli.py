@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 import typer
@@ -46,6 +47,9 @@ def main(ctx: typer.Context) -> None:
         shell()
 
 
+# Max parallel region workers — balances throughput against boto3 connection pool
+_MAX_WORKERS = 5
+
 # ── Severity colour map ──────────────────────────────────────────────────────
 _SEV_STYLE = {"HIGH": "bold red", "MEDIUM": "bold yellow", "LOW": "bold blue"}
 
@@ -87,24 +91,26 @@ def _section_inventory(
     rdss: list = []
     lambdas: list = []
 
-    with c.status("[cyan]Scanning S3...[/cyan]", spinner="dots") as status:
+    def _inv_region(reg: str | None) -> tuple[list, list, list]:
+        _ec2 = get_ec2_inventory(region=reg)
+        _rds = get_rds_inventory(region=reg)
+        _lmb = get_lambda_inventory(region=reg)
+        if multi_region and reg is not None:
+            for item in _ec2:
+                item["region"] = reg
+            for item in _rds:
+                item["region"] = reg
+            for item in _lmb:
+                item["region"] = reg
+        return _ec2, _rds, _lmb
+
+    with c.status("[cyan]Scanning inventory...[/cyan]", spinner="dots"):
         s3s = get_s3_inventory()
-        for reg in regions:
-            label = reg or "default region"
-            status.update(f"[cyan]Scanning {label}...[/cyan]")
-            _ec2 = get_ec2_inventory(region=reg)
-            _rds = get_rds_inventory(region=reg)
-            _lmb = get_lambda_inventory(region=reg)
-            if multi_region and reg is not None:
-                for item in _ec2:
-                    item["region"] = reg
-                for item in _rds:
-                    item["region"] = reg
-                for item in _lmb:
-                    item["region"] = reg
-            ec2s.extend(_ec2)
-            rdss.extend(_rds)
-            lambdas.extend(_lmb)
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+            for _ec2, _rds, _lmb in pool.map(_inv_region, regions):
+                ec2s.extend(_ec2)
+                rdss.extend(_rds)
+                lambdas.extend(_lmb)
 
     cur_bucket_exists = False
     if s3s and "error" not in s3s[0]:
@@ -303,21 +309,23 @@ def _section_security(
     """Run security scan across all regions and render findings panel."""
     sec_findings: list[SecurityFinding] = []
 
-    with c.status("[cyan]Running security checks...[/cyan]", spinner="dots") as status:
-        for i, reg in enumerate(regions):
-            if multi_region:
-                status.update(f"[cyan]Security checks — {reg}...[/cyan]")
-            _rdss_r = (
-                [r for r in rdss if r.get("region") == reg] if multi_region else rdss
-            )
-            _sec = run_security_scan(
-                s3s=s3s, rdss=_rdss_r, region=reg, include_global=(i == 0)
-            )
-            if multi_region and reg is not None:
-                for f in _sec:
-                    if "region" not in f:
-                        f["region"] = reg
-            sec_findings.extend(_sec)
+    def _sec_region(args: tuple[str | None, bool]) -> list[SecurityFinding]:
+        reg, include_global = args
+        _rdss_r = [r for r in rdss if r.get("region") == reg] if multi_region else rdss
+        _sec = run_security_scan(
+            s3s=s3s, rdss=_rdss_r, region=reg, include_global=include_global
+        )
+        if multi_region and reg is not None:
+            for f in _sec:
+                if "region" not in f:
+                    f["region"] = reg
+        return _sec
+
+    region_args = [(reg, i == 0) for i, reg in enumerate(regions)]
+    with c.status("[cyan]Running security checks...[/cyan]", spinner="dots"):
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+            for items in pool.map(_sec_region, region_args):
+                sec_findings.extend(items)
 
     sec_count = len(sec_findings)
     if sec_count:
@@ -408,17 +416,17 @@ def _section_cloudwatch(
     """Check CloudWatch alarm coverage across all regions and render panel."""
     cw_findings: list = []
 
-    with c.status(
-        "[cyan]Checking CloudWatch alarm coverage...[/cyan]", spinner="dots"
-    ) as status:
-        for reg in regions:
-            if multi_region:
-                status.update(f"[cyan]CloudWatch alarm coverage — {reg}...[/cyan]")
-            _cw = detect_cloudwatch_gaps(region=reg)
-            if multi_region and reg is not None:
-                for f in _cw:
-                    f["region"] = reg
-            cw_findings.extend(_cw)
+    def _cw_region(reg: str | None) -> list:
+        _cw = detect_cloudwatch_gaps(region=reg)
+        if multi_region and reg is not None:
+            for f in _cw:
+                f["region"] = reg
+        return _cw
+
+    with c.status("[cyan]Checking CloudWatch alarm coverage...[/cyan]", spinner="dots"):
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+            for items in pool.map(_cw_region, regions):
+                cw_findings.extend(items)
 
     cw_count = len(cw_findings)
     if cw_count:
@@ -467,15 +475,17 @@ def _section_cost_waste(
     """Scan for cost waste across all regions and render findings panel."""
     cost_findings: list[CostFinding] = []
 
-    with c.status("[cyan]Scanning for cost waste...[/cyan]", spinner="dots") as status:
-        for reg in regions:
-            if multi_region:
-                status.update(f"[cyan]Cost waste scan — {reg}...[/cyan]")
-            _cost = run_cost_scan(region=reg)
-            if multi_region and reg is not None:
-                for f in _cost:
-                    f["region"] = reg
-            cost_findings.extend(_cost)
+    def _cost_region(reg: str | None) -> list[CostFinding]:
+        _cost = run_cost_scan(region=reg)
+        if multi_region and reg is not None:
+            for f in _cost:
+                f["region"] = reg
+        return _cost
+
+    with c.status("[cyan]Scanning for cost waste...[/cyan]", spinner="dots"):
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+            for items in pool.map(_cost_region, regions):
+                cost_findings.extend(items)
 
     waste_count = len(cost_findings)
     if waste_count:
@@ -521,16 +531,20 @@ def _section_tagging(
     """Check tagging compliance across all regions and render panel."""
     tag_findings: list = []
 
-    with c.status("[cyan]Checking tag compliance...[/cyan]", spinner="dots") as status:
-        for i, reg in enumerate(regions):
-            if multi_region:
-                status.update(f"[cyan]Tag compliance — {reg}...[/cyan]")
-            _tag = check_tagging_compliance(region=reg, include_s3=(i == 0))
-            if multi_region and reg is not None:
-                for f in _tag:
-                    if "region" not in f:
-                        f["region"] = reg
-            tag_findings.extend(_tag)
+    def _tag_region(args: tuple[str | None, bool]) -> list:
+        reg, include_s3 = args
+        _tag = check_tagging_compliance(region=reg, include_s3=include_s3)
+        if multi_region and reg is not None:
+            for f in _tag:
+                if "region" not in f:
+                    f["region"] = reg
+        return _tag
+
+    tag_args = [(reg, i == 0) for i, reg in enumerate(regions)]
+    with c.status("[cyan]Checking tag compliance...[/cyan]", spinner="dots"):
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+            for items in pool.map(_tag_region, tag_args):
+                tag_findings.extend(items)
 
     tag_count = len(tag_findings)
     if tag_count:
