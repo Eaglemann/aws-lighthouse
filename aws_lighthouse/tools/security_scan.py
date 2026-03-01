@@ -3,7 +3,7 @@ from typing import Any, Dict, List
 
 from botocore.exceptions import BotoCoreError, ClientError
 
-from ..auth import get_aws_client, get_aws_client_for_region
+from ..auth import get_aws_client, get_client
 from ..logger import logger
 
 
@@ -360,11 +360,10 @@ def run_security_scan(
     S3 block public access) are executed.  Set to False when looping over
     multiple regions to avoid duplicate global findings.
     """
-    _cl = (
-        (lambda svc: get_aws_client_for_region(svc, region))
-        if region
-        else (lambda svc: get_aws_client(svc))
-    )
+
+    def _cl(svc):
+        return get_client(svc, region)
+
     findings = []
     if include_global:
         findings.extend(_check_root_mfa())

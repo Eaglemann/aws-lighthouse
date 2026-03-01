@@ -3,7 +3,7 @@ from typing import Any, Dict, List
 
 from botocore.exceptions import BotoCoreError, ClientError
 
-from ..auth import get_aws_client, get_aws_client_for_region
+from ..auth import get_client
 from ..logger import logger
 
 _SNAPSHOT_AGE_DAYS = 90
@@ -108,7 +108,7 @@ def _check_unassociated_eips(ec2) -> List[Dict[str, Any]]:
 
 def run_cost_scan(region: str | None = None) -> List[Dict[str, Any]]:
     """Run all cost waste checks and return a unified list of findings."""
-    ec2 = get_aws_client_for_region("ec2", region) if region else get_aws_client("ec2")
+    ec2 = get_client("ec2", region)
     findings = []
     findings.extend(_check_unattached_ebs(ec2))
     findings.extend(_check_stopped_ec2(ec2))

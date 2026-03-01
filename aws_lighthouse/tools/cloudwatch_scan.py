@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, Set, Tuple
 
-from ..auth import get_aws_client, get_aws_client_for_region
+from ..auth import get_client
 from ..logger import logger
 
 # (namespace, metric_name, dimension_name) tuples required per resource type.
@@ -52,11 +52,10 @@ def detect_cloudwatch_gaps(region: str | None = None) -> List[Dict[str, Any]]:
     Terminated EC2 instances are skipped.
     Returns one finding per resource, listing every missing metric.
     """
-    _cl = (
-        (lambda svc: get_aws_client_for_region(svc, region))
-        if region
-        else get_aws_client
-    )
+
+    def _cl(svc):
+        return get_client(svc, region)
+
     cw = _cl("cloudwatch")
     ec2 = _cl("ec2")
     rds = _cl("rds")

@@ -92,3 +92,15 @@ def get_aws_client(service_name: str):
 def get_aws_client_for_region(service_name: str, region: str):
     """Provides a Boto3 client for a specific service in an explicit region."""
     return get_aws_session().client(service_name, region_name=region)
+
+
+def get_client(service_name: str, region: str | None = None):
+    """Provides a Boto3 client for a service, optionally in a specific region.
+
+    Prefer this over the bare get_aws_client / get_aws_client_for_region pair
+    wherever the region may or may not be present (e.g. scan functions that
+    accept an optional region parameter).
+    """
+    if region:
+        return get_aws_client_for_region(service_name, region)
+    return get_aws_client(service_name)

@@ -2,7 +2,7 @@ from typing import Any, Dict, List
 
 from botocore.exceptions import ClientError
 
-from ..auth import get_aws_client, get_aws_client_for_region
+from ..auth import get_client
 from ..logger import logger
 
 # Default tags every resource should carry
@@ -25,11 +25,9 @@ def check_tagging_compliance(
     if required_tags is None:
         required_tags = DEFAULT_REQUIRED_TAGS
 
-    _cl = (
-        (lambda svc: get_aws_client_for_region(svc, region))
-        if region
-        else get_aws_client
-    )
+    def _cl(svc):
+        return get_client(svc, region)
+
     findings: List[Dict[str, Any]] = []
 
     # ── EC2 ──────────────────────────────────────────────────────────────────
@@ -113,7 +111,7 @@ def check_tagging_compliance(
     if not include_s3:
         return findings
     try:
-        s3 = get_aws_client("s3")
+        s3 = get_client("s3")
         for bucket in s3.list_buckets().get("Buckets", []):
             name = bucket["Name"]
             try:
