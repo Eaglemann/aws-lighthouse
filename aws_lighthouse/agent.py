@@ -20,13 +20,6 @@ class AgentState(TypedDict):
     # Approval state is handled externally via should_require_approval() and approval_node.
 
 
-# 2. LLM Initialization
-# OLLAMA_HOST lets you point to a remote or Docker-networked Ollama instance.
-# Defaults to the standard local address.
-_OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=0, base_url=_OLLAMA_HOST)
-
-
 # 3. Tool Binding
 # Convert bare functions to LangChain @tools based on Bash specs from Phase 1
 @tool
@@ -235,17 +228,7 @@ tools = [
     tool_run_security_scan,
 ]
 
-llm_with_tools = llm.bind_tools(tools)
-
 from langgraph.prebuilt import ToolNode
-
-
-# 4. Node Constructors
-def agent_node(state: AgentState):
-    """The primary reasoning node."""
-    logger.action_start("Agent is thinking...")
-    response = llm_with_tools.invoke(state["messages"])
-    return {"messages": [response]}
 
 
 # The ToolNode executes the functions requested by the LLM
@@ -331,6 +314,18 @@ def should_require_approval(state: AgentState) -> str:
 def create_agent_graph():
     """Instantiate and compile the baseline LangGraph agent with a memory checkpointer."""
     from langgraph.checkpoint.memory import MemorySaver
+
+    # Deferred from module scope so importing agent.py never connects to Ollama.
+    # This lets --help, tests, and any non-shell code path import freely.
+    _ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+    llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=0, base_url=_ollama_host)
+    llm_with_tools = llm.bind_tools(tools)
+
+    def agent_node(state: AgentState):
+        """The primary reasoning node."""
+        logger.action_start("Agent is thinking...")
+        response = llm_with_tools.invoke(state["messages"])
+        return {"messages": [response]}
 
     workflow = StateGraph(AgentState)
 
