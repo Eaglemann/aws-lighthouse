@@ -186,9 +186,7 @@ def test_role_with_inline_star_policy_flagged():
             {
                 "RoleName": "bad-role",
                 "Path": "/",
-                "RolePolicyList": [
-                    {"PolicyName": "StarPolicy", "PolicyDocument": doc}
-                ],
+                "RolePolicyList": [{"PolicyName": "StarPolicy", "PolicyDocument": doc}],
                 "AttachedManagedPolicies": [],
             }
         ]
@@ -208,9 +206,7 @@ def test_group_with_inline_medium_policy_flagged():
         GroupDetailList=[
             {
                 "GroupName": "devs",
-                "GroupPolicyList": [
-                    {"PolicyName": "S3Star", "PolicyDocument": doc}
-                ],
+                "GroupPolicyList": [{"PolicyName": "S3Star", "PolicyDocument": doc}],
                 "AttachedManagedPolicies": [],
             }
         ]
@@ -243,9 +239,7 @@ def test_customer_managed_policy_via_policy_docs():
         Policies=[
             {
                 "Arn": "arn:aws:iam::123456789012:policy/BroadPolicy",
-                "PolicyVersionList": [
-                    {"IsDefaultVersion": True, "Document": doc}
-                ],
+                "PolicyVersionList": [{"IsDefaultVersion": True, "Document": doc}],
             }
         ],
     )
