@@ -52,9 +52,7 @@ jobs:
       run: uv sync --all-extras --dev
 
     - name: Audit Python dependencies with pip-audit
-      run: |
-        uv export --no-dev -o /tmp/requirements-audit.txt
-        uv run pip-audit -r /tmp/requirements-audit.txt
+      run: uv run pip-audit
 
   container-scan:
     runs-on: ubuntu-latest
