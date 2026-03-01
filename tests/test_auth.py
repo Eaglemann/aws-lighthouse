@@ -3,9 +3,16 @@
 from unittest.mock import MagicMock, patch
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError, NoCredentialsError
 
-from aws_lighthouse.auth import AuthManager, get_client
+from aws_lighthouse.auth import (
+    AuthManager,
+    _RETRY_CONFIG,
+    get_aws_client,
+    get_aws_client_for_region,
+    get_client,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -171,3 +178,50 @@ class TestGetClient:
             result = get_client("sts", region="")
         mock.assert_called_once_with("sts")
         assert result is mock_client
+
+
+# ---------------------------------------------------------------------------
+# Retry config — _RETRY_CONFIG is adaptive and applied everywhere
+# ---------------------------------------------------------------------------
+
+
+class TestRetryConfig:
+    def test_retry_config_is_adaptive_mode(self):
+        assert _RETRY_CONFIG.retries == {"mode": "adaptive"}
+
+    def test_retry_config_is_botocore_config_instance(self):
+        assert isinstance(_RETRY_CONFIG, Config)
+
+    def test_get_aws_client_passes_retry_config(self):
+        """get_aws_client must forward _RETRY_CONFIG to session.client()."""
+        mock_session = MagicMock(spec=boto3.Session)
+        mock_session.client.return_value = MagicMock()
+        with patch("aws_lighthouse.auth.get_aws_session", return_value=mock_session):
+            get_aws_client("ec2")
+        mock_session.client.assert_called_once_with("ec2", config=_RETRY_CONFIG)
+
+    def test_get_aws_client_for_region_passes_retry_config(self):
+        """get_aws_client_for_region must forward _RETRY_CONFIG to session.client()."""
+        mock_session = MagicMock(spec=boto3.Session)
+        mock_session.client.return_value = MagicMock()
+        with patch("aws_lighthouse.auth.get_aws_session", return_value=mock_session):
+            get_aws_client_for_region("s3", "eu-west-1")
+        mock_session.client.assert_called_once_with(
+            "s3", region_name="eu-west-1", config=_RETRY_CONFIG
+        )
+
+    def test_authenticate_passes_retry_config_to_sts(self):
+        """The STS validation call inside authenticate() must use _RETRY_CONFIG."""
+        manager = AuthManager()
+        mock_session = MagicMock(spec=boto3.Session)
+        mock_sts = MagicMock()
+        mock_sts.get_caller_identity.return_value = {"Arn": "arn:aws:iam::123:user/x"}
+        mock_session.client.return_value = mock_sts
+
+        with (
+            patch("boto3.Session", return_value=mock_session),
+            patch("aws_lighthouse.auth.logger"),
+        ):
+            manager.authenticate()
+
+        mock_session.client.assert_called_once_with("sts", config=_RETRY_CONFIG)
