@@ -11,20 +11,21 @@ def _check_unattached_ebs(ec2) -> List[Dict[str, Any]]:
     """Flag EBS volumes that are not attached to any instance."""
     findings = []
     try:
-        response = ec2.describe_volumes(
+        paginator = ec2.get_paginator("describe_volumes")
+        for page in paginator.paginate(
             Filters=[{"Name": "status", "Values": ["available"]}]
-        )
-        for vol in response.get("Volumes", []):
-            size = vol.get("Size", 0)
-            vol_type = vol.get("VolumeType", "unknown")
-            findings.append(
-                {
-                    "resource": vol["VolumeId"],
-                    "finding": f"Unattached EBS volume ({size} GB {vol_type}) — paying for storage with no instance",
-                    "remediation_type": "delete_ebs_volume",
-                    "remediation_label": "Delete EBS Volume",
-                }
-            )
+        ):
+            for vol in page.get("Volumes", []):
+                size = vol.get("Size", 0)
+                vol_type = vol.get("VolumeType", "unknown")
+                findings.append(
+                    {
+                        "resource": vol["VolumeId"],
+                        "finding": f"Unattached EBS volume ({size} GB {vol_type}) — paying for storage with no instance",
+                        "remediation_type": "delete_ebs_volume",
+                        "remediation_label": "Delete EBS Volume",
+                    }
+                )
     except Exception as e:
         logger.error(f"Failed to check unattached EBS volumes: {e}")
     return findings
@@ -34,21 +35,26 @@ def _check_stopped_ec2(ec2) -> List[Dict[str, Any]]:
     """Flag EC2 instances that are stopped but still incurring EBS costs."""
     findings = []
     try:
-        response = ec2.describe_instances(
+        paginator = ec2.get_paginator("describe_instances")
+        for page in paginator.paginate(
             Filters=[{"Name": "instance-state-name", "Values": ["stopped"]}]
-        )
-        for reservation in response.get("Reservations", []):
-            for inst in reservation.get("Instances", []):
-                name = next(
-                    (t["Value"] for t in inst.get("Tags", []) if t["Key"] == "Name"),
-                    inst["InstanceId"],
-                )
-                findings.append(
-                    {
-                        "resource": inst["InstanceId"],
-                        "finding": f"Stopped EC2 instance '{name}' ({inst.get('InstanceType')}) — EBS volumes still billed",
-                    }
-                )
+        ):
+            for reservation in page.get("Reservations", []):
+                for inst in reservation.get("Instances", []):
+                    name = next(
+                        (
+                            t["Value"]
+                            for t in inst.get("Tags", [])
+                            if t["Key"] == "Name"
+                        ),
+                        inst["InstanceId"],
+                    )
+                    findings.append(
+                        {
+                            "resource": inst["InstanceId"],
+                            "finding": f"Stopped EC2 instance '{name}' ({inst.get('InstanceType')}) — EBS volumes still billed",
+                        }
+                    )
     except Exception as e:
         logger.error(f"Failed to check stopped EC2 instances: {e}")
     return findings
@@ -58,20 +64,21 @@ def _check_old_snapshots(ec2) -> List[Dict[str, Any]]:
     """Flag owned EBS snapshots older than 90 days."""
     findings = []
     try:
-        response = ec2.describe_snapshots(OwnerIds=["self"])
+        paginator = ec2.get_paginator("describe_snapshots")
         cutoff = datetime.now(timezone.utc) - timedelta(days=_SNAPSHOT_AGE_DAYS)
-        for snap in response.get("Snapshots", []):
-            start_time = snap.get("StartTime")
-            if start_time and start_time < cutoff:
-                age = (datetime.now(timezone.utc) - start_time).days
-                size = snap.get("VolumeSize", 0)
-                description = snap.get("Description", "")
-                findings.append(
-                    {
-                        "resource": snap["SnapshotId"],
-                        "finding": f"EBS snapshot is {age} days old ({size} GB) — '{description}'",
-                    }
-                )
+        for page in paginator.paginate(OwnerIds=["self"]):
+            for snap in page.get("Snapshots", []):
+                start_time = snap.get("StartTime")
+                if start_time and start_time < cutoff:
+                    age = (datetime.now(timezone.utc) - start_time).days
+                    size = snap.get("VolumeSize", 0)
+                    description = snap.get("Description", "")
+                    findings.append(
+                        {
+                            "resource": snap["SnapshotId"],
+                            "finding": f"EBS snapshot is {age} days old ({size} GB) — '{description}'",
+                        }
+                    )
     except Exception as e:
         logger.error(f"Failed to check old EBS snapshots: {e}")
     return findings

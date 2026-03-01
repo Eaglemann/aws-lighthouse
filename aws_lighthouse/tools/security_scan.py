@@ -29,33 +29,35 @@ def _check_open_security_groups(ec2) -> List[Dict[str, Any]]:
     """Flag security groups that allow unrestricted ingress on SSH (22) or RDP (3389)."""
     findings = []
     try:
-        for sg in ec2.describe_security_groups().get("SecurityGroups", []):
-            for perm in sg.get("IpPermissions", []):
-                from_port = perm.get("FromPort", 0)
-                to_port = perm.get("ToPort", 65535)
-                open_cidrs = [
-                    r["CidrIp"]
-                    for r in perm.get("IpRanges", [])
-                    if r["CidrIp"] == "0.0.0.0/0"
-                ] + [
-                    r["CidrIpv6"]
-                    for r in perm.get("Ipv6Ranges", [])
-                    if r["CidrIpv6"] == "::/0"
-                ]
-                if not open_cidrs:
-                    continue
-                for port in (22, 3389):
-                    if from_port <= port <= to_port:
-                        findings.append(
-                            {
-                                "severity": "HIGH",
-                                "resource": sg["GroupId"],
-                                "finding": (
-                                    f"Security group '{sg.get('GroupName')}' allows port {port} "
-                                    f"from {', '.join(open_cidrs)}"
-                                ),
-                            }
-                        )
+        paginator = ec2.get_paginator("describe_security_groups")
+        for page in paginator.paginate():
+            for sg in page.get("SecurityGroups", []):
+                for perm in sg.get("IpPermissions", []):
+                    from_port = perm.get("FromPort", 0)
+                    to_port = perm.get("ToPort", 65535)
+                    open_cidrs = [
+                        r["CidrIp"]
+                        for r in perm.get("IpRanges", [])
+                        if r["CidrIp"] == "0.0.0.0/0"
+                    ] + [
+                        r["CidrIpv6"]
+                        for r in perm.get("Ipv6Ranges", [])
+                        if r["CidrIpv6"] == "::/0"
+                    ]
+                    if not open_cidrs:
+                        continue
+                    for port in (22, 3389):
+                        if from_port <= port <= to_port:
+                            findings.append(
+                                {
+                                    "severity": "HIGH",
+                                    "resource": sg["GroupId"],
+                                    "finding": (
+                                        f"Security group '{sg.get('GroupName')}' allows port {port} "
+                                        f"from {', '.join(open_cidrs)}"
+                                    ),
+                                }
+                            )
     except Exception as e:
         logger.error(f"Failed to check security groups: {e}")
     return findings
@@ -66,23 +68,27 @@ def _check_iam_users_mfa() -> List[Dict[str, Any]]:
     findings = []
     try:
         iam = get_aws_client("iam")
-        for user in iam.list_users().get("Users", []):
-            username = user["UserName"]
-            try:
-                iam.get_login_profile(UserName=username)
-            except ClientError as e:
-                if e.response["Error"]["Code"] == "NoSuchEntity":
-                    continue  # no console password — skip
-                raise
-            mfa_devices = iam.list_mfa_devices(UserName=username).get("MFADevices", [])
-            if not mfa_devices:
-                findings.append(
-                    {
-                        "severity": "HIGH",
-                        "resource": username,
-                        "finding": f"IAM user '{username}' has console access but no MFA device",
-                    }
+        paginator = iam.get_paginator("list_users")
+        for page in paginator.paginate():
+            for user in page.get("Users", []):
+                username = user["UserName"]
+                try:
+                    iam.get_login_profile(UserName=username)
+                except ClientError as e:
+                    if e.response["Error"]["Code"] == "NoSuchEntity":
+                        continue  # no console password — skip
+                    raise
+                mfa_devices = iam.list_mfa_devices(UserName=username).get(
+                    "MFADevices", []
                 )
+                if not mfa_devices:
+                    findings.append(
+                        {
+                            "severity": "HIGH",
+                            "resource": username,
+                            "finding": f"IAM user '{username}' has console access but no MFA device",
+                        }
+                    )
     except Exception as e:
         logger.error(f"Failed to check IAM user MFA: {e}")
     return findings
@@ -94,21 +100,23 @@ def _check_iam_key_age() -> List[Dict[str, Any]]:
     try:
         iam = get_aws_client("iam")
         now = datetime.now(timezone.utc)
-        for user in iam.list_users().get("Users", []):
-            for key in iam.list_access_keys(UserName=user["UserName"]).get(
-                "AccessKeyMetadata", []
-            ):
-                if key["Status"] != "Active":
-                    continue
-                age = (now - key["CreateDate"]).days
-                if age > 90:
-                    findings.append(
-                        {
-                            "severity": "MEDIUM",
-                            "resource": user["UserName"],
-                            "finding": f"Access key {key['AccessKeyId']} is {age} days old (>90 days)",
-                        }
-                    )
+        paginator = iam.get_paginator("list_users")
+        for page in paginator.paginate():
+            for user in page.get("Users", []):
+                for key in iam.list_access_keys(UserName=user["UserName"]).get(
+                    "AccessKeyMetadata", []
+                ):
+                    if key["Status"] != "Active":
+                        continue
+                    age = (now - key["CreateDate"]).days
+                    if age > 90:
+                        findings.append(
+                            {
+                                "severity": "MEDIUM",
+                                "resource": user["UserName"],
+                                "finding": f"Access key {key['AccessKeyId']} is {age} days old (>90 days)",
+                            }
+                        )
     except Exception as e:
         logger.error(f"Failed to check IAM access key age: {e}")
     return findings
@@ -224,31 +232,33 @@ def _check_imdsv2(ec2) -> List[Dict[str, Any]]:
     """Flag EC2 instances that still allow IMDSv1 (HttpTokens != required)."""
     findings = []
     try:
-        for res in ec2.describe_instances().get("Reservations", []):
-            for inst in res.get("Instances", []):
-                if inst.get("State", {}).get("Name") == "terminated":
-                    continue
-                if inst.get("MetadataOptions", {}).get("HttpTokens") != "required":
-                    name = next(
-                        (
-                            t["Value"]
-                            for t in inst.get("Tags", [])
-                            if t["Key"] == "Name"
-                        ),
-                        inst["InstanceId"],
-                    )
-                    findings.append(
-                        {
-                            "severity": "MEDIUM",
-                            "resource": inst["InstanceId"],
-                            "finding": (
-                                f"Instance '{name}' allows IMDSv1 (HttpTokens=optional)"
-                                " — vulnerable to SSRF credential theft"
+        paginator = ec2.get_paginator("describe_instances")
+        for page in paginator.paginate():
+            for res in page.get("Reservations", []):
+                for inst in res.get("Instances", []):
+                    if inst.get("State", {}).get("Name") == "terminated":
+                        continue
+                    if inst.get("MetadataOptions", {}).get("HttpTokens") != "required":
+                        name = next(
+                            (
+                                t["Value"]
+                                for t in inst.get("Tags", [])
+                                if t["Key"] == "Name"
                             ),
-                            "remediation_type": "enforce_imdsv2",
-                            "remediation_label": "Enforce IMDSv2",
-                        }
-                    )
+                            inst["InstanceId"],
+                        )
+                        findings.append(
+                            {
+                                "severity": "MEDIUM",
+                                "resource": inst["InstanceId"],
+                                "finding": (
+                                    f"Instance '{name}' allows IMDSv1 (HttpTokens=optional)"
+                                    " — vulnerable to SSRF credential theft"
+                                ),
+                                "remediation_type": "enforce_imdsv2",
+                                "remediation_label": "Enforce IMDSv2",
+                            }
+                        )
     except Exception as e:
         logger.error(f"Failed to check IMDSv2 enforcement: {e}")
     return findings
@@ -258,18 +268,20 @@ def _check_ebs_encryption(ec2) -> List[Dict[str, Any]]:
     """Flag EBS volumes that are not encrypted at rest."""
     findings = []
     try:
-        for vol in ec2.describe_volumes().get("Volumes", []):
-            if not vol.get("Encrypted", False):
-                findings.append(
-                    {
-                        "severity": "MEDIUM",
-                        "resource": vol["VolumeId"],
-                        "finding": (
-                            f"EBS volume is not encrypted"
-                            f" ({vol.get('Size', 0)} GB {vol.get('VolumeType', 'unknown')})"
-                        ),
-                    }
-                )
+        paginator = ec2.get_paginator("describe_volumes")
+        for page in paginator.paginate():
+            for vol in page.get("Volumes", []):
+                if not vol.get("Encrypted", False):
+                    findings.append(
+                        {
+                            "severity": "MEDIUM",
+                            "resource": vol["VolumeId"],
+                            "finding": (
+                                f"EBS volume is not encrypted"
+                                f" ({vol.get('Size', 0)} GB {vol.get('VolumeType', 'unknown')})"
+                            ),
+                        }
+                    )
     except Exception as e:
         logger.error(f"Failed to check EBS encryption: {e}")
     return findings

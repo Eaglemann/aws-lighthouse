@@ -35,48 +35,52 @@ def check_tagging_compliance(
     # ── EC2 ──────────────────────────────────────────────────────────────────
     try:
         ec2 = _cl("ec2")
-        for reservation in ec2.describe_instances().get("Reservations", []):
-            for inst in reservation.get("Instances", []):
-                # Skip terminated instances — they can't be tagged anyway
-                if inst.get("State", {}).get("Name") == "terminated":
-                    continue
-                existing = {t["Key"] for t in inst.get("Tags", [])}
-                missing = [tag for tag in required_tags if tag not in existing]
-                if missing:
-                    name = next(
-                        (
-                            t["Value"]
-                            for t in inst.get("Tags", [])
-                            if t["Key"] == "Name"
-                        ),
-                        inst["InstanceId"],
-                    )
-                    findings.append(
-                        {
-                            "resource_type": "EC2",
-                            "resource_id": inst["InstanceId"],
-                            "resource_name": name,
-                            "missing_tags": missing,
-                        }
-                    )
+        paginator = ec2.get_paginator("describe_instances")
+        for page in paginator.paginate():
+            for reservation in page.get("Reservations", []):
+                for inst in reservation.get("Instances", []):
+                    # Skip terminated instances — they can't be tagged anyway
+                    if inst.get("State", {}).get("Name") == "terminated":
+                        continue
+                    existing = {t["Key"] for t in inst.get("Tags", [])}
+                    missing = [tag for tag in required_tags if tag not in existing]
+                    if missing:
+                        name = next(
+                            (
+                                t["Value"]
+                                for t in inst.get("Tags", [])
+                                if t["Key"] == "Name"
+                            ),
+                            inst["InstanceId"],
+                        )
+                        findings.append(
+                            {
+                                "resource_type": "EC2",
+                                "resource_id": inst["InstanceId"],
+                                "resource_name": name,
+                                "missing_tags": missing,
+                            }
+                        )
     except Exception as e:
         logger.error(f"Failed to check EC2 tags: {e}")
 
     # ── RDS ──────────────────────────────────────────────────────────────────
     try:
         rds = _cl("rds")
-        for db in rds.describe_db_instances().get("DBInstances", []):
-            existing = {t["Key"] for t in db.get("TagList", [])}
-            missing = [tag for tag in required_tags if tag not in existing]
-            if missing:
-                findings.append(
-                    {
-                        "resource_type": "RDS",
-                        "resource_id": db["DBInstanceIdentifier"],
-                        "resource_name": db["DBInstanceIdentifier"],
-                        "missing_tags": missing,
-                    }
-                )
+        paginator = rds.get_paginator("describe_db_instances")
+        for page in paginator.paginate():
+            for db in page.get("DBInstances", []):
+                existing = {t["Key"] for t in db.get("TagList", [])}
+                missing = [tag for tag in required_tags if tag not in existing]
+                if missing:
+                    findings.append(
+                        {
+                            "resource_type": "RDS",
+                            "resource_id": db["DBInstanceIdentifier"],
+                            "resource_name": db["DBInstanceIdentifier"],
+                            "missing_tags": missing,
+                        }
+                    )
     except Exception as e:
         logger.error(f"Failed to check RDS tags: {e}")
 

@@ -41,28 +41,29 @@ def get_ec2_inventory(region: str | None = None) -> List[Dict[str, Any]]:
     ec2 = _client("ec2", region)
     instances = []
     try:
-        response = ec2.describe_instances()
-        for res in response.get("Reservations", []):
-            for inst in res.get("Instances", []):
-                # Safely extract Name tag
-                name = "Unknown"
-                for tag in inst.get("Tags", []):
-                    if tag["Key"] == "Name":
-                        name = tag["Value"]
-                        break
+        paginator = ec2.get_paginator("describe_instances")
+        for page in paginator.paginate():
+            for res in page.get("Reservations", []):
+                for inst in res.get("Instances", []):
+                    # Safely extract Name tag
+                    name = "Unknown"
+                    for tag in inst.get("Tags", []):
+                        if tag["Key"] == "Name":
+                            name = tag["Value"]
+                            break
 
-                instances.append(
-                    {
-                        "InstanceId": inst.get("InstanceId"),
-                        "Name": name,
-                        "Type": inst.get("InstanceType"),
-                        "State": inst.get("State", {}).get("Name"),
-                        "LaunchTime": inst.get("LaunchTime").strftime(
-                            "%Y-%m-%d %H:%M:%S"
-                        ),
-                        "KeyName": inst.get("KeyName", "None"),
-                    }
-                )
+                    instances.append(
+                        {
+                            "InstanceId": inst.get("InstanceId"),
+                            "Name": name,
+                            "Type": inst.get("InstanceType"),
+                            "State": inst.get("State", {}).get("Name"),
+                            "LaunchTime": inst.get("LaunchTime").strftime(
+                                "%Y-%m-%d %H:%M:%S"
+                            ),
+                            "KeyName": inst.get("KeyName", "None"),
+                        }
+                    )
         return instances
     except Exception as e:
         logger.error(f"Failed to list EC2 instances: {str(e)}")
@@ -74,17 +75,18 @@ def get_rds_inventory(region: str | None = None) -> List[Dict[str, Any]]:
     rds = _client("rds", region)
     instances = []
     try:
-        response = rds.describe_db_instances()
-        for db in response.get("DBInstances", []):
-            instances.append(
-                {
-                    "DBInstanceIdentifier": db.get("DBInstanceIdentifier"),
-                    "Engine": db.get("Engine"),
-                    "Class": db.get("DBInstanceClass"),
-                    "Status": db.get("DBInstanceStatus"),
-                    "PubliclyAccessible": db.get("PubliclyAccessible", False),
-                }
-            )
+        paginator = rds.get_paginator("describe_db_instances")
+        for page in paginator.paginate():
+            for db in page.get("DBInstances", []):
+                instances.append(
+                    {
+                        "DBInstanceIdentifier": db.get("DBInstanceIdentifier"),
+                        "Engine": db.get("Engine"),
+                        "Class": db.get("DBInstanceClass"),
+                        "Status": db.get("DBInstanceStatus"),
+                        "PubliclyAccessible": db.get("PubliclyAccessible", False),
+                    }
+                )
         return instances
     except Exception as e:
         logger.error(f"Failed to list RDS instances: {str(e)}")
