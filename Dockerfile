@@ -31,7 +31,8 @@ RUN groupadd --gid 1001 lighthouse \
 WORKDIR /app
 
 # ── Dependency layer (cached unless pyproject.toml / uv.lock changes) ────────
-COPY pyproject.toml uv.lock ./
+# README.md is required by hatchling when building the project wheel
+COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 # ── Application layer ─────────────────────────────────────────────────────────
