@@ -7,13 +7,12 @@ from botocore.config import Config
 from botocore.exceptions import ClientError, NoCredentialsError
 
 from aws_lighthouse.auth import (
-    AuthManager,
     _RETRY_CONFIG,
+    AuthManager,
     get_aws_client,
     get_aws_client_for_region,
     get_client,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

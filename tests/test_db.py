@@ -7,7 +7,6 @@ import pytest
 import aws_lighthouse.db as db_module
 from aws_lighthouse.db import DatabaseManager
 
-
 # ---------------------------------------------------------------------------
 # Fixture: fresh DatabaseManager pointing at a temp directory
 # ---------------------------------------------------------------------------

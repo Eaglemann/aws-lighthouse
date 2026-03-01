@@ -16,7 +16,6 @@ from aws_lighthouse.cli import (
     _section_security,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helper: capture Rich output in a string buffer
 # ---------------------------------------------------------------------------
