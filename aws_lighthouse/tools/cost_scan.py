@@ -1,6 +1,8 @@
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List
 
+from botocore.exceptions import BotoCoreError, ClientError
+
 from ..auth import get_aws_client, get_aws_client_for_region
 from ..logger import logger
 
@@ -26,7 +28,7 @@ def _check_unattached_ebs(ec2) -> List[Dict[str, Any]]:
                         "remediation_label": "Delete EBS Volume",
                     }
                 )
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check unattached EBS volumes: {e}")
     return findings
 
@@ -55,7 +57,7 @@ def _check_stopped_ec2(ec2) -> List[Dict[str, Any]]:
                             "finding": f"Stopped EC2 instance '{name}' ({inst.get('InstanceType')}) — EBS volumes still billed",
                         }
                     )
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check stopped EC2 instances: {e}")
     return findings
 
@@ -79,7 +81,7 @@ def _check_old_snapshots(ec2) -> List[Dict[str, Any]]:
                             "finding": f"EBS snapshot is {age} days old ({size} GB) — '{description}'",
                         }
                     )
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check old EBS snapshots: {e}")
     return findings
 
@@ -99,7 +101,7 @@ def _check_unassociated_eips(ec2) -> List[Dict[str, Any]]:
                         "remediation_label": "Release Elastic IP",
                     }
                 )
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check unassociated Elastic IPs: {e}")
     return findings
 

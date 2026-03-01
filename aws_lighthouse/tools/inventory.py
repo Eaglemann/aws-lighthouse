@@ -1,5 +1,7 @@
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any
+from botocore.exceptions import BotoCoreError, ClientError
+
 from ..auth import get_aws_client, get_aws_client_for_region
 from ..logger import logger
 
@@ -31,7 +33,7 @@ def get_s3_inventory() -> List[Dict[str, Any]]:
                 }
             )
         return buckets
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to list S3 buckets: {str(e)}")
         return [{"error": str(e)}]
 
@@ -65,7 +67,7 @@ def get_ec2_inventory(region: str | None = None) -> List[Dict[str, Any]]:
                         }
                     )
         return instances
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to list EC2 instances: {str(e)}")
         return [{"error": str(e)}]
 
@@ -88,7 +90,7 @@ def get_rds_inventory(region: str | None = None) -> List[Dict[str, Any]]:
                     }
                 )
         return instances
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to list RDS instances: {str(e)}")
         return [{"error": str(e)}]
 
@@ -126,6 +128,6 @@ def get_lambda_inventory(region: str | None = None) -> List[Dict[str, Any]]:
                     }
                 )
         return functions
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to list Lambda functions: {str(e)}")
         return [{"error": str(e)}]

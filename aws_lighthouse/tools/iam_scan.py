@@ -2,6 +2,8 @@ import json
 from typing import Any, Dict, List, Optional
 from urllib.parse import unquote
 
+from botocore.exceptions import BotoCoreError, ClientError
+
 from ..auth import get_aws_client
 from ..logger import logger
 
@@ -73,7 +75,7 @@ def _get_managed_policy_doc(
             raw = json.loads(unquote(raw))
         cache[policy_arn] = raw
         return raw
-    except Exception as e:
+    except (ClientError, BotoCoreError, ValueError) as e:
         logger.error(f"Failed to fetch policy {policy_arn}: {e}")
         cache[policy_arn] = None
         return None
@@ -118,7 +120,7 @@ def detect_overpermissive_iam() -> List[Dict[str, Any]]:
     def _check_inline(principal_type, principal_name, get_fn, list_fn, list_key):
         try:
             names = list_fn().get(list_key, [])
-        except Exception as e:
+        except (ClientError, BotoCoreError) as e:
             logger.error(f"Failed to list inline policies for {principal_name}: {e}")
             return
         for policy_name in names:
@@ -137,7 +139,7 @@ def detect_overpermissive_iam() -> List[Dict[str, Any]]:
                         if severity == "HIGH"
                         else "Action:<svc>:* on Resource:*",
                     )
-            except Exception as e:
+            except (ClientError, BotoCoreError, ValueError) as e:
                 logger.error(
                     f"Failed to read inline policy {policy_name} on {principal_name}: {e}"
                 )
@@ -145,7 +147,7 @@ def detect_overpermissive_iam() -> List[Dict[str, Any]]:
     def _check_attached(principal_type, principal_name, list_fn):
         try:
             policies = list_fn().get("AttachedPolicies", [])
-        except Exception as e:
+        except (ClientError, BotoCoreError) as e:
             logger.error(f"Failed to list attached policies for {principal_name}: {e}")
             return
         for p in policies:
@@ -199,7 +201,7 @@ def detect_overpermissive_iam() -> List[Dict[str, Any]]:
                 uname,
                 lambda u=uname: iam.list_attached_user_policies(UserName=u),
             )
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to enumerate IAM users: {e}")
 
     # ── Roles ─────────────────────────────────────────────────────────────────
@@ -223,7 +225,7 @@ def detect_overpermissive_iam() -> List[Dict[str, Any]]:
                 rname,
                 lambda r=rname: iam.list_attached_role_policies(RoleName=r),
             )
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to enumerate IAM roles: {e}")
 
     # ── Groups ────────────────────────────────────────────────────────────────
@@ -244,7 +246,7 @@ def detect_overpermissive_iam() -> List[Dict[str, Any]]:
                 gname,
                 lambda g=gname: iam.list_attached_group_policies(GroupName=g),
             )
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to enumerate IAM groups: {e}")
 
     # Sort: HIGH first, then by principal name

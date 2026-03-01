@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from ..auth import get_aws_client, get_aws_client_for_region
 from ..logger import logger
@@ -20,7 +20,7 @@ def _check_root_mfa() -> List[Dict[str, Any]]:
                     "finding": "Root account does not have MFA enabled",
                 }
             ]
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check root MFA: {e}")
     return []
 
@@ -58,7 +58,7 @@ def _check_open_security_groups(ec2) -> List[Dict[str, Any]]:
                                     ),
                                 }
                             )
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check security groups: {e}")
     return findings
 
@@ -89,7 +89,7 @@ def _check_iam_users_mfa() -> List[Dict[str, Any]]:
                             "finding": f"IAM user '{username}' has console access but no MFA device",
                         }
                     )
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check IAM user MFA: {e}")
     return findings
 
@@ -117,7 +117,7 @@ def _check_iam_key_age() -> List[Dict[str, Any]]:
                                 "finding": f"Access key {key['AccessKeyId']} is {age} days old (>90 days)",
                             }
                         )
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check IAM access key age: {e}")
     return findings
 
@@ -179,7 +179,7 @@ def _check_s3_block_public_access(s3s: List[Dict[str, Any]]) -> List[Dict[str, A
                             "remediation_label": "Enable S3 Block Public Access",
                         }
                     )
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check S3 public access: {e}")
     return findings
 
@@ -223,7 +223,7 @@ def _check_s3_encryption(s3s: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                             "remediation_label": "Enable S3 Default Encryption",
                         }
                     )
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check S3 encryption: {e}")
     return findings
 
@@ -259,7 +259,7 @@ def _check_imdsv2(ec2) -> List[Dict[str, Any]]:
                                 "remediation_label": "Enforce IMDSv2",
                             }
                         )
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check IMDSv2 enforcement: {e}")
     return findings
 
@@ -282,7 +282,7 @@ def _check_ebs_encryption(ec2) -> List[Dict[str, Any]]:
                             ),
                         }
                     )
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check EBS encryption: {e}")
     return findings
 
@@ -312,7 +312,7 @@ def _check_cloudtrail(ct) -> List[Dict[str, Any]]:
                         "remediation_label": "Start CloudTrail Logging",
                     }
                 )
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check CloudTrail: {e}")
     return findings
 
@@ -343,7 +343,7 @@ def _check_guardduty_enabled(gd) -> List[Dict[str, Any]]:
                         "remediation_label": "Enable GuardDuty",
                     }
                 ]
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check GuardDuty: {e}")
     return []
 
