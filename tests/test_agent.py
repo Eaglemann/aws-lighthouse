@@ -1,25 +1,16 @@
 """
 Tests for the LangGraph agent security gate (should_require_approval)
 and the approval_node approval/denial paths.
-
-ChatOllama is mocked at the sys.modules level before agent.py is imported
-because the module instantiates the LLM at import time (BP-C2 in NEXT_STEPS).
-Remove the sys.modules patch once that is fixed.
 """
 
-import sys
 from unittest.mock import MagicMock, patch
 
-# Prevent module-level ChatOllama() from trying to connect to Ollama.
-if "langchain_ollama" not in sys.modules:
-    sys.modules["langchain_ollama"] = MagicMock()
-
-from aws_lighthouse.agent import (  # noqa: E402
+from aws_lighthouse.agent import (
     SAFE_TOOLS,
     approval_node,
     should_require_approval,
 )
-from langchain_core.messages import AIMessage, ToolMessage  # noqa: E402
+from langchain_core.messages import AIMessage, ToolMessage
 
 
 # ---------------------------------------------------------------------------
