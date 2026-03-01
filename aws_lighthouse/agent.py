@@ -17,7 +17,7 @@ class AgentState(TypedDict):
     """The complete state of the LangGraph execution loop."""
 
     messages: Annotated[Sequence[BaseMessage], add_messages]
-    # We will expand this with approval states in Step 3.3
+    # Approval state is handled externally via should_require_approval() and approval_node.
 
 
 # 2. LLM Initialization
@@ -288,11 +288,16 @@ def approval_node(state: AgentState):
         return {"messages": rejections}
 
     logger.success("Execution plan approved. Proceeding...")
-    return None  # Proceed down the state graph
+    return {}  # Empty update — proceed with existing tool calls in state
 
 
+# SAFE_TOOLS: exact tool name strings that bypass the human approval node.
+# Only read-only, non-mutative tools belong here.
+# NEVER add a destructive tool — doing so silently removes user approval for that tool.
+# The routing function should_require_approval() consults this set.
 SAFE_TOOLS = {
-    "tool_read_file",
+    # tool_read_file intentionally excluded: it can access any local path,
+    # including ~/.aws/credentials and ~/.ssh/. Requires approval + path check in bash.py.
     "parse_terraform_context",
     "tool_get_enabled_regions",
     "tool_get_ec2_inventory",

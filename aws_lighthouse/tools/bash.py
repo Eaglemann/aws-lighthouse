@@ -1,10 +1,43 @@
 import subprocess
 import os
+from pathlib import Path
 from typing import Dict, Any, Optional
 from pydantic import BaseModel, Field
 
 # These are standard functions, not Langchain `@tool`s yet,
 # so they can be easily tested and reused. We will wrap them in `@tool` later.
+
+# Paths the LLM must never read or write — checked after symlink/.. resolution.
+# WARNING: shell=True in execute_bash has no command blocklist beyond this.
+# See NEXT_STEPS.md item 3 for the planned _DANGEROUS_PATTERNS guard.
+_BLOCKED_PREFIXES: tuple[str, ...] = tuple(
+    str(Path(p).expanduser())
+    for p in (
+        "~/.aws",
+        "~/.ssh",
+        "~/.gnupg",
+        "~/.config/gcloud",
+    )
+)
+_BLOCKED_EXACT: frozenset[str] = frozenset({
+    "/etc/shadow",
+    "/etc/sudoers",
+    "/etc/master.passwd",
+})
+
+
+def _is_blocked_path(filepath: str) -> bool:
+    """Return True if the resolved path falls under a sensitive prefix or exact block."""
+    try:
+        resolved = str(Path(filepath).expanduser().resolve())
+    except (OSError, ValueError):
+        resolved = str(Path(filepath).expanduser())
+    if resolved in _BLOCKED_EXACT:
+        return True
+    return any(
+        resolved == prefix or resolved.startswith(prefix + os.sep)
+        for prefix in _BLOCKED_PREFIXES
+    )
 
 
 class ReadFileInput(BaseModel):
@@ -18,7 +51,9 @@ class ReadFileInput(BaseModel):
 
 
 def read_file(args: ReadFileInput) -> str:
-    """Reads the contents of a local file safely."""
+    """Reads the contents of a local file."""
+    if _is_blocked_path(args.filepath):
+        return f"Error: Access to '{args.filepath}' is blocked for security reasons."
     if not os.path.exists(args.filepath):
         return f"Error: File '{args.filepath}' does not exist."
     try:
@@ -45,6 +80,8 @@ class WriteFileInput(BaseModel):
 
 def write_file(args: WriteFileInput) -> str:
     """Writes content to a local file, creating parent directories if needed."""
+    if _is_blocked_path(args.filepath):
+        return f"Error: Writing to '{args.filepath}' is blocked for security reasons."
     if os.path.exists(args.filepath) and not args.overwrite:
         return f"Error: File '{args.filepath}' exists and overwrite is set to False."
     try:
