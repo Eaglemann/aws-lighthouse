@@ -64,11 +64,11 @@ jobs:
 
     - name: Scan container image with Trivy
       uses: aquasecurity/trivy-action@0.30.0
-      continue-on-error: true
       with:
         image-ref: aws-lighthouse:ci
         format: sarif
         output: trivy-results.sarif
+        exit-code: "0"
         severity: CRITICAL,HIGH
         ignore-unfixed: true
 
