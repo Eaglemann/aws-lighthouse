@@ -6,6 +6,7 @@ ChatOllama is mocked at the sys.modules level before agent.py is imported
 because the module instantiates the LLM at import time (BP-C2 in NEXT_STEPS).
 Remove the sys.modules patch once that is fixed.
 """
+
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -83,7 +84,9 @@ def test_mixed_batch_with_one_destructive_requires_approval():
 
 def test_unknown_tool_name_requires_approval():
     """An unrecognised tool name must never silently bypass approval."""
-    assert should_require_approval(_state([_tc("tool_injected_by_prompt")])) == "approval"
+    assert (
+        should_require_approval(_state([_tc("tool_injected_by_prompt")])) == "approval"
+    )
 
 
 def test_tool_read_file_is_not_in_safe_tools():
@@ -115,8 +118,7 @@ def test_approval_node_returns_empty_dict_on_approval():
     msg.content = "I will terminate the instance."
     state = {"messages": [msg]}
 
-    with patch("typer.prompt", return_value="y"), \
-         patch("aws_lighthouse.agent.logger"):
+    with patch("typer.prompt", return_value="y"), patch("aws_lighthouse.agent.logger"):
         result = approval_node(state)
 
     assert result == {}, (
@@ -138,8 +140,7 @@ def test_approval_node_denial_injects_tool_message_per_call():
     msg.content = ""
     state = {"messages": [msg]}
 
-    with patch("typer.prompt", return_value="n"), \
-         patch("aws_lighthouse.agent.logger"):
+    with patch("typer.prompt", return_value="n"), patch("aws_lighthouse.agent.logger"):
         result = approval_node(state)
 
     assert result is not None
@@ -160,8 +161,7 @@ def test_approval_node_denial_does_not_return_none():
     msg.content = ""
     state = {"messages": [msg]}
 
-    with patch("typer.prompt", return_value="n"), \
-         patch("aws_lighthouse.agent.logger"):
+    with patch("typer.prompt", return_value="n"), patch("aws_lighthouse.agent.logger"):
         result = approval_node(state)
 
     assert result is not None, (

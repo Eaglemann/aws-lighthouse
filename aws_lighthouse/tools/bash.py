@@ -19,11 +19,13 @@ _BLOCKED_PREFIXES: tuple[str, ...] = tuple(
         "~/.config/gcloud",
     )
 )
-_BLOCKED_EXACT: frozenset[str] = frozenset({
-    "/etc/shadow",
-    "/etc/sudoers",
-    "/etc/master.passwd",
-})
+_BLOCKED_EXACT: frozenset[str] = frozenset(
+    {
+        "/etc/shadow",
+        "/etc/sudoers",
+        "/etc/master.passwd",
+    }
+)
 
 
 def _is_blocked_path(filepath: str) -> bool:
