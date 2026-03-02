@@ -2,6 +2,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from botocore.exceptions import BotoCoreError, ClientError
+
 from ..auth import get_client
 from ..logger import logger
 
@@ -18,7 +20,7 @@ def _fetch_ri_coverage(ce, period: dict) -> dict[str, Any]:
                 totals.get("CoverageCost", {}).get("OnDemandCost", 0) or 0
             ),
         }
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to fetch RI coverage: {e}")
         return {"ri_coverage_pct": None, "ri_on_demand_cost": None}
 
@@ -31,7 +33,7 @@ def _fetch_ri_utilization(ce, period: dict) -> dict[str, Any]:
             "ri_utilization_pct": float(totals.get("UtilizationPercentage", 0) or 0),
             "ri_unused_cost": float(totals.get("UnusedRecurringFee", 0) or 0),
         }
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to fetch RI utilization: {e}")
         return {"ri_utilization_pct": None, "ri_unused_cost": None}
 
@@ -44,7 +46,7 @@ def _fetch_sp_coverage(ce, period: dict) -> dict[str, Any]:
             "sp_coverage_pct": float(cov.get("CoveragePercentage", 0) or 0),
             "sp_on_demand_cost": float(cov.get("OnDemandCost", 0) or 0),
         }
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to fetch SP coverage: {e}")
         return {"sp_coverage_pct": None, "sp_on_demand_cost": None}
 
@@ -59,7 +61,7 @@ def _fetch_sp_utilization(ce, period: dict) -> dict[str, Any]:
             "sp_utilization_pct": float(util.get("UtilizationPercentage", 0) or 0),
             "sp_unused_commitment": float(util.get("UnusedCommitment", 0) or 0),
         }
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to fetch SP utilization: {e}")
         return {"sp_utilization_pct": None, "sp_unused_commitment": None}
 

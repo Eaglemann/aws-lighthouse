@@ -1,3 +1,5 @@
+from botocore.exceptions import BotoCoreError, ClientError
+
 from ..auth import get_client
 from ..logger import logger
 from ..types import CloudWatchFinding
@@ -34,7 +36,7 @@ def _build_alarm_index(cw) -> set[tuple[str, str, str, str]]:
                 metric = alarm.get("MetricName", "")
                 for dim in alarm.get("Dimensions", []):
                     index.add((ns, metric, dim["Name"], dim["Value"]))
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to fetch CloudWatch alarms: {e}")
     return index
 
@@ -93,7 +95,7 @@ def detect_cloudwatch_gaps(region: str | None = None) -> list[CloudWatchFinding]
                                 "missing_alarms": missing,
                             }
                         )
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check EC2 alarm gaps: {e}")
 
     # ── RDS ──────────────────────────────────────────────────────────────────
@@ -116,7 +118,7 @@ def detect_cloudwatch_gaps(region: str | None = None) -> list[CloudWatchFinding]
                             "missing_alarms": missing,
                         }
                     )
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check RDS alarm gaps: {e}")
 
     # ── Lambda ────────────────────────────────────────────────────────────────
@@ -140,7 +142,7 @@ def detect_cloudwatch_gaps(region: str | None = None) -> list[CloudWatchFinding]
                             "missing_alarms": missing,
                         }
                     )
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check Lambda alarm gaps: {e}")
 
     return findings

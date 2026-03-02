@@ -1,3 +1,5 @@
+from botocore.exceptions import BotoCoreError, ClientError
+
 from ..auth import get_client
 from ..logger import logger
 
@@ -15,6 +17,6 @@ def get_enabled_regions() -> list[str]:
             ]
         )
         return sorted(r["RegionName"] for r in response.get("Regions", []))
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to list enabled regions: {e}")
         return []

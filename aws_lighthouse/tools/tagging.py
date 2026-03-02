@@ -1,4 +1,4 @@
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from ..auth import get_client
 from ..logger import logger
@@ -58,7 +58,7 @@ def check_tagging_compliance(
                                 "missing_tags": missing,
                             }
                         )
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check EC2 tags: {e}")
 
     # ── RDS ──────────────────────────────────────────────────────────────────
@@ -78,7 +78,7 @@ def check_tagging_compliance(
                             "missing_tags": missing,
                         }
                     )
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check RDS tags: {e}")
 
     # ── Lambda ────────────────────────────────────────────────────────────────
@@ -93,7 +93,7 @@ def check_tagging_compliance(
                     tags_by_arn[resource["ResourceARN"]] = {
                         t["Key"] for t in resource.get("Tags", [])
                     }
-        except Exception as e:
+        except (ClientError, BotoCoreError) as e:
             logger.error(
                 f"Bulk Lambda tag fetch failed, tagging check will use empty sets: {e}"
             )
@@ -114,7 +114,7 @@ def check_tagging_compliance(
                             "missing_tags": missing,
                         }
                     )
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check Lambda tags: {e}")
 
     # ── S3 (global service — skip when iterating per-region to avoid duplicates) ──
@@ -142,7 +142,7 @@ def check_tagging_compliance(
                         "missing_tags": missing,
                     }
                 )
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check S3 tags: {e}")
 
     return findings

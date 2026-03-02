@@ -1,3 +1,4 @@
+from botocore.exceptions import BotoCoreError, ClientError
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
@@ -27,7 +28,7 @@ def s3_block_public_access(args: S3BlockPublicAccessInput) -> str:
         )
         logger.success(f"Applied Block Public Access to S3 bucket: {args.bucket_name}")
         return f"Success applying block public access to {args.bucket_name}"
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(
             f"Failed to apply Block Public Access to {args.bucket_name}: {str(e)}"
         )

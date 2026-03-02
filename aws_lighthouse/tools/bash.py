@@ -155,7 +155,7 @@ def read_file(args: ReadFileInput) -> str:
             if args.max_lines and len(lines) > args.max_lines:
                 return "".join(lines[: args.max_lines]) + "\n...[TRUNCATED]..."
             return "".join(lines)
-    except Exception as e:
+    except (OSError, UnicodeDecodeError) as e:
         return f"Error reading file '{args.filepath}': {str(e)}"
 
 
@@ -182,7 +182,7 @@ def write_file(args: WriteFileInput) -> str:
         with open(args.filepath, "w", encoding="utf-8") as f:
             f.write(args.content)
         return f"Successfully wrote to {args.filepath}"
-    except Exception as e:
+    except OSError as e:
         return f"Error writing file '{args.filepath}': {str(e)}"
 
 

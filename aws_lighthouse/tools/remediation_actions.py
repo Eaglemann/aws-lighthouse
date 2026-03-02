@@ -1,3 +1,5 @@
+from botocore.exceptions import BotoCoreError, ClientError
+
 from ..auth import get_client
 from ..logger import logger
 
@@ -16,7 +18,7 @@ def apply_s3_block_public_access(bucket_name: str, region: str | None = None) ->
             },
         )
         return True
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to enable Block Public Access on {bucket_name}: {e}")
         return False
 
@@ -27,7 +29,7 @@ def delete_ebs_volume(volume_id: str, region: str | None = None) -> bool:
         ec2 = get_client("ec2", region)
         ec2.delete_volume(VolumeId=volume_id)
         return True
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to delete EBS volume {volume_id}: {e}")
         return False
 
@@ -41,7 +43,7 @@ def release_eip(allocation_id: str, region: str | None = None) -> bool:
         else:
             ec2.release_address(PublicIp=allocation_id)
         return True
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to release Elastic IP {allocation_id}: {e}")
         return False
 
@@ -55,7 +57,7 @@ def enable_guardduty(resource: str, region: str | None = None) -> bool:
         else:
             gd.update_detector(DetectorId=resource, Enable=True)
         return True
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to enable GuardDuty ({resource}): {e}")
         return False
 
@@ -66,7 +68,7 @@ def enable_cloudtrail_logging(trail_name: str, region: str | None = None) -> boo
         ct = get_client("cloudtrail", region)
         ct.start_logging(Name=trail_name)
         return True
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to start CloudTrail logging for {trail_name}: {e}")
         return False
 
@@ -81,7 +83,7 @@ def enforce_imdsv2(instance_id: str, region: str | None = None) -> bool:
             HttpEndpoint="enabled",
         )
         return True
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to enforce IMDSv2 on {instance_id}: {e}")
         return False
 
@@ -99,6 +101,6 @@ def apply_s3_default_encryption(bucket_name: str, region: str | None = None) -> 
             },
         )
         return True
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to apply default encryption to {bucket_name}: {e}")
         return False

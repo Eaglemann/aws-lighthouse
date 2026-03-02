@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta
 from typing import Any
 
+from botocore.exceptions import BotoCoreError, ClientError
+
 from ..auth import get_client
 from ..logger import logger
 
@@ -47,6 +49,6 @@ def get_monthly_cost_summary(days: int = 14) -> dict[str, Any]:
             "breakdown": sorted_sc,
         }
 
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to retrieve cost explorer metrics: {str(e)}")
         return {"error": str(e)}

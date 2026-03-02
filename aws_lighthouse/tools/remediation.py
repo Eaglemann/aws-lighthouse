@@ -1,3 +1,4 @@
+from botocore.exceptions import BotoCoreError, ClientError
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
@@ -22,7 +23,7 @@ def terminate_ec2(args: TerminateEC2Input) -> str:
             f"Successfully requested termination for {len(term_instances)} instances."
         )
         return f"Terminated {len(term_instances)} instances."
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to terminate EC2 instances: {str(e)}")
         return f"Error: {str(e)}"
 
@@ -40,14 +41,14 @@ def delete_ebs(args: DeleteEBSInput) -> str:
     failed: list[str] = []
     try:
         ec2 = get_client("ec2")
-    except Exception as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to initialise EC2 client: {str(e)}")
         return f"Error: {str(e)}"
     for vid in args.volume_ids:
         try:
             ec2.delete_volume(VolumeId=vid)
             deleted.append(vid)
-        except Exception as e:
+        except (ClientError, BotoCoreError) as e:
             logger.error(f"Failed to delete EBS volume {vid}: {str(e)}")
             failed.append(vid)
     if deleted:
