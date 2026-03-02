@@ -191,3 +191,48 @@ def test_apply_s3_default_encryption_failure_returns_false():
     with patch(f"{MOD}.get_client", return_value=mock_s3):
         result = apply_s3_default_encryption("bad-bucket")
     assert result is False
+
+
+# ── region forwarding ─────────────────────────────────────────────────────────
+
+
+def test_apply_s3_block_public_access_passes_region():
+    with patch(f"{MOD}.get_client", return_value=MagicMock()) as mock_gc:
+        apply_s3_block_public_access("b", region="eu-west-1")
+    mock_gc.assert_called_once_with("s3", "eu-west-1")
+
+
+def test_delete_ebs_volume_passes_region():
+    with patch(f"{MOD}.get_client", return_value=MagicMock()) as mock_gc:
+        delete_ebs_volume("vol-x", region="us-west-2")
+    mock_gc.assert_called_once_with("ec2", "us-west-2")
+
+
+def test_release_eip_passes_region():
+    with patch(f"{MOD}.get_client", return_value=MagicMock()) as mock_gc:
+        release_eip("eipalloc-abc", region="ap-southeast-1")
+    mock_gc.assert_called_once_with("ec2", "ap-southeast-1")
+
+
+def test_enable_guardduty_passes_region():
+    with patch(f"{MOD}.get_client", return_value=MagicMock()) as mock_gc:
+        enable_guardduty("guardduty", region="us-east-1")
+    mock_gc.assert_called_once_with("guardduty", "us-east-1")
+
+
+def test_enable_cloudtrail_logging_passes_region():
+    with patch(f"{MOD}.get_client", return_value=MagicMock()) as mock_gc:
+        enable_cloudtrail_logging("my-trail", region="us-east-2")
+    mock_gc.assert_called_once_with("cloudtrail", "us-east-2")
+
+
+def test_enforce_imdsv2_passes_region():
+    with patch(f"{MOD}.get_client", return_value=MagicMock()) as mock_gc:
+        enforce_imdsv2("i-abc", region="ca-central-1")
+    mock_gc.assert_called_once_with("ec2", "ca-central-1")
+
+
+def test_apply_s3_default_encryption_passes_region():
+    with patch(f"{MOD}.get_client", return_value=MagicMock()) as mock_gc:
+        apply_s3_default_encryption("b", region="eu-central-1")
+    mock_gc.assert_called_once_with("s3", "eu-central-1")
