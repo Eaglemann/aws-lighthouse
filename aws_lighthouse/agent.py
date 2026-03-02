@@ -2,7 +2,7 @@
 import json
 import os
 from collections.abc import Sequence
-from typing import Annotated, TypedDict
+from typing import Annotated, NotRequired, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.tools import tool
@@ -19,7 +19,9 @@ class AgentState(TypedDict):
     """The complete state of the LangGraph execution loop."""
 
     messages: Annotated[Sequence[BaseMessage], add_messages]
-    # Approval state is handled externally via should_require_approval() and approval_node.
+    # Set by approval_node: True = user approved, False = user denied.
+    # Consumed by _route_after_approval to decide whether to run tools.
+    approved: NotRequired[bool]
 
 
 # 3. Tool Binding
@@ -242,8 +244,14 @@ from langgraph.prebuilt import ToolNode
 tool_node = ToolNode(tools)
 
 
-def approval_node(state: AgentState):
-    """The Human-in-the-loop intercept node."""
+def approval_node(state: AgentState) -> dict:
+    """The Human-in-the-loop intercept node.
+
+    Sets state["approved"] = True on approval, False on denial.
+    On denial, also injects synthetic ToolMessage rejections so the LLM
+    receives a well-formed response for each pending tool call.
+    _route_after_approval() reads the approved flag to decide the next node.
+    """
     import typer
 
     # Find the last AIMessage with tool calls
@@ -264,21 +272,30 @@ def approval_node(state: AgentState):
     choice = typer.prompt("\nDo you approve these actions? (y/n)", default="n")
     if choice.lower() != "y":
         logger.error("User denied the execution plan.")
-        # Returning a synthetic tool error so the LLM knows it was rejected
         from langchain_core.messages import ToolMessage
 
-        rejections = []
-        for tc in last_message.tool_calls:
-            rejections.append(
-                ToolMessage(
-                    content="User explicitly denied execution of this tool.",
-                    tool_call_id=tc["id"],
-                )
+        rejections = [
+            ToolMessage(
+                content="User explicitly denied execution of this tool.",
+                tool_call_id=tc["id"],
             )
-        return {"messages": rejections}
+            for tc in last_message.tool_calls
+        ]
+        # approved=False prevents _route_after_approval from reaching ToolNode
+        return {"approved": False, "messages": rejections}
 
     logger.success("Execution plan approved. Proceeding...")
-    return {}  # Empty update — proceed with existing tool calls in state
+    return {"approved": True}
+
+
+def _route_after_approval(state: AgentState) -> str:
+    """Conditional edge: route to tools only if the user approved.
+
+    Defaults to 'agent' when approved is absent or False, so a denial
+    always routes back to the LLM (which can acknowledge the denial and
+    ask the user what to do next) rather than executing the tools.
+    """
+    return "tools" if state.get("approved") else "agent"
 
 
 # SAFE_TOOLS: exact tool name strings that bypass the human approval node.
@@ -349,8 +366,15 @@ def create_agent_graph():
         {"end": END, "approval": "approval", "tools": "tools"},
     )
 
-    # After approval, we execute tools
-    workflow.add_edge("approval", "tools")
+    # After approval: run tools on approval, return to agent on denial.
+    # The unconditional add_edge("approval","tools") was the bug: it routed
+    # to ToolNode regardless of the user's decision, relying on ToolNode's
+    # undefined behaviour when all tool_call_ids already had ToolMessage responses.
+    workflow.add_conditional_edges(
+        "approval",
+        _route_after_approval,
+        {"tools": "tools", "agent": "agent"},
+    )
 
     # After tools execute, we go back to the agent
     workflow.add_edge("tools", "agent")
