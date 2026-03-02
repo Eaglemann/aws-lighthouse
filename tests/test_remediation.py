@@ -1,6 +1,6 @@
 from unittest.mock import MagicMock, patch
 
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from aws_lighthouse.tools.remediation import (
     DeleteEBSInput,
@@ -79,7 +79,7 @@ def test_delete_ebs_all_fail():
 
 
 def test_delete_ebs_client_init_error_returns_error_string():
-    with patch(f"{MOD}.get_client", side_effect=Exception("no credentials")):
+    with patch(f"{MOD}.get_client", side_effect=BotoCoreError()):
         result = delete_ebs.func(DeleteEBSInput(volume_ids=["vol-z"]))
     assert result.startswith("Error:")
 

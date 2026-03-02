@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock, patch
 
+from botocore.exceptions import BotoCoreError
+
 from aws_lighthouse.tools.cloudwatch_scan import (
     _build_alarm_index,
     detect_cloudwatch_gaps,
@@ -36,7 +38,7 @@ def test_build_alarm_index_empty_pages():
 
 def test_build_alarm_index_api_error_returns_empty():
     cw = MagicMock()
-    cw.get_paginator.side_effect = Exception("denied")
+    cw.get_paginator.side_effect = BotoCoreError()
     assert _build_alarm_index(cw) == set()
 
 
@@ -158,7 +160,7 @@ def test_ec2_api_error_returns_no_ec2_findings():
     cw = MagicMock()
     cw.get_paginator.return_value.paginate.return_value = [{"MetricAlarms": []}]
     ec2 = MagicMock()
-    ec2.get_paginator.side_effect = Exception("denied")
+    ec2.get_paginator.side_effect = BotoCoreError()
     rds = MagicMock()
     rds.get_paginator.return_value.paginate.return_value = [{"DBInstances": []}]
 
@@ -218,7 +220,7 @@ def test_lambda_api_error_doesnt_break_other_findings():
     db = {"DBInstanceIdentifier": "prod-db"}
     cw, ec2, rds = _make_clients(dbs=[db])
     bad_lmb = MagicMock()
-    bad_lmb.get_paginator.side_effect = Exception("denied")
+    bad_lmb.get_paginator.side_effect = BotoCoreError()
     findings = _run(cw, ec2, rds, lmb=bad_lmb)
     assert not any(f["resource_type"] == "Lambda" for f in findings)
     assert any(f["resource_type"] == "RDS" for f in findings)

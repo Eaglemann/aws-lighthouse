@@ -1,6 +1,6 @@
 from unittest.mock import MagicMock, patch
 
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from aws_lighthouse.tools.tagging import check_tagging_compliance
 
@@ -221,7 +221,7 @@ def test_lambda_partially_tagged_reports_only_missing():
 
 def test_lambda_bulk_tag_fetch_error_treats_as_no_tags():
     tagging = MagicMock()
-    tagging.get_paginator.side_effect = Exception("access denied")
+    tagging.get_paginator.side_effect = BotoCoreError()
     findings = _run(
         lmb=_make_lambda([_FN]),
         tagging=tagging,
@@ -262,7 +262,7 @@ def test_lambda_bulk_tags_two_pages_collects_all():
 
 def test_lambda_api_error_doesnt_break_other_findings():
     lmb = MagicMock()
-    lmb.get_paginator.side_effect = Exception("denied")
+    lmb.get_paginator.side_effect = BotoCoreError()
     db = {"DBInstanceIdentifier": "ok-db", "TagList": []}
     findings = _run(rds=_make_rds([db]), lmb=lmb, required_tags=["Owner"])
     # RDS finding still returned despite Lambda error

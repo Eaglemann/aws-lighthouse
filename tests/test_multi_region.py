@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock, patch
 
+from botocore.exceptions import BotoCoreError
+
 from aws_lighthouse.tools.multi_region import get_enabled_regions
 
 MOD = "aws_lighthouse.tools.multi_region"
@@ -44,7 +46,7 @@ def test_empty_regions():
 
 def test_api_error_returns_empty():
     mock_ec2 = MagicMock()
-    mock_ec2.describe_regions.side_effect = Exception("denied")
+    mock_ec2.describe_regions.side_effect = BotoCoreError()
     with patch(f"{MOD}.get_client", return_value=mock_ec2):
         regions = get_enabled_regions()
     assert regions == []

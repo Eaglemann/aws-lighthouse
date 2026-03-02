@@ -1,6 +1,8 @@
 import threading
 from unittest.mock import MagicMock, patch
 
+from botocore.exceptions import BotoCoreError
+
 from aws_lighthouse.tools.ri_sp_coverage import (
     _fetch_ri_coverage,
     _fetch_ri_utilization,
@@ -66,7 +68,7 @@ def test_all_fields_populated():
 
 def test_ri_coverage_api_error_sets_none():
     mock_ce = _make_ce()
-    mock_ce.get_reservation_coverage.side_effect = Exception("access denied")
+    mock_ce.get_reservation_coverage.side_effect = BotoCoreError()
     with patch(f"{MOD}.get_client", return_value=mock_ce):
         result = get_ri_sp_coverage()
     assert result["ri_coverage_pct"] is None
@@ -77,7 +79,7 @@ def test_ri_coverage_api_error_sets_none():
 
 def test_ri_utilization_api_error_sets_none():
     mock_ce = _make_ce()
-    mock_ce.get_reservation_utilization.side_effect = Exception("denied")
+    mock_ce.get_reservation_utilization.side_effect = BotoCoreError()
     with patch(f"{MOD}.get_client", return_value=mock_ce):
         result = get_ri_sp_coverage()
     assert result["ri_utilization_pct"] is None
@@ -86,7 +88,7 @@ def test_ri_utilization_api_error_sets_none():
 
 def test_sp_coverage_api_error_sets_none():
     mock_ce = _make_ce()
-    mock_ce.get_savings_plans_coverage.side_effect = Exception("denied")
+    mock_ce.get_savings_plans_coverage.side_effect = BotoCoreError()
     with patch(f"{MOD}.get_client", return_value=mock_ce):
         result = get_ri_sp_coverage()
     assert result["sp_coverage_pct"] is None
@@ -95,7 +97,7 @@ def test_sp_coverage_api_error_sets_none():
 
 def test_sp_utilization_api_error_sets_none():
     mock_ce = _make_ce()
-    mock_ce.get_savings_plans_utilization.side_effect = Exception("denied")
+    mock_ce.get_savings_plans_utilization.side_effect = BotoCoreError()
     with patch(f"{MOD}.get_client", return_value=mock_ce):
         result = get_ri_sp_coverage()
     assert result["sp_utilization_pct"] is None
@@ -131,7 +133,7 @@ def test_fetch_ri_coverage_returns_correct_keys():
 
 def test_fetch_ri_coverage_error_returns_none_values():
     ce = MagicMock()
-    ce.get_reservation_coverage.side_effect = Exception("denied")
+    ce.get_reservation_coverage.side_effect = BotoCoreError()
     out = _fetch_ri_coverage(ce, {})
     assert out == {"ri_coverage_pct": None, "ri_on_demand_cost": None}
 

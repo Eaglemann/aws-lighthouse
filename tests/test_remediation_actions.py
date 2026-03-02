@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock, patch
 
+from botocore.exceptions import BotoCoreError
+
 from aws_lighthouse.tools.remediation_actions import (
     apply_s3_block_public_access,
     apply_s3_default_encryption,
@@ -34,7 +36,7 @@ def test_s3_block_public_access_success():
 
 def test_s3_block_public_access_failure_returns_false():
     mock_s3 = MagicMock()
-    mock_s3.put_public_access_block.side_effect = Exception("access denied")
+    mock_s3.put_public_access_block.side_effect = BotoCoreError()
     with patch(f"{MOD}.get_client", return_value=mock_s3):
         result = apply_s3_block_public_access("bad-bucket")
     assert result is False
@@ -53,7 +55,7 @@ def test_delete_ebs_volume_success():
 
 def test_delete_ebs_volume_failure_returns_false():
     mock_ec2 = MagicMock()
-    mock_ec2.delete_volume.side_effect = Exception("volume in use")
+    mock_ec2.delete_volume.side_effect = BotoCoreError()
     with patch(f"{MOD}.get_client", return_value=mock_ec2):
         result = delete_ebs_volume("vol-xyz")
     assert result is False
@@ -82,7 +84,7 @@ def test_release_eip_public_ip():
 
 def test_release_eip_failure_returns_false():
     mock_ec2 = MagicMock()
-    mock_ec2.release_address.side_effect = Exception("not found")
+    mock_ec2.release_address.side_effect = BotoCoreError()
     with patch(f"{MOD}.get_client", return_value=mock_ec2):
         result = release_eip("eipalloc-bad")
     assert result is False
@@ -111,7 +113,7 @@ def test_enable_guardduty_existing_detector_calls_update():
 
 def test_enable_guardduty_create_raises_returns_false():
     mock_gd = MagicMock()
-    mock_gd.create_detector.side_effect = Exception("denied")
+    mock_gd.create_detector.side_effect = BotoCoreError()
     with patch(f"{MOD}.get_client", return_value=mock_gd):
         result = enable_guardduty("guardduty")
     assert result is False
@@ -119,7 +121,7 @@ def test_enable_guardduty_create_raises_returns_false():
 
 def test_enable_guardduty_update_raises_returns_false():
     mock_gd = MagicMock()
-    mock_gd.update_detector.side_effect = Exception("denied")
+    mock_gd.update_detector.side_effect = BotoCoreError()
     with patch(f"{MOD}.get_client", return_value=mock_gd):
         result = enable_guardduty("abc123")
     assert result is False
@@ -138,7 +140,7 @@ def test_enable_cloudtrail_logging_success():
 
 def test_enable_cloudtrail_logging_failure_returns_false():
     mock_ct = MagicMock()
-    mock_ct.start_logging.side_effect = Exception("trail not found")
+    mock_ct.start_logging.side_effect = BotoCoreError()
     with patch(f"{MOD}.get_client", return_value=mock_ct):
         result = enable_cloudtrail_logging("bad-trail")
     assert result is False
@@ -161,7 +163,7 @@ def test_enforce_imdsv2_success():
 
 def test_enforce_imdsv2_failure_returns_false():
     mock_ec2 = MagicMock()
-    mock_ec2.modify_instance_metadata_options.side_effect = Exception("access denied")
+    mock_ec2.modify_instance_metadata_options.side_effect = BotoCoreError()
     with patch(f"{MOD}.get_client", return_value=mock_ec2):
         result = enforce_imdsv2("i-bad")
     assert result is False
@@ -187,7 +189,7 @@ def test_apply_s3_default_encryption_success():
 
 def test_apply_s3_default_encryption_failure_returns_false():
     mock_s3 = MagicMock()
-    mock_s3.put_bucket_encryption.side_effect = Exception("access denied")
+    mock_s3.put_bucket_encryption.side_effect = BotoCoreError()
     with patch(f"{MOD}.get_client", return_value=mock_s3):
         result = apply_s3_default_encryption("bad-bucket")
     assert result is False
