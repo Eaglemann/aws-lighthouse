@@ -36,14 +36,25 @@ class DeleteEBSInput(BaseModel):
 @tool("delete_ebs")
 def delete_ebs(args: DeleteEBSInput) -> str:
     """Deletes the specified EBS volumes."""
+    deleted: list[str] = []
+    failed: list[str] = []
     try:
         ec2 = get_client("ec2")
-        deleted = 0
-        for vid in args.volume_ids:
-            ec2.delete_volume(VolumeId=vid)
-            deleted += 1
-        logger.success(f"Successfully deleted {deleted} EBS volumes.")
-        return f"Deleted {deleted} volumes."
     except Exception as e:
-        logger.error(f"Failed to delete EBS volumes: {str(e)}")
+        logger.error(f"Failed to initialise EC2 client: {str(e)}")
         return f"Error: {str(e)}"
+    for vid in args.volume_ids:
+        try:
+            ec2.delete_volume(VolumeId=vid)
+            deleted.append(vid)
+        except Exception as e:
+            logger.error(f"Failed to delete EBS volume {vid}: {str(e)}")
+            failed.append(vid)
+    if deleted:
+        logger.success(f"Successfully deleted {len(deleted)} EBS volumes.")
+    if failed:
+        return (
+            f"Deleted {len(deleted)} volumes. "
+            f"Failed to delete {len(failed)}: {', '.join(failed)}"
+        )
+    return f"Deleted {len(deleted)} volumes."
