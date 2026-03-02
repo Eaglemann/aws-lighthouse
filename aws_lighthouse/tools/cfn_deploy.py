@@ -1,6 +1,6 @@
 from botocore.exceptions import ClientError
 
-from ..auth import get_aws_session
+from ..auth import get_client
 from ..logger import logger
 
 
@@ -30,12 +30,12 @@ def deploy_cur_template(
     template_body = template_body.replace("{{EXTERNAL_ID}}", ext_id)
     template_body = template_body.replace("{{ENABLE_COST_ALLOCATION_BACKFILL}}", "true")
 
-    # Enforce us-east-1 for CUR billing exports, using authenticated session for credentials
-    session = get_aws_session()
-    s3 = session.client("s3", region_name="us-east-1")
-    cfn = session.client("cloudformation", region_name="us-east-1")
+    # Enforce us-east-1 for CUR billing exports.
+    # get_client applies _RETRY_CONFIG automatically.
+    s3 = get_client("s3", "us-east-1")
+    cfn = get_client("cloudformation", "us-east-1")
 
-    # 3. Create Bucket
+    # 3. Create Bucket and harden it
     logger.step(f"Creating temporary S3 bucket: {s3_bucket}")
     try:
         s3.create_bucket(Bucket=s3_bucket)
@@ -46,6 +46,35 @@ def deploy_cur_template(
         ]:
             logger.error(f"Failed to create bucket: {str(e)}")
             return False
+
+    # Block all public access — bucket must never be publicly readable
+    try:
+        s3.put_public_access_block(
+            Bucket=s3_bucket,
+            PublicAccessBlockConfiguration={
+                "BlockPublicAcls": True,
+                "IgnorePublicAcls": True,
+                "BlockPublicPolicy": True,
+                "RestrictPublicBuckets": True,
+            },
+        )
+    except ClientError as e:
+        logger.error(f"Failed to block public access on bucket: {str(e)}")
+        return False
+
+    # Enable server-side encryption at rest (AES-256)
+    try:
+        s3.put_bucket_encryption(
+            Bucket=s3_bucket,
+            ServerSideEncryptionConfiguration={
+                "Rules": [
+                    {"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}
+                ]
+            },
+        )
+    except ClientError as e:
+        logger.error(f"Failed to enable bucket encryption: {str(e)}")
+        return False
 
     # 4. Upload Dummy SubAccount Template (satisfies StackSet validation)
     dummy_template = """AWSTemplateFormatVersion: "2010-09-09"
@@ -69,7 +98,7 @@ Resources:
             Key="subaccounts_dummy.yaml",
             Body=dummy_template.encode("utf-8"),
         )
-    except Exception as e:
+    except ClientError as e:
         logger.error(f"Failed to upload dummy template: {str(e)}")
         return False
 
@@ -82,7 +111,7 @@ Resources:
         s3.put_object(
             Bucket=s3_bucket, Key="cur.yaml", Body=template_body.encode("utf-8")
         )
-    except Exception as e:
+    except ClientError as e:
         logger.error(f"Failed to upload template: {str(e)}")
         return False
 
