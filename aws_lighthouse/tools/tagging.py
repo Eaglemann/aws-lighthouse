@@ -83,16 +83,27 @@ def check_tagging_compliance(
 
     # ── Lambda ────────────────────────────────────────────────────────────────
     try:
+        # Bulk-fetch all Lambda tags in one paginated call (O(1) calls vs N)
+        tags_by_arn: dict[str, set[str]] = {}
+        try:
+            tagging_client = _cl("resourcegroupstaggingapi")
+            tag_paginator = tagging_client.get_paginator("get_resources")
+            for page in tag_paginator.paginate(ResourceTypeFilters=["lambda:function"]):
+                for resource in page.get("ResourceTagMappingList", []):
+                    tags_by_arn[resource["ResourceARN"]] = {
+                        t["Key"] for t in resource.get("Tags", [])
+                    }
+        except Exception as e:
+            logger.error(
+                f"Bulk Lambda tag fetch failed, tagging check will use empty sets: {e}"
+            )
+
         lmb = _cl("lambda")
         paginator = lmb.get_paginator("list_functions")
         for page in paginator.paginate():
             for fn in page.get("Functions", []):
                 name = fn["FunctionName"]
-                try:
-                    tag_response = lmb.list_tags(Resource=fn["FunctionArn"])
-                    existing = set(tag_response.get("Tags", {}).keys())
-                except Exception:
-                    existing = set()
+                existing = tags_by_arn.get(fn["FunctionArn"], set())
                 missing = [tag for tag in required_tags if tag not in existing]
                 if missing:
                     findings.append(
