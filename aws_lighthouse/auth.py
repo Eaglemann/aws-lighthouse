@@ -1,3 +1,5 @@
+import threading
+
 import boto3
 import typer
 from botocore.config import Config
@@ -15,11 +17,18 @@ class AuthManager:
 
     def __init__(self):
         self._session = None
+        self._lock = threading.Lock()
 
     def get_session(self) -> boto3.Session:
-        """Returns the active boto3 session, authenticating if necessary."""
+        """Returns the active boto3 session, authenticating if necessary.
+
+        Uses double-checked locking so concurrent callers (e.g. parallel region
+        scans) never call authenticate() more than once.
+        """
         if self._session is None:
-            self.authenticate()
+            with self._lock:
+                if self._session is None:
+                    self.authenticate()
         return self._session
 
     def authenticate(self):
