@@ -9,6 +9,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 from aws_lighthouse.agent import (
     SAFE_TOOLS,
+    _route_after_approval,
     approval_node,
     should_require_approval,
 )
@@ -102,8 +103,8 @@ def test_safe_tools_contains_no_destructive_tools():
 # ---------------------------------------------------------------------------
 
 
-def test_approval_node_returns_empty_dict_on_approval():
-    """Approval must return {} (empty state update), not None."""
+def test_approval_node_sets_approved_true_on_approval():
+    """Approval must return approved=True so _route_after_approval reaches ToolNode."""
     msg = MagicMock(spec=AIMessage)
     msg.tool_calls = [_tc("terminate_ec2")]
     msg.content = "I will terminate the instance."
@@ -112,8 +113,12 @@ def test_approval_node_returns_empty_dict_on_approval():
     with patch("typer.prompt", return_value="y"), patch("aws_lighthouse.agent.logger"):
         result = approval_node(state)
 
-    assert result == {}, (
-        "approval_node must return {} on approval to satisfy the LangGraph node contract."
+    assert result.get("approved") is True, (
+        "approval_node must set approved=True on approval so _route_after_approval "
+        "routes to ToolNode."
+    )
+    assert "messages" not in result, (
+        "approval_node must not inject messages on approval."
     )
 
 
@@ -135,6 +140,10 @@ def test_approval_node_denial_injects_tool_message_per_call():
         result = approval_node(state)
 
     assert result is not None
+    # approved flag must be False so _route_after_approval does NOT reach ToolNode
+    assert result.get("approved") is False, (
+        "approval_node must set approved=False on denial so tools are never executed."
+    )
     assert "messages" in result
     rejections = result["messages"]
     assert len(rejections) == 2
@@ -158,4 +167,65 @@ def test_approval_node_denial_does_not_return_none():
     assert result is not None, (
         "approval_node returned None on denial. "
         "This is equivalent to approving the action."
+    )
+
+
+# ---------------------------------------------------------------------------
+# _route_after_approval — conditional edge routing
+# ---------------------------------------------------------------------------
+
+
+def test_route_after_approval_approved_reaches_tools():
+    """approved=True must route to 'tools' so the LLM's intent is executed."""
+    assert _route_after_approval({"approved": True}) == "tools"
+
+
+def test_route_after_approval_denied_returns_to_agent():
+    """approved=False must route to 'agent', not 'tools', so tools never execute."""
+    assert _route_after_approval({"approved": False}) == "agent"
+
+
+def test_route_after_approval_missing_key_defaults_safe():
+    """If 'approved' is absent (e.g. first invocation), default to 'agent' not 'tools'.
+
+    This is the safe default — unknown approval state must never reach ToolNode.
+    """
+    assert _route_after_approval({}) == "agent"
+    assert _route_after_approval({"messages": []}) == "agent"
+
+
+def test_denial_never_reaches_tools():
+    """End-to-end: approval_node denial sets approved=False, route resolves to 'agent'.
+
+    This is the key invariant: a user saying 'n' must NEVER result in ToolNode executing.
+    """
+    msg = MagicMock(spec=AIMessage)
+    msg.tool_calls = [_tc("terminate_ec2"), _tc("delete_ebs")]
+    msg.content = "I will terminate instances and delete volumes."
+    state = {"messages": [msg]}
+
+    with patch("typer.prompt", return_value="n"), patch("aws_lighthouse.agent.logger"):
+        result = approval_node(state)
+
+    # The state after denial must route away from tools
+    next_node = _route_after_approval({**state, **result})
+    assert next_node == "agent", (
+        f"After denial, graph must route to 'agent' but got {next_node!r}. "
+        "ToolNode would have executed the denied tools."
+    )
+
+
+def test_approval_reaches_tools():
+    """End-to-end: approval_node approval sets approved=True, route resolves to 'tools'."""
+    msg = MagicMock(spec=AIMessage)
+    msg.tool_calls = [_tc("terminate_ec2")]
+    msg.content = "I will terminate the instance."
+    state = {"messages": [msg]}
+
+    with patch("typer.prompt", return_value="y"), patch("aws_lighthouse.agent.logger"):
+        result = approval_node(state)
+
+    next_node = _route_after_approval({**state, **result})
+    assert next_node == "tools", (
+        f"After approval, graph must route to 'tools' but got {next_node!r}."
     )
