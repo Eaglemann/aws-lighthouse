@@ -1,3 +1,6 @@
+import csv
+import io
+import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -6,6 +9,30 @@ from botocore.exceptions import BotoCoreError, ClientError
 from ..auth import get_aws_client, get_client
 from ..logger import logger
 from ..types import SecurityFinding
+
+
+def _get_credential_report(iam) -> list[dict]:
+    """Generate and return the IAM credential report as a list of row dicts.
+
+    Polls generate_credential_report until State == COMPLETE (max 10 × 2 s).
+    Returns an empty list on timeout or API error.
+    """
+    try:
+        for _ in range(10):
+            if iam.generate_credential_report().get("State") == "COMPLETE":
+                break
+            time.sleep(2)
+        else:
+            logger.error("IAM credential report did not complete in time")
+            return []
+        report = iam.get_credential_report()
+        content = report["Content"]
+        if isinstance(content, bytes):
+            content = content.decode("utf-8")
+        return list(csv.DictReader(io.StringIO(content)))
+    except (ClientError, BotoCoreError) as e:
+        logger.error(f"Failed to get IAM credential report: {e}")
+        return []
 
 
 def _check_root_mfa() -> list[SecurityFinding]:
@@ -65,59 +92,63 @@ def _check_open_security_groups(ec2) -> list[SecurityFinding]:
 
 
 def _check_iam_users_mfa() -> list[SecurityFinding]:
-    """Flag IAM users with console access (login profile) but no MFA device."""
+    """Flag IAM users with console access (password_enabled) but no MFA device.
+
+    Uses the IAM credential report (2 API calls) instead of per-user
+    get_login_profile + list_mfa_devices (2N calls).
+    """
     findings: list[SecurityFinding] = []
     try:
         iam = get_aws_client("iam")
-        paginator = iam.get_paginator("list_users")
-        for page in paginator.paginate():
-            for user in page.get("Users", []):
-                username = user["UserName"]
-                try:
-                    iam.get_login_profile(UserName=username)
-                except ClientError as e:
-                    if e.response["Error"]["Code"] == "NoSuchEntity":
-                        continue  # no console password — skip
-                    raise
-                mfa_devices = iam.list_mfa_devices(UserName=username).get(
-                    "MFADevices", []
+        for row in _get_credential_report(iam):
+            username = row.get("user", "")
+            if username == "<root_account>":
+                continue
+            if (
+                row.get("password_enabled") == "true"
+                and row.get("mfa_active") == "false"
+            ):
+                findings.append(
+                    {
+                        "severity": "HIGH",
+                        "resource": username,
+                        "finding": f"IAM user '{username}' has console access but no MFA device",
+                    }
                 )
-                if not mfa_devices:
-                    findings.append(
-                        {
-                            "severity": "HIGH",
-                            "resource": username,
-                            "finding": f"IAM user '{username}' has console access but no MFA device",
-                        }
-                    )
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check IAM user MFA: {e}")
     return findings
 
 
 def _check_iam_key_age() -> list[SecurityFinding]:
-    """Flag active IAM access keys older than 90 days."""
+    """Flag active IAM access keys older than 90 days.
+
+    Uses the IAM credential report (2 API calls) instead of per-user
+    list_access_keys (N calls, one per user).
+    """
     findings: list[SecurityFinding] = []
     try:
         iam = get_aws_client("iam")
         now = datetime.now(UTC)
-        paginator = iam.get_paginator("list_users")
-        for page in paginator.paginate():
-            for user in page.get("Users", []):
-                for key in iam.list_access_keys(UserName=user["UserName"]).get(
-                    "AccessKeyMetadata", []
-                ):
-                    if key["Status"] != "Active":
-                        continue
-                    age = (now - key["CreateDate"]).days
-                    if age > 90:
-                        findings.append(
-                            {
-                                "severity": "MEDIUM",
-                                "resource": user["UserName"],
-                                "finding": f"Access key {key['AccessKeyId']} is {age} days old (>90 days)",
-                            }
-                        )
+        for row in _get_credential_report(iam):
+            username = row.get("user", "")
+            if username == "<root_account>":
+                continue
+            for key_num in ("1", "2"):
+                if row.get(f"access_key_{key_num}_active") != "true":
+                    continue
+                rotated = row.get(f"access_key_{key_num}_last_rotated", "N/A")
+                if rotated in ("N/A", "no_information", ""):
+                    continue
+                age = (now - datetime.fromisoformat(rotated)).days
+                if age > 90:
+                    findings.append(
+                        {
+                            "severity": "MEDIUM",
+                            "resource": username,
+                            "finding": f"Access key {key_num} for '{username}' is {age} days old (>90 days)",
+                        }
+                    )
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check IAM access key age: {e}")
     return findings
