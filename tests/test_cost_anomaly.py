@@ -41,7 +41,7 @@ def _make_ce(baseline_amount: float, recent_amount: float, service: str = "Amazo
 
 
 def _run(mock_ce):
-    with patch(f"{MOD}.get_aws_client", return_value=mock_ce):
+    with patch(f"{MOD}.get_client", return_value=mock_ce):
         with patch(f"{MOD}.date") as mock_date:
             mock_date.today.return_value = _TODAY
             return detect_cost_anomalies()
@@ -122,7 +122,7 @@ def test_api_error_returns_empty():
     mock_ce.get_cost_and_usage.side_effect = ClientError(
         {"Error": {"Code": "AccessDenied", "Message": ""}}, "GetCostAndUsage"
     )
-    with patch(f"{MOD}.get_aws_client", return_value=mock_ce):
+    with patch(f"{MOD}.get_client", return_value=mock_ce):
         with patch(f"{MOD}.date") as mock_date:
             mock_date.today.return_value = _TODAY
             results = detect_cost_anomalies()

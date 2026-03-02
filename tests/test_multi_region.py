@@ -14,7 +14,7 @@ def test_returns_sorted_region_names():
             {"RegionName": "ap-southeast-1"},
         ]
     }
-    with patch(f"{MOD}.get_aws_client", return_value=mock_ec2):
+    with patch(f"{MOD}.get_client", return_value=mock_ec2):
         regions = get_enabled_regions()
     assert regions == ["ap-southeast-1", "eu-west-1", "us-west-2"]
 
@@ -22,7 +22,7 @@ def test_returns_sorted_region_names():
 def test_passes_correct_opt_in_filter():
     mock_ec2 = MagicMock()
     mock_ec2.describe_regions.return_value = {"Regions": []}
-    with patch(f"{MOD}.get_aws_client", return_value=mock_ec2):
+    with patch(f"{MOD}.get_client", return_value=mock_ec2):
         get_enabled_regions()
     call_kwargs = mock_ec2.describe_regions.call_args[1]
     filters = call_kwargs["Filters"]
@@ -37,7 +37,7 @@ def test_passes_correct_opt_in_filter():
 def test_empty_regions():
     mock_ec2 = MagicMock()
     mock_ec2.describe_regions.return_value = {"Regions": []}
-    with patch(f"{MOD}.get_aws_client", return_value=mock_ec2):
+    with patch(f"{MOD}.get_client", return_value=mock_ec2):
         regions = get_enabled_regions()
     assert regions == []
 
@@ -45,6 +45,6 @@ def test_empty_regions():
 def test_api_error_returns_empty():
     mock_ec2 = MagicMock()
     mock_ec2.describe_regions.side_effect = Exception("denied")
-    with patch(f"{MOD}.get_aws_client", return_value=mock_ec2):
+    with patch(f"{MOD}.get_client", return_value=mock_ec2):
         regions = get_enabled_regions()
     assert regions == []
