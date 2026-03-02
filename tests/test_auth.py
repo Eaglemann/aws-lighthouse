@@ -1,5 +1,7 @@
 """Tests for AuthManager and get_client helpers (auth.py)."""
 
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from unittest.mock import MagicMock, patch
 
 import boto3
@@ -40,6 +42,30 @@ def _failing_session(exc: Exception) -> MagicMock:
 # ---------------------------------------------------------------------------
 # AuthManager.get_session — caching
 # ---------------------------------------------------------------------------
+
+
+class TestGetSessionConcurrent:
+    def test_authenticate_called_once_under_concurrent_load(self):
+        """10 threads hitting get_session() simultaneously must call authenticate() once."""
+        manager = AuthManager()
+        good = _make_session()
+        barrier = threading.Barrier(10)
+
+        def _get():
+            barrier.wait()  # all threads race together
+            return manager.get_session()
+
+        with (
+            patch("boto3.Session", return_value=good),
+            patch("aws_lighthouse.auth.logger"),
+        ):
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = [executor.submit(_get) for _ in range(10)]
+                results = [f.result() for f in as_completed(futures)]
+
+        assert all(r is good for r in results)
+        # STS was called exactly once — authenticate() never ran twice
+        assert good.client.return_value.get_caller_identity.call_count == 1
 
 
 class TestGetSession:
