@@ -62,18 +62,14 @@ jobs:
     - name: Build Docker image
       run: docker build -t aws-lighthouse:ci .
 
-    - name: Install Trivy
-      run: |
-        curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-          | sh -s -- -b /usr/local/bin
-
     - name: Scan container image with Trivy
-      run: |
-        trivy image \
-          --exit-code 0 \
-          --severity CRITICAL,HIGH \
-          --ignore-unfixed \
-          aws-lighthouse:ci
+      uses: aquasecurity/trivy-action@0.30.0
+      with:
+        image-ref: aws-lighthouse:ci
+        format: table
+        exit-code: '1'
+        severity: CRITICAL,HIGH
+        ignore-unfixed: true
 
   secrets-scan:
     runs-on: ubuntu-latest
