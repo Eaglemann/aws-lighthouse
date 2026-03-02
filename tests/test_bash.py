@@ -2,7 +2,6 @@ import pytest
 
 from aws_lighthouse.tools.bash import (
     ExecuteBashInput,
-    _ALLOWED_COMMANDS,
     _is_dangerous_command,
     execute_bash,
 )
