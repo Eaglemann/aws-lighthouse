@@ -44,18 +44,19 @@ def test_build_alarm_index_api_error_returns_empty():
 
 
 def _make_clients(instances=None, dbs=None, alarms=None):
-    """Return (cw, ec2, rds) mocks."""
+    """Return (cw, ec2, rds) mocks with paginator-based responses."""
     cw = MagicMock()
-    alarm_pages = [{"MetricAlarms": alarms or []}]
-    cw.get_paginator.return_value.paginate.return_value = alarm_pages
+    cw.get_paginator.return_value.paginate.return_value = [
+        {"MetricAlarms": alarms or []}
+    ]
 
     ec2 = MagicMock()
-    ec2.describe_instances.return_value = {
-        "Reservations": [{"Instances": instances or []}]
-    }
+    ec2.get_paginator.return_value.paginate.return_value = [
+        {"Reservations": [{"Instances": instances or []}]}
+    ]
 
     rds = MagicMock()
-    rds.describe_db_instances.return_value = {"DBInstances": dbs or []}
+    rds.get_paginator.return_value.paginate.return_value = [{"DBInstances": dbs or []}]
 
     return cw, ec2, rds
 
@@ -157,9 +158,9 @@ def test_ec2_api_error_returns_no_ec2_findings():
     cw = MagicMock()
     cw.get_paginator.return_value.paginate.return_value = [{"MetricAlarms": []}]
     ec2 = MagicMock()
-    ec2.describe_instances.side_effect = Exception("denied")
+    ec2.get_paginator.side_effect = Exception("denied")
     rds = MagicMock()
-    rds.describe_db_instances.return_value = {"DBInstances": []}
+    rds.get_paginator.return_value.paginate.return_value = [{"DBInstances": []}]
 
     findings = _run(cw, ec2, rds)
     assert not any(f["resource_type"] == "EC2" for f in findings)
@@ -221,3 +222,48 @@ def test_lambda_api_error_doesnt_break_other_findings():
     findings = _run(cw, ec2, rds, lmb=bad_lmb)
     assert not any(f["resource_type"] == "Lambda" for f in findings)
     assert any(f["resource_type"] == "RDS" for f in findings)
+
+
+# ── Pagination regression — resources on page 2 must not be silently dropped ─
+
+
+def test_ec2_two_page_pagination_collects_all_instances():
+    inst_p1 = {"InstanceId": "i-page1", "State": {"Name": "running"}, "Tags": []}
+    inst_p2 = {"InstanceId": "i-page2", "State": {"Name": "running"}, "Tags": []}
+
+    cw = MagicMock()
+    cw.get_paginator.return_value.paginate.return_value = [{"MetricAlarms": []}]
+
+    ec2 = MagicMock()
+    ec2.get_paginator.return_value.paginate.return_value = [
+        {"Reservations": [{"Instances": [inst_p1]}]},
+        {"Reservations": [{"Instances": [inst_p2]}]},
+    ]
+
+    rds = MagicMock()
+    rds.get_paginator.return_value.paginate.return_value = [{"DBInstances": []}]
+
+    findings = _run(cw, ec2, rds)
+    ids = {f["resource_id"] for f in findings if f["resource_type"] == "EC2"}
+    assert ids == {"i-page1", "i-page2"}
+
+
+def test_rds_two_page_pagination_collects_all_dbs():
+    db_p1 = {"DBInstanceIdentifier": "db-page1"}
+    db_p2 = {"DBInstanceIdentifier": "db-page2"}
+
+    cw = MagicMock()
+    cw.get_paginator.return_value.paginate.return_value = [{"MetricAlarms": []}]
+
+    ec2 = MagicMock()
+    ec2.get_paginator.return_value.paginate.return_value = [{"Reservations": []}]
+
+    rds = MagicMock()
+    rds.get_paginator.return_value.paginate.return_value = [
+        {"DBInstances": [db_p1]},
+        {"DBInstances": [db_p2]},
+    ]
+
+    findings = _run(cw, ec2, rds)
+    ids = {f["resource_id"] for f in findings if f["resource_type"] == "RDS"}
+    assert ids == {"db-page1", "db-page2"}
