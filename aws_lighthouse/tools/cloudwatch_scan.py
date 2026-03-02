@@ -64,50 +64,58 @@ def detect_cloudwatch_gaps(region: str | None = None) -> list[CloudWatchFinding]
 
     # ── EC2 ──────────────────────────────────────────────────────────────────
     try:
-        for reservation in ec2.describe_instances().get("Reservations", []):
-            for inst in reservation.get("Instances", []):
-                if inst.get("State", {}).get("Name") == "terminated":
-                    continue
-                instance_id = inst["InstanceId"]
-                name = next(
-                    (t["Value"] for t in inst.get("Tags", []) if t["Key"] == "Name"),
-                    instance_id,
-                )
-                missing = [
-                    metric
-                    for ns, metric, dim in _EC2_REQUIRED
-                    if (ns, metric, dim, instance_id) not in alarm_index
-                ]
-                if missing:
-                    findings.append(
-                        {
-                            "resource_type": "EC2",
-                            "resource_id": instance_id,
-                            "resource_name": name,
-                            "missing_alarms": missing,
-                        }
+        paginator = ec2.get_paginator("describe_instances")
+        for page in paginator.paginate():
+            for reservation in page.get("Reservations", []):
+                for inst in reservation.get("Instances", []):
+                    if inst.get("State", {}).get("Name") == "terminated":
+                        continue
+                    instance_id = inst["InstanceId"]
+                    name = next(
+                        (
+                            t["Value"]
+                            for t in inst.get("Tags", [])
+                            if t["Key"] == "Name"
+                        ),
+                        instance_id,
                     )
+                    missing = [
+                        metric
+                        for ns, metric, dim in _EC2_REQUIRED
+                        if (ns, metric, dim, instance_id) not in alarm_index
+                    ]
+                    if missing:
+                        findings.append(
+                            {
+                                "resource_type": "EC2",
+                                "resource_id": instance_id,
+                                "resource_name": name,
+                                "missing_alarms": missing,
+                            }
+                        )
     except Exception as e:
         logger.error(f"Failed to check EC2 alarm gaps: {e}")
 
     # ── RDS ──────────────────────────────────────────────────────────────────
     try:
-        for db in rds.describe_db_instances().get("DBInstances", []):
-            db_id = db["DBInstanceIdentifier"]
-            missing = [
-                metric
-                for ns, metric, dim in _RDS_REQUIRED
-                if (ns, metric, dim, db_id) not in alarm_index
-            ]
-            if missing:
-                findings.append(
-                    {
-                        "resource_type": "RDS",
-                        "resource_id": db_id,
-                        "resource_name": db_id,
-                        "missing_alarms": missing,
-                    }
-                )
+        paginator = rds.get_paginator("describe_db_instances")
+        for page in paginator.paginate():
+            for db in page.get("DBInstances", []):
+                db_id = db["DBInstanceIdentifier"]
+                missing = [
+                    metric
+                    for ns, metric, dim in _RDS_REQUIRED
+                    if (ns, metric, dim, db_id) not in alarm_index
+                ]
+                if missing:
+                    findings.append(
+                        {
+                            "resource_type": "RDS",
+                            "resource_id": db_id,
+                            "resource_name": db_id,
+                            "missing_alarms": missing,
+                        }
+                    )
     except Exception as e:
         logger.error(f"Failed to check RDS alarm gaps: {e}")
 
