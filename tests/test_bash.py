@@ -2,6 +2,7 @@ import pytest
 
 from aws_lighthouse.tools.bash import (
     ExecuteBashInput,
+    _ALLOWED_COMMANDS,
     _is_dangerous_command,
     execute_bash,
 )
@@ -119,14 +120,89 @@ def test_execute_bash_runs_safe_command():
     assert result["error"] is None
 
 
-def test_execute_bash_safe_rm_is_not_blocked():
-    # rm on a non-root path must not be blocked (even with -rf)
+def test_execute_bash_rm_blocked_by_allowlist():
+    # rm is not in _ALLOWED_COMMANDS — it must be rejected regardless of target path.
+    # The denylist only blocks rm targeting /; the allowlist blocks it everywhere.
     result = execute_bash(
         ExecuteBashInput(command="rm -rf /tmp/nonexistent-lighthouse-test")
     )
-    # returncode may be non-zero (path doesn't exist) but it must NOT be blocked
-    assert (
-        result["error"]
-        != "Blocked: recursive delete of the root filesystem ('rm -rf /')"
+    assert result["returncode"] == -1
+    assert "Blocked" in result["stderr"]
+    assert "allowlist" in result["error"].lower()
+
+
+# ── execute_bash — allowlist blocks unlisted binaries ─────────────────────────
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python3 -c 'import os; os.system(\"id\")'",
+        "python -c 'print(1)'",
+        "bash -c 'id'",
+        "sh -c 'whoami'",
+        "curl https://api.example.com/data",  # curl alone (not piped) still blocked
+        "wget https://example.com/file.zip",
+        "cat /etc/passwd",
+        "base64 -d <<< aGVsbG8=",
+        "nc -l 4444",
+    ],
+)
+def test_execute_bash_allowlist_blocks_unlisted_binary(command):
+    result = execute_bash(ExecuteBashInput(command=command))
+    assert result["returncode"] == -1
+    assert "Blocked" in result["stderr"]
+    assert "allowlist" in result["error"].lower()
+
+
+def test_execute_bash_error_message_lists_allowed_commands():
+    result = execute_bash(ExecuteBashInput(command="python3 -c 'pass'"))
+    # The stderr message must name the allowed commands so the user knows what's permitted.
+    for name in ("aws", "terraform", "uv", "git"):
+        assert name in result["stderr"], (
+            f"Expected allowed command '{name}' to appear in the error message."
+        )
+
+
+def test_execute_bash_allowlist_permits_aws():
+    # aws is in _ALLOWED_COMMANDS — it must reach subprocess (fail on missing creds,
+    # not on the allowlist).
+    result = execute_bash(ExecuteBashInput(command="aws --version"))
+    # May succeed or fail depending on the environment, but must NOT be allowlist-blocked.
+    assert "allowlist" not in (result.get("error") or "").lower()
+
+
+def test_execute_bash_allowlist_permits_terraform():
+    result = execute_bash(ExecuteBashInput(command="terraform version"))
+    assert "allowlist" not in (result.get("error") or "").lower()
+
+
+def test_execute_bash_malformed_quote_is_blocked():
+    result = execute_bash(ExecuteBashInput(command="echo 'unterminated"))
+    assert result["returncode"] == -1
+    # shlex.split raises ValueError on malformed quoting.
+    assert result["error"] is not None
+
+
+def test_execute_bash_semicolon_does_not_chain():
+    # shell=False means ';' is treated as a literal argument, not a command separator.
+    # shlex.split("echo hello; echo world") → ['echo', 'hello;', 'echo', 'world']
+    # All tokens are passed as args to ONE echo invocation; no second command is spawned.
+    result = execute_bash(ExecuteBashInput(command="echo hello; echo world"))
+    assert result["returncode"] == 0
+    # echo prints all args on a single line: "hello; echo world"
+    # If shell chaining had occurred, there would be TWO newlines (two separate echo outputs).
+    assert result["stdout"].count("\n") == 1, (
+        "Expected a single echo output (no shell chaining), "
+        f"but got: {result['stdout']!r}"
     )
-    assert "Blocked" not in result["stderr"]
+    # The semicolon is present as a literal character in the output, not stripped.
+    assert ";" in result["stdout"]
+
+
+def test_execute_bash_command_substitution_is_not_executed():
+    # $(whoami) must appear as a literal string in stdout, not be expanded.
+    result = execute_bash(ExecuteBashInput(command="echo $(whoami)"))
+    assert result["returncode"] == 0
+    # With shell=False the literal string '$(whoami)' is passed to echo.
+    assert "$(whoami)" in result["stdout"]
