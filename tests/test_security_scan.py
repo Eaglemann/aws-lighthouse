@@ -15,6 +15,7 @@ from aws_lighthouse.tools.security_scan import (
     _check_root_mfa,
     _check_s3_block_public_access,
     _check_s3_encryption,
+    _get_credential_report,
     run_security_scan,
 )
 
@@ -138,51 +139,142 @@ def test_open_sg_api_error_returns_empty():
     assert findings == []
 
 
+# ── _get_credential_report ────────────────────────────────────────────────────
+
+_CRED_HEADER = (
+    "user,password_enabled,mfa_active,"
+    "access_key_1_active,access_key_1_last_rotated,"
+    "access_key_2_active,access_key_2_last_rotated"
+)
+
+
+def _make_cred_iam(csv_body: str) -> MagicMock:
+    """IAM mock that returns csv_body as the credential report."""
+    iam = MagicMock()
+    iam.generate_credential_report.return_value = {"State": "COMPLETE"}
+    iam.get_credential_report.return_value = {
+        "Content": f"{_CRED_HEADER}\n{csv_body}".encode()
+    }
+    return iam
+
+
+def test_get_credential_report_complete_immediately():
+    iam = _make_cred_iam("alice,true,true,false,N/A,false,N/A")
+    rows = _get_credential_report(iam)
+    assert len(rows) == 1
+    assert rows[0]["user"] == "alice"
+    iam.generate_credential_report.assert_called_once()
+
+
+def test_get_credential_report_polls_until_complete():
+    iam = MagicMock()
+    iam.generate_credential_report.side_effect = [
+        {"State": "STARTED"},
+        {"State": "INPROGRESS"},
+        {"State": "COMPLETE"},
+    ]
+    iam.get_credential_report.return_value = {
+        "Content": f"{_CRED_HEADER}\nbob,false,false,false,N/A,false,N/A".encode()
+    }
+    with patch(f"{MOD}.time") as mock_time:
+        rows = _get_credential_report(iam)
+    assert mock_time.sleep.call_count == 2
+    assert rows[0]["user"] == "bob"
+
+
+def test_get_credential_report_timeout_returns_empty():
+    iam = MagicMock()
+    iam.generate_credential_report.return_value = {"State": "INPROGRESS"}
+    with patch(f"{MOD}.time"):
+        rows = _get_credential_report(iam)
+    assert rows == []
+
+
+def test_get_credential_report_api_error_returns_empty():
+    iam = MagicMock()
+    iam.generate_credential_report.side_effect = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": "denied"}}, "Op"
+    )
+    rows = _get_credential_report(iam)
+    assert rows == []
+
+
+# ── _check_iam_users_mfa ──────────────────────────────────────────────────────
+
+
+def test_iam_user_console_no_mfa_flagged():
+    iam = _make_cred_iam("alice,true,false,false,N/A,false,N/A")
+    with patch(f"{MOD}.get_aws_client", return_value=iam):
+        findings = _check_iam_users_mfa()
+    assert len(findings) == 1
+    assert findings[0]["resource"] == "alice"
+    assert findings[0]["severity"] == "HIGH"
+
+
+def test_iam_user_console_with_mfa_not_flagged():
+    iam = _make_cred_iam("bob,true,true,false,N/A,false,N/A")
+    with patch(f"{MOD}.get_aws_client", return_value=iam):
+        findings = _check_iam_users_mfa()
+    assert findings == []
+
+
+def test_iam_user_no_console_not_flagged():
+    iam = _make_cred_iam("charlie,false,false,false,N/A,false,N/A")
+    with patch(f"{MOD}.get_aws_client", return_value=iam):
+        findings = _check_iam_users_mfa()
+    assert findings == []
+
+
+def test_iam_root_account_skipped_for_mfa():
+    iam = _make_cred_iam("<root_account>,not_supported,false,false,N/A,false,N/A")
+    with patch(f"{MOD}.get_aws_client", return_value=iam):
+        findings = _check_iam_users_mfa()
+    assert findings == []
+
+
 # ── _check_iam_key_age ────────────────────────────────────────────────────────
 
 
-def _make_iam_key_age(username, keys):
-    mock_iam = MagicMock()
-    mock_iam.get_paginator.return_value.paginate.return_value = [
-        {"Users": [{"UserName": username}]}
-    ]
-    mock_iam.list_access_keys.return_value = {"AccessKeyMetadata": keys}
-    return mock_iam
-
-
 def test_iam_key_old_flagged():
-    old_date = datetime.now(UTC) - timedelta(days=91)
-    mock_iam = _make_iam_key_age(
-        "alice",
-        [{"AccessKeyId": "AKIA123", "Status": "Active", "CreateDate": old_date}],
-    )
-    with patch(f"{MOD}.get_aws_client", return_value=mock_iam):
+    old_ts = (datetime.now(UTC) - timedelta(days=91)).isoformat()
+    iam = _make_cred_iam(f"alice,false,false,true,{old_ts},false,N/A")
+    with patch(f"{MOD}.get_aws_client", return_value=iam):
         findings = _check_iam_key_age()
     assert len(findings) == 1
     assert findings[0]["resource"] == "alice"
-    assert "AKIA123" in findings[0]["finding"]
+    assert "key 1" in findings[0]["finding"]
 
 
 def test_iam_key_recent_not_flagged():
-    recent_date = datetime.now(UTC) - timedelta(days=10)
-    mock_iam = _make_iam_key_age(
-        "bob",
-        [{"AccessKeyId": "AKIA456", "Status": "Active", "CreateDate": recent_date}],
-    )
-    with patch(f"{MOD}.get_aws_client", return_value=mock_iam):
+    recent_ts = (datetime.now(UTC) - timedelta(days=10)).isoformat()
+    iam = _make_cred_iam(f"bob,false,false,true,{recent_ts},false,N/A")
+    with patch(f"{MOD}.get_aws_client", return_value=iam):
         findings = _check_iam_key_age()
     assert findings == []
 
 
 def test_iam_key_inactive_skipped():
-    old_date = datetime.now(UTC) - timedelta(days=200)
-    mock_iam = _make_iam_key_age(
-        "carol",
-        [{"AccessKeyId": "AKIA789", "Status": "Inactive", "CreateDate": old_date}],
-    )
-    with patch(f"{MOD}.get_aws_client", return_value=mock_iam):
+    old_ts = (datetime.now(UTC) - timedelta(days=200)).isoformat()
+    iam = _make_cred_iam(f"carol,false,false,false,{old_ts},false,N/A")
+    with patch(f"{MOD}.get_aws_client", return_value=iam):
         findings = _check_iam_key_age()
     assert findings == []
+
+
+def test_iam_key_na_rotated_skipped():
+    iam = _make_cred_iam("dave,false,false,true,N/A,false,N/A")
+    with patch(f"{MOD}.get_aws_client", return_value=iam):
+        findings = _check_iam_key_age()
+    assert findings == []
+
+
+def test_iam_key2_old_flagged():
+    old_ts = (datetime.now(UTC) - timedelta(days=95)).isoformat()
+    iam = _make_cred_iam(f"eve,false,false,false,N/A,true,{old_ts}")
+    with patch(f"{MOD}.get_aws_client", return_value=iam):
+        findings = _check_iam_key_age()
+    assert len(findings) == 1
+    assert "key 2" in findings[0]["finding"]
 
 
 # ── _check_public_rds ─────────────────────────────────────────────────────────
@@ -495,55 +587,9 @@ def test_s3_encryption_api_error_returns_empty():
     assert findings == []
 
 
-# ── _check_iam_users_mfa ──────────────────────────────────────────────────────
-
-
-def _make_iam_user_mfa(username, has_login_profile=True, mfa_devices=None):
-    iam = MagicMock()
-    iam.get_paginator.return_value.paginate.return_value = [
-        {"Users": [{"UserName": username}]}
-    ]
-    if not has_login_profile:
-        iam.get_login_profile.side_effect = ClientError(
-            {"Error": {"Code": "NoSuchEntity", "Message": ""}}, "GetLoginProfile"
-        )
-    else:
-        iam.get_login_profile.return_value = {"LoginProfile": {"UserName": username}}
-    iam.list_mfa_devices.return_value = {"MFADevices": mfa_devices or []}
-    return iam
-
-
-def test_iam_user_mfa_missing_flagged():
-    mock_iam = _make_iam_user_mfa("alice", has_login_profile=True, mfa_devices=[])
-    with patch(f"{MOD}.get_aws_client", return_value=mock_iam):
-        findings = _check_iam_users_mfa()
-    assert len(findings) == 1
-    assert findings[0]["severity"] == "HIGH"
-    assert findings[0]["resource"] == "alice"
-    assert "MFA" in findings[0]["finding"]
-
-
-def test_iam_user_mfa_present_not_flagged():
-    mock_iam = _make_iam_user_mfa(
-        "bob",
-        has_login_profile=True,
-        mfa_devices=[{"SerialNumber": "arn:aws:iam::123:mfa/bob"}],
-    )
-    with patch(f"{MOD}.get_aws_client", return_value=mock_iam):
-        findings = _check_iam_users_mfa()
-    assert findings == []
-
-
-def test_iam_user_no_console_access_skipped():
-    mock_iam = _make_iam_user_mfa("carol", has_login_profile=False)
-    with patch(f"{MOD}.get_aws_client", return_value=mock_iam):
-        findings = _check_iam_users_mfa()
-    assert findings == []
-
-
 def test_iam_user_mfa_api_error_returns_empty():
     iam = MagicMock()
-    iam.get_paginator.side_effect = make_client_error("AccessDenied")
+    iam.generate_credential_report.side_effect = make_client_error("AccessDenied")
     with patch(f"{MOD}.get_aws_client", return_value=iam):
         findings = _check_iam_users_mfa()
     assert findings == []
@@ -594,8 +640,8 @@ def _make_clean_clients():
     """Return mocks representing a fully-compliant AWS environment."""
     iam = MagicMock()
     iam.get_account_summary.return_value = {"SummaryMap": {"AccountMFAEnabled": 1}}
-    iam.get_paginator.return_value.paginate.return_value = [{"Users": []}]
-    iam.list_access_keys.return_value = {"AccessKeyMetadata": []}
+    iam.generate_credential_report.return_value = {"State": "COMPLETE"}
+    iam.get_credential_report.return_value = {"Content": _CRED_HEADER.encode()}
 
     _ec2_pages = {
         "describe_security_groups": {"SecurityGroups": []},
