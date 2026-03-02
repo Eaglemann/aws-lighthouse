@@ -2,10 +2,10 @@ from ..auth import get_client
 from ..logger import logger
 
 
-def apply_s3_block_public_access(bucket_name: str) -> bool:
+def apply_s3_block_public_access(bucket_name: str, region: str | None = None) -> bool:
     """Fully enable Block Public Access on an S3 bucket."""
     try:
-        s3 = get_client("s3")
+        s3 = get_client("s3", region)
         s3.put_public_access_block(
             Bucket=bucket_name,
             PublicAccessBlockConfiguration={
@@ -21,10 +21,10 @@ def apply_s3_block_public_access(bucket_name: str) -> bool:
         return False
 
 
-def delete_ebs_volume(volume_id: str) -> bool:
+def delete_ebs_volume(volume_id: str, region: str | None = None) -> bool:
     """Permanently delete an EBS volume."""
     try:
-        ec2 = get_client("ec2")
+        ec2 = get_client("ec2", region)
         ec2.delete_volume(VolumeId=volume_id)
         return True
     except Exception as e:
@@ -32,10 +32,10 @@ def delete_ebs_volume(volume_id: str) -> bool:
         return False
 
 
-def release_eip(allocation_id: str) -> bool:
+def release_eip(allocation_id: str, region: str | None = None) -> bool:
     """Release an Elastic IP (VPC AllocationId or EC2-Classic PublicIp)."""
     try:
-        ec2 = get_client("ec2")
+        ec2 = get_client("ec2", region)
         if allocation_id.startswith("eipalloc-"):
             ec2.release_address(AllocationId=allocation_id)
         else:
@@ -46,10 +46,10 @@ def release_eip(allocation_id: str) -> bool:
         return False
 
 
-def enable_guardduty(resource: str) -> bool:
+def enable_guardduty(resource: str, region: str | None = None) -> bool:
     """Enable GuardDuty: create a new detector or re-enable an existing one."""
     try:
-        gd = get_client("guardduty")
+        gd = get_client("guardduty", region)
         if resource == "guardduty":
             gd.create_detector(Enable=True)
         else:
@@ -60,10 +60,10 @@ def enable_guardduty(resource: str) -> bool:
         return False
 
 
-def enable_cloudtrail_logging(trail_name: str) -> bool:
+def enable_cloudtrail_logging(trail_name: str, region: str | None = None) -> bool:
     """Start logging on an existing CloudTrail trail that has logging stopped."""
     try:
-        ct = get_client("cloudtrail")
+        ct = get_client("cloudtrail", region)
         ct.start_logging(Name=trail_name)
         return True
     except Exception as e:
@@ -71,10 +71,10 @@ def enable_cloudtrail_logging(trail_name: str) -> bool:
         return False
 
 
-def enforce_imdsv2(instance_id: str) -> bool:
+def enforce_imdsv2(instance_id: str, region: str | None = None) -> bool:
     """Set HttpTokens=required on an EC2 instance to enforce IMDSv2."""
     try:
-        ec2 = get_client("ec2")
+        ec2 = get_client("ec2", region)
         ec2.modify_instance_metadata_options(
             InstanceId=instance_id,
             HttpTokens="required",
@@ -86,10 +86,10 @@ def enforce_imdsv2(instance_id: str) -> bool:
         return False
 
 
-def apply_s3_default_encryption(bucket_name: str) -> bool:
+def apply_s3_default_encryption(bucket_name: str, region: str | None = None) -> bool:
     """Apply AES256 default server-side encryption to an S3 bucket."""
     try:
-        s3 = get_client("s3")
+        s3 = get_client("s3", region)
         s3.put_bucket_encryption(
             Bucket=bucket_name,
             ServerSideEncryptionConfiguration={
