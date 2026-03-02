@@ -1,11 +1,11 @@
-from ..auth import get_aws_client
+from ..auth import get_client
 from ..logger import logger
 
 
 def get_enabled_regions() -> list[str]:
     """Return all AWS regions that are enabled (opt-in-not-required or opted-in)."""
     try:
-        ec2 = get_aws_client("ec2")
+        ec2 = get_client("ec2")
         response = ec2.describe_regions(
             Filters=[
                 {

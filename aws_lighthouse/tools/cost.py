@@ -1,13 +1,13 @@
 from datetime import datetime, timedelta
 from typing import Any
 
-from ..auth import get_aws_client
+from ..auth import get_client
 from ..logger import logger
 
 
 def get_monthly_cost_summary(days: int = 14) -> dict[str, Any]:
     """Retrieve AWS Unblended costs for the past N days, grouped by service."""
-    ce = get_aws_client("ce")
+    ce = get_client("ce")
     str_end = datetime.today().strftime("%Y-%m-%d")
     str_start = (datetime.today() - timedelta(days=days)).strftime("%Y-%m-%d")
 

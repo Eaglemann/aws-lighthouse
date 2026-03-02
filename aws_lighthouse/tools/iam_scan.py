@@ -4,7 +4,7 @@ from urllib.parse import unquote
 
 from botocore.exceptions import BotoCoreError, ClientError
 
-from ..auth import get_aws_client
+from ..auth import get_client
 from ..logger import logger
 from ..types import IAMFinding
 
@@ -72,7 +72,7 @@ def detect_overpermissive_iam() -> list[IAMFinding]:
     Uses a single paginated get_account_authorization_details call instead of
     N+1 per-principal calls, reducing ~640 API calls to a handful of pages.
     """
-    iam = get_aws_client("iam")
+    iam = get_client("iam")
     findings: list[IAMFinding] = []
 
     users: list[Any] = []

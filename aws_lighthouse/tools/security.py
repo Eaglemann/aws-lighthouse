@@ -1,7 +1,7 @@
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-from ..auth import get_aws_client
+from ..auth import get_client
 from ..logger import logger
 
 
@@ -15,7 +15,7 @@ class S3BlockPublicAccessInput(BaseModel):
 def s3_block_public_access(args: S3BlockPublicAccessInput) -> str:
     """Applies the strictest S3 Block Public Access configuration to a bucket."""
     try:
-        s3 = get_aws_client("s3")
+        s3 = get_client("s3")
         s3.put_public_access_block(
             Bucket=args.bucket_name,
             PublicAccessBlockConfiguration={

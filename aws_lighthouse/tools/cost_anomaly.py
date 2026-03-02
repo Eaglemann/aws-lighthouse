@@ -2,7 +2,7 @@ from datetime import date, timedelta
 
 from botocore.exceptions import BotoCoreError, ClientError
 
-from ..auth import get_aws_client
+from ..auth import get_client
 from ..logger import logger
 from ..types import CostAnomaly
 
@@ -17,7 +17,7 @@ def detect_cost_anomalies(threshold_pct: float = 50.0) -> list[CostAnomaly]:
     Returns services whose recent spend exceeds the baseline by more than threshold_pct.
     Services with no prior baseline (new services) or negligible spend are skipped.
     """
-    ce = get_aws_client("ce")
+    ce = get_client("ce")
 
     today = date.today()
     end_str = today.strftime("%Y-%m-%d")

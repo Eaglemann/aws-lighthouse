@@ -1,7 +1,7 @@
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-from ..auth import get_aws_client
+from ..auth import get_client
 from ..logger import logger
 
 
@@ -15,7 +15,7 @@ class TerminateEC2Input(BaseModel):
 def terminate_ec2(args: TerminateEC2Input) -> str:
     """Terminates the specified EC2 instances."""
     try:
-        ec2 = get_aws_client("ec2")
+        ec2 = get_client("ec2")
         response = ec2.terminate_instances(InstanceIds=args.instance_ids)
         term_instances = response.get("TerminatingInstances", [])
         logger.success(
@@ -37,7 +37,7 @@ class DeleteEBSInput(BaseModel):
 def delete_ebs(args: DeleteEBSInput) -> str:
     """Deletes the specified EBS volumes."""
     try:
-        ec2 = get_aws_client("ec2")
+        ec2 = get_client("ec2")
         deleted = 0
         for vid in args.volume_ids:
             ec2.delete_volume(VolumeId=vid)

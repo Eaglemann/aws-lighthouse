@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from ..auth import get_aws_client
+from ..auth import get_client
 from ..logger import logger
 
 
@@ -20,7 +20,7 @@ def get_ri_sp_coverage(days: int = 30) -> dict[str, Any]:
       sp_utilization_pct   — % of SP commitment actually consumed
       sp_unused_commitment — dollar value of unused SP commitment ($)
     """
-    ce = get_aws_client("ce")  # Cost Explorer is a global service
+    ce = get_client("ce")  # Cost Explorer is a global service
 
     end = datetime.now(UTC).date()
     start = end - timedelta(days=days)

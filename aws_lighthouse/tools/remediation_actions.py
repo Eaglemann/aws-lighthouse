@@ -1,11 +1,11 @@
-from ..auth import get_aws_client
+from ..auth import get_client
 from ..logger import logger
 
 
 def apply_s3_block_public_access(bucket_name: str) -> bool:
     """Fully enable Block Public Access on an S3 bucket."""
     try:
-        s3 = get_aws_client("s3")
+        s3 = get_client("s3")
         s3.put_public_access_block(
             Bucket=bucket_name,
             PublicAccessBlockConfiguration={
@@ -24,7 +24,7 @@ def apply_s3_block_public_access(bucket_name: str) -> bool:
 def delete_ebs_volume(volume_id: str) -> bool:
     """Permanently delete an EBS volume."""
     try:
-        ec2 = get_aws_client("ec2")
+        ec2 = get_client("ec2")
         ec2.delete_volume(VolumeId=volume_id)
         return True
     except Exception as e:
@@ -35,7 +35,7 @@ def delete_ebs_volume(volume_id: str) -> bool:
 def release_eip(allocation_id: str) -> bool:
     """Release an Elastic IP (VPC AllocationId or EC2-Classic PublicIp)."""
     try:
-        ec2 = get_aws_client("ec2")
+        ec2 = get_client("ec2")
         if allocation_id.startswith("eipalloc-"):
             ec2.release_address(AllocationId=allocation_id)
         else:
@@ -49,7 +49,7 @@ def release_eip(allocation_id: str) -> bool:
 def enable_guardduty(resource: str) -> bool:
     """Enable GuardDuty: create a new detector or re-enable an existing one."""
     try:
-        gd = get_aws_client("guardduty")
+        gd = get_client("guardduty")
         if resource == "guardduty":
             gd.create_detector(Enable=True)
         else:
@@ -63,7 +63,7 @@ def enable_guardduty(resource: str) -> bool:
 def enable_cloudtrail_logging(trail_name: str) -> bool:
     """Start logging on an existing CloudTrail trail that has logging stopped."""
     try:
-        ct = get_aws_client("cloudtrail")
+        ct = get_client("cloudtrail")
         ct.start_logging(Name=trail_name)
         return True
     except Exception as e:
@@ -74,7 +74,7 @@ def enable_cloudtrail_logging(trail_name: str) -> bool:
 def enforce_imdsv2(instance_id: str) -> bool:
     """Set HttpTokens=required on an EC2 instance to enforce IMDSv2."""
     try:
-        ec2 = get_aws_client("ec2")
+        ec2 = get_client("ec2")
         ec2.modify_instance_metadata_options(
             InstanceId=instance_id,
             HttpTokens="required",
@@ -89,7 +89,7 @@ def enforce_imdsv2(instance_id: str) -> bool:
 def apply_s3_default_encryption(bucket_name: str) -> bool:
     """Apply AES256 default server-side encryption to an S3 bucket."""
     try:
-        s3 = get_aws_client("s3")
+        s3 = get_client("s3")
         s3.put_bucket_encryption(
             Bucket=bucket_name,
             ServerSideEncryptionConfiguration={
