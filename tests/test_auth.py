@@ -11,6 +11,7 @@ from botocore.exceptions import ClientError, NoCredentialsError
 from aws_lighthouse.auth import (
     _RETRY_CONFIG,
     AuthManager,
+    auth_manager,
     get_aws_client,
     get_aws_client_for_region,
     get_client,
@@ -167,41 +168,33 @@ class TestAuthenticateFallback:
 
 
 class TestGetClient:
-    def test_no_region_routes_to_get_aws_client(self):
+    def test_no_region_delegates_to_auth_manager(self):
         mock_client = MagicMock()
-        with patch(
-            "aws_lighthouse.auth.get_aws_client", return_value=mock_client
-        ) as mock:
+        with patch.object(auth_manager, "get_client", return_value=mock_client) as mock:
             result = get_client("ec2")
-        mock.assert_called_once_with("ec2")
+        mock.assert_called_once_with("ec2", None)
         assert result is mock_client
 
-    def test_none_region_routes_to_get_aws_client(self):
+    def test_none_region_delegates_to_auth_manager(self):
         mock_client = MagicMock()
-        with patch(
-            "aws_lighthouse.auth.get_aws_client", return_value=mock_client
-        ) as mock:
+        with patch.object(auth_manager, "get_client", return_value=mock_client) as mock:
             result = get_client("iam", region=None)
-        mock.assert_called_once_with("iam")
+        mock.assert_called_once_with("iam", None)
         assert result is mock_client
 
-    def test_with_region_routes_to_get_aws_client_for_region(self):
+    def test_with_region_delegates_to_auth_manager(self):
         mock_client = MagicMock()
-        with patch(
-            "aws_lighthouse.auth.get_aws_client_for_region", return_value=mock_client
-        ) as mock:
+        with patch.object(auth_manager, "get_client", return_value=mock_client) as mock:
             result = get_client("s3", region="eu-west-1")
         mock.assert_called_once_with("s3", "eu-west-1")
         assert result is mock_client
 
-    def test_empty_string_region_treated_as_falsy(self):
-        """Empty string region behaves as no-region (falsy check in get_client)."""
+    def test_empty_string_region_delegates_to_auth_manager(self):
+        """Empty string is forwarded as-is; AuthManager.get_client normalises it."""
         mock_client = MagicMock()
-        with patch(
-            "aws_lighthouse.auth.get_aws_client", return_value=mock_client
-        ) as mock:
+        with patch.object(auth_manager, "get_client", return_value=mock_client) as mock:
             result = get_client("sts", region="")
-        mock.assert_called_once_with("sts")
+        mock.assert_called_once_with("sts", "")
         assert result is mock_client
 
 
@@ -221,7 +214,9 @@ class TestRetryConfig:
         """get_aws_client must forward _RETRY_CONFIG to session.client()."""
         mock_session = MagicMock(spec=boto3.Session)
         mock_session.client.return_value = MagicMock()
-        with patch("aws_lighthouse.auth.get_aws_session", return_value=mock_session):
+        manager = AuthManager()
+        manager._session = mock_session
+        with patch("aws_lighthouse.auth.auth_manager", manager):
             get_aws_client("ec2")
         mock_session.client.assert_called_once_with("ec2", config=_RETRY_CONFIG)
 
@@ -229,7 +224,9 @@ class TestRetryConfig:
         """get_aws_client_for_region must forward _RETRY_CONFIG to session.client()."""
         mock_session = MagicMock(spec=boto3.Session)
         mock_session.client.return_value = MagicMock()
-        with patch("aws_lighthouse.auth.get_aws_session", return_value=mock_session):
+        manager = AuthManager()
+        manager._session = mock_session
+        with patch("aws_lighthouse.auth.auth_manager", manager):
             get_aws_client_for_region("s3", "eu-west-1")
         mock_session.client.assert_called_once_with(
             "s3", region_name="eu-west-1", config=_RETRY_CONFIG
@@ -250,3 +247,63 @@ class TestRetryConfig:
             manager.authenticate()
 
         mock_session.client.assert_called_once_with("sts", config=_RETRY_CONFIG)
+
+
+# ---------------------------------------------------------------------------
+# Client caching — same key reuses the same client object
+# ---------------------------------------------------------------------------
+
+
+class TestClientCaching:
+    def _manager_with_session(self) -> tuple:
+        """Return (manager, mock_session) with _session pre-set."""
+        manager = AuthManager()
+        mock_session = MagicMock(spec=boto3.Session)
+        mock_session.client.side_effect = lambda *a, **kw: MagicMock()
+        manager._session = mock_session
+        return manager, mock_session
+
+    def test_same_key_returns_cached_client(self):
+        manager, mock_session = self._manager_with_session()
+        c1 = manager.get_client("ec2")
+        c2 = manager.get_client("ec2")
+        assert c1 is c2
+        mock_session.client.assert_called_once()
+
+    def test_different_regions_cached_separately(self):
+        manager, mock_session = self._manager_with_session()
+        c1 = manager.get_client("ec2", "us-east-1")
+        c2 = manager.get_client("ec2", "eu-west-1")
+        c3 = manager.get_client("ec2", "us-east-1")  # cache hit
+        assert c1 is not c2
+        assert c1 is c3
+        assert mock_session.client.call_count == 2
+
+    def test_no_region_and_region_cached_separately(self):
+        manager, mock_session = self._manager_with_session()
+        c1 = manager.get_client("s3")
+        c2 = manager.get_client("s3", "ap-southeast-1")
+        assert c1 is not c2
+        assert mock_session.client.call_count == 2
+
+    def test_empty_string_region_same_key_as_no_region(self):
+        manager, mock_session = self._manager_with_session()
+        c1 = manager.get_client("sts")
+        c2 = manager.get_client("sts", "")
+        assert c1 is c2
+        mock_session.client.assert_called_once()
+
+    def test_concurrent_same_key_creates_client_once(self):
+        manager, mock_session = self._manager_with_session()
+        barrier = threading.Barrier(10)
+
+        def _get():
+            barrier.wait()
+            return manager.get_client("s3", "us-east-1")
+
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = [executor.submit(_get) for _ in range(10)]
+            results = [f.result() for f in as_completed(futures)]
+
+        assert all(r is results[0] for r in results)
+        mock_session.client.assert_called_once()
