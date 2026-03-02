@@ -18,6 +18,8 @@ class AuthManager:
     def __init__(self):
         self._session = None
         self._lock = threading.Lock()
+        self._clients: dict = {}
+        self._clients_lock = threading.Lock()
 
     def get_session(self) -> boto3.Session:
         """Returns the active boto3 session, authenticating if necessary.
@@ -89,6 +91,28 @@ class AuthManager:
             logger.error(f"Authentication failed: {str(e)}")
             raise typer.Exit(code=1) from e
 
+    def get_client(self, service_name: str, region: str | None = None):
+        """Returns a cached Boto3 client keyed by (service, region).
+
+        Uses double-checked locking so parallel region scans share clients
+        instead of creating a new one per call (~250+ instantiations saved on a
+        16-region scan).
+        """
+        key = (service_name, region or None)
+        if key not in self._clients:
+            with self._clients_lock:
+                if key not in self._clients:
+                    session = self.get_session()
+                    if region:
+                        self._clients[key] = session.client(
+                            service_name, region_name=region, config=_RETRY_CONFIG
+                        )
+                    else:
+                        self._clients[key] = session.client(
+                            service_name, config=_RETRY_CONFIG
+                        )
+        return self._clients[key]
+
 
 # Global singleton
 auth_manager = AuthManager()
@@ -100,24 +124,20 @@ def get_aws_session() -> boto3.Session:
 
 
 def get_aws_client(service_name: str):
-    """Provides a Boto3 client for a specific service."""
-    return get_aws_session().client(service_name, config=_RETRY_CONFIG)
+    """Provides a cached Boto3 client for a specific service."""
+    return auth_manager.get_client(service_name)
 
 
 def get_aws_client_for_region(service_name: str, region: str):
-    """Provides a Boto3 client for a specific service in an explicit region."""
-    return get_aws_session().client(
-        service_name, region_name=region, config=_RETRY_CONFIG
-    )
+    """Provides a cached Boto3 client for a specific service in an explicit region."""
+    return auth_manager.get_client(service_name, region)
 
 
 def get_client(service_name: str, region: str | None = None):
-    """Provides a Boto3 client for a service, optionally in a specific region.
+    """Provides a cached Boto3 client for a service, optionally in a specific region.
 
     Prefer this over the bare get_aws_client / get_aws_client_for_region pair
     wherever the region may or may not be present (e.g. scan functions that
     accept an optional region parameter).
     """
-    if region:
-        return get_aws_client_for_region(service_name, region)
-    return get_aws_client(service_name)
+    return auth_manager.get_client(service_name, region)
