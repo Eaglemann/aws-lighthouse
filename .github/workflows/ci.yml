@@ -58,7 +58,7 @@ jobs:
 
     - name: Export production dependencies and audit
       run: |
-        uv export --no-dev --format requirements-txt > /tmp/requirements.txt
+        uv export --no-dev --format requirements-txt --no-hashes > /tmp/requirements.txt
         pip-audit -r /tmp/requirements.txt
 
   secrets-scan:
