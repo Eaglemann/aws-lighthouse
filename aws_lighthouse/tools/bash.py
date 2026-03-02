@@ -1,5 +1,6 @@
 import os
 import re
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -96,6 +97,32 @@ _DANGEROUS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 ]
 
 
+# Allowlist of binary names the LLM is permitted to execute.
+# Any command whose first token is NOT in this set is rejected before subprocess.
+# This eliminates entire classes of injection that the denylist cannot enumerate:
+#   python3 -c "...", base64 -d <<< ... | sh, bash -c "...", arbitrary binaries.
+# Keep this list narrow — add only when there is a concrete, tested use case.
+_ALLOWED_COMMANDS: frozenset[str] = frozenset(
+    {
+        # AWS infrastructure tooling — primary use cases for this agent
+        "aws",
+        "terraform",
+        "kubectl",
+        "helm",
+        # Python / project tooling
+        "uv",
+        "git",
+        # Read-only filesystem inspection (safe; no credential paths exposed here)
+        "echo",
+        "ls",
+        "df",
+        "find",
+        "which",
+        "pwd",
+    }
+)
+
+
 def _is_dangerous_command(command: str) -> str | None:
     """Return a human-readable description if the command matches a blocked dangerous
     pattern, or None if the command is safe to present for approval.
@@ -166,7 +193,19 @@ class ExecuteBashInput(BaseModel):
 
 
 def execute_bash(args: ExecuteBashInput) -> dict[str, Any]:
-    """Executes a bash command and returns stdout, stderr, and return code."""
+    """Executes a command and returns stdout, stderr, and return code.
+
+    Security model (four layers):
+    1. Denylist pre-check: fast-fail on catastrophically destructive patterns
+       (rm -rf /, raw disk writes, fork bombs) before any parsing.
+    2. shlex.split(): parse the command string without invoking a shell.
+       Rejects malformed quoting; semicolons/pipes/&&/$(...) become literal
+       arguments — they are never interpreted as shell syntax.
+    3. Allowlist: only binaries in _ALLOWED_COMMANDS may run. Eliminates
+       python3 -c, bash -c, curl without pipe, and any other unlisted binary.
+    4. shell=False: no shell process is created. Metacharacters cannot escape.
+    """
+    # Layer 1: denylist — belt check for the most catastrophic commands
     danger = _is_dangerous_command(args.command)
     if danger:
         return {
@@ -175,10 +214,45 @@ def execute_bash(args: ExecuteBashInput) -> dict[str, Any]:
             "returncode": -1,
             "error": f"Blocked: {danger}",
         }
+
+    # Layer 2: parse without a shell — malformed quotes are rejected here
     try:
-        result = subprocess.run(  # noqa: S602 — intentional: executes user-approved shell commands
-            args.command,
-            shell=True,
+        argv = shlex.split(args.command)
+    except ValueError as e:
+        return {
+            "stdout": "",
+            "stderr": f"Blocked: command could not be parsed safely — {e}.",
+            "returncode": -1,
+            "error": f"Parse error: {e}",
+        }
+
+    if not argv:
+        return {
+            "stdout": "",
+            "stderr": "Blocked: empty command.",
+            "returncode": -1,
+            "error": "Empty command",
+        }
+
+    # Layer 3: allowlist — only known infrastructure/tooling binaries are permitted
+    command_name = os.path.basename(argv[0])
+    if command_name not in _ALLOWED_COMMANDS:
+        allowed = ", ".join(sorted(_ALLOWED_COMMANDS))
+        return {
+            "stdout": "",
+            "stderr": (
+                f"Blocked: '{command_name}' is not in the allowed command list. "
+                f"Allowed: {allowed}."
+            ),
+            "returncode": -1,
+            "error": f"Blocked: '{command_name}' not in allowlist",
+        }
+
+    # Layer 4: execute with shell=False — no shell metacharacter interpretation
+    try:
+        result = subprocess.run(  # noqa: S603 — shell=False, argv is allowlist-validated
+            argv,
+            shell=False,
             cwd=args.cwd,
             capture_output=True,
             text=True,
@@ -197,5 +271,5 @@ def execute_bash(args: ExecuteBashInput) -> dict[str, Any]:
             "returncode": -1,
             "error": "Timeout",
         }
-    except Exception as e:
+    except (OSError, ValueError) as e:
         return {"stdout": "", "stderr": str(e), "returncode": -1, "error": str(e)}
