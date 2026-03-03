@@ -1,9 +1,11 @@
 """Tests for cli.py: pure helpers and section renderer functions."""
 
 import io
-from unittest.mock import patch
+import json
+from unittest.mock import MagicMock, patch
 
 from rich.console import Console
+from typer.testing import CliRunner
 
 from aws_lighthouse.cli import (
     _count,
@@ -14,6 +16,7 @@ from aws_lighthouse.cli import (
     _section_iam,
     _section_lambda_detail,
     _section_security,
+    app,
 )
 
 # ---------------------------------------------------------------------------
@@ -414,3 +417,108 @@ class TestSectionSecurity:
 
         assert calls[0] is True
         assert all(v is False for v in calls[1:])
+
+
+# ---------------------------------------------------------------------------
+# analyze --output json
+# ---------------------------------------------------------------------------
+
+
+def _make_db_mock():
+    m = MagicMock()
+    m.get_latest_cost_snapshot.return_value = None
+    return m
+
+
+_PATCHES = {
+    "aws_lighthouse.cli.get_aws_session": None,  # replaced below per test
+    "aws_lighthouse.cli.get_enabled_regions": lambda: ["us-east-1"],
+    "aws_lighthouse.cli.get_s3_inventory": lambda: [],
+    "aws_lighthouse.cli.get_ec2_inventory": lambda region=None: [],
+    "aws_lighthouse.cli.get_rds_inventory": lambda region=None: [],
+    "aws_lighthouse.cli.get_lambda_inventory": lambda region=None: [],
+    "aws_lighthouse.cli.get_monthly_cost_summary": lambda days=14: {
+        "total_usd": 42.0,
+        "period": "2024-01-01\u20132024-01-31",
+        "start": "2024-01-01",
+        "end": "2024-01-31",
+        "breakdown": {"EC2": 42.0},
+    },
+    "aws_lighthouse.cli.detect_cost_anomalies": lambda threshold_pct=50.0: [],
+    "aws_lighthouse.cli.get_ri_sp_coverage": lambda days=14: {},
+    "aws_lighthouse.cli.run_security_scan": lambda **kwargs: [],
+    "aws_lighthouse.cli.detect_overpermissive_iam": lambda: [],
+    "aws_lighthouse.cli.detect_cloudwatch_gaps": lambda region=None: [],
+    "aws_lighthouse.cli.run_cost_scan": lambda region=None: [],
+    "aws_lighthouse.cli.check_tagging_compliance": lambda **kwargs: [],
+    "aws_lighthouse.cli.db_manager": _make_db_mock(),
+}
+
+
+def _mock_session():
+    session = MagicMock()
+    session.client.return_value.get_caller_identity.return_value = {
+        "Account": "123456789012"
+    }
+    return session
+
+
+class TestAnalyzeJsonOutput:
+    def _run(self, extra_args=None):
+        runner = CliRunner()
+        patches = {**_PATCHES, "aws_lighthouse.cli.get_aws_session": _mock_session}
+        with patch.multiple(
+            "aws_lighthouse.cli", **{k.split(".")[-1]: v for k, v in patches.items()}
+        ):
+            return runner.invoke(
+                app, ["analyze", "--output", "json"] + (extra_args or [])
+            )
+
+    def test_exits_zero(self):
+        result = self._run()
+        assert result.exit_code == 0, result.output
+
+    def test_output_is_valid_json(self):
+        result = self._run()
+        data = json.loads(result.output)
+        assert isinstance(data, dict)
+
+    def test_top_level_keys_present(self):
+        result = self._run()
+        data = json.loads(result.output)
+        expected_keys = {
+            "account_id",
+            "scanned_at",
+            "regions",
+            "inventory",
+            "costs",
+            "cost_anomalies",
+            "ri_sp_coverage",
+            "security_findings",
+            "iam_findings",
+            "cloudwatch_findings",
+            "cost_waste",
+            "tagging_findings",
+        }
+        assert expected_keys == set(data.keys())
+
+    def test_account_id_populated(self):
+        result = self._run()
+        data = json.loads(result.output)
+        assert data["account_id"] == "123456789012"
+
+    def test_inventory_has_four_resource_types(self):
+        result = self._run()
+        data = json.loads(result.output)
+        assert set(data["inventory"].keys()) == {"ec2", "rds", "s3", "lambda"}
+
+    def test_costs_total_usd_present(self):
+        result = self._run()
+        data = json.loads(result.output)
+        assert data["costs"]["total_usd"] == 42.0
+
+    def test_no_rich_markup_in_output(self):
+        """Ensure no Rich escape sequences leak into the JSON stdout."""
+        result = self._run()
+        assert "[bold" not in result.output
+        assert "\x1b[" not in result.output  # no ANSI escapes
