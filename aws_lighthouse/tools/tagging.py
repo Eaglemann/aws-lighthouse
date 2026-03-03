@@ -24,7 +24,7 @@ def check_tagging_compliance(
     if required_tags is None:
         required_tags = DEFAULT_REQUIRED_TAGS
 
-    def _cl(svc):
+    def _cl(svc: str):  # type: ignore[no-untyped-def]
         return get_client(svc, region)
 
     findings: list[TagFinding] = []

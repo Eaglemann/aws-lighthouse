@@ -14,7 +14,26 @@ class TerminateEC2Input(BaseModel):
 
 @tool("terminate_ec2")
 def terminate_ec2(args: TerminateEC2Input) -> str:
-    """Terminates the specified EC2 instances."""
+    """Permanently terminate one or more EC2 instances.
+
+    **IRREVERSIBLE** — terminated instances cannot be restarted. AWS moves
+    them through ``shutting-down`` → ``terminated`` states; after a short
+    retention window the instance record disappears from the console entirely.
+
+    Storage impact: root EBS volumes whose ``DeleteOnTermination`` flag is
+    ``True`` (the default) are deleted along with the instance. Volumes with
+    ``DeleteOnTermination=False`` are detached and become available; they must
+    be managed separately.  Instance-store volumes are always lost on
+    termination.
+
+    Region: both ``terminate_ec2`` and ``get_client("ec2")`` operate in the
+    session's default region (no per-call region override). Ensure the active
+    AWS session targets the correct region before invoking this tool.
+
+    Returns a summary string indicating how many instances were successfully
+    scheduled for termination. On API failure, returns an error string (error
+    is also logged).
+    """
     try:
         ec2 = get_client("ec2")
         response = ec2.terminate_instances(InstanceIds=args.instance_ids)
@@ -36,7 +55,27 @@ class DeleteEBSInput(BaseModel):
 
 @tool("delete_ebs")
 def delete_ebs(args: DeleteEBSInput) -> str:
-    """Deletes the specified EBS volumes."""
+    """Permanently delete one or more EBS volumes.
+
+    **IRREVERSIBLE** — once deleted, the volume and all data stored on it are
+    gone. AWS does not provide a restore path for deleted volumes. Snapshots
+    previously created from the volume are unaffected and remain available.
+
+    Each volume must be in the ``available`` state (not attached to any
+    instance). Volumes in the ``in-use`` state raise a ``ClientError``; those
+    IDs are collected in the ``failed`` list and reported in the return string
+    without interrupting deletion of the remaining volumes in the batch.
+
+    Region: ``delete_ebs`` and ``get_client("ec2")`` operate in the session's
+    default region (no per-call region override). Ensure the active AWS session
+    targets the region that contains the volumes before invoking this tool.
+
+    Returns a summary string of the form
+    ``"Deleted N volumes."`` on full success or
+    ``"Deleted N volumes. Failed to delete M: vol-xxx, ..."`` on partial
+    failure. Client initialisation errors return an error string immediately
+    before any deletion is attempted.
+    """
     deleted: list[str] = []
     failed: list[str] = []
     try:
