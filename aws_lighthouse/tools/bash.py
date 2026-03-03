@@ -18,24 +18,35 @@ _BLOCKED_PREFIXES: tuple[str, ...] = tuple(
         "~/.ssh",
         "~/.gnupg",
         "~/.config/gcloud",
+        "~/.kube",
     )
 )
 _BLOCKED_EXACT: frozenset[str] = frozenset(
-    {
+    str(Path(p).expanduser().resolve())
+    for p in (
         "/etc/shadow",
         "/etc/sudoers",
         "/etc/master.passwd",
-    }
+        "~/.netrc",
+        "~/.bashrc",
+        "~/.zshrc",
+        "~/.bash_history",
+    )
 )
+# Block any file whose basename matches — catches .env in any project directory.
+_BLOCKED_NAMES: frozenset[str] = frozenset({".env"})
 
 
 def _is_blocked_path(filepath: str) -> bool:
-    """Return True if the resolved path falls under a sensitive prefix or exact block."""
+    """Return True if the resolved path falls under a sensitive prefix, exact block,
+    or blocked filename."""
     try:
         resolved = str(Path(filepath).expanduser().resolve())
     except (OSError, ValueError):
         resolved = str(Path(filepath).expanduser())
     if resolved in _BLOCKED_EXACT:
+        return True
+    if Path(resolved).name in _BLOCKED_NAMES:
         return True
     return any(
         resolved == prefix or resolved.startswith(prefix + os.sep)
