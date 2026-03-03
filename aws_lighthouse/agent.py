@@ -10,6 +10,7 @@ from langchain_ollama import ChatOllama
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 
+from .db import db_manager
 from .logger import logger
 from .tools.bash import execute_bash, read_file, write_file
 
@@ -274,16 +275,20 @@ def approval_node(state: AgentState) -> dict:
         logger.error("User denied the execution plan.")
         from langchain_core.messages import ToolMessage
 
-        rejections = [
-            ToolMessage(
-                content="User explicitly denied execution of this tool.",
-                tool_call_id=tc["id"],
+        rejections = []
+        for tc in last_message.tool_calls:
+            db_manager.record_audit_log(tc["name"], json.dumps(tc["args"]), "denied")
+            rejections.append(
+                ToolMessage(
+                    content="User explicitly denied execution of this tool.",
+                    tool_call_id=tc["id"],
+                )
             )
-            for tc in last_message.tool_calls
-        ]
         # approved=False prevents _route_after_approval from reaching ToolNode
         return {"approved": False, "messages": rejections}
 
+    for tc in last_message.tool_calls:
+        db_manager.record_audit_log(tc["name"], json.dumps(tc["args"]), "approved")
     logger.success("Execution plan approved. Proceeding...")
     return {"approved": True}
 
@@ -332,6 +337,9 @@ def should_require_approval(state: AgentState) -> str:
         if tc["name"] not in SAFE_TOOLS:
             return "approval"
 
+    # All tools are safe — log as auto_approved before ToolNode runs
+    for tc in last_message.tool_calls:
+        db_manager.record_audit_log(tc["name"], json.dumps(tc["args"]), "auto_approved")
     return "tools"
 
 
