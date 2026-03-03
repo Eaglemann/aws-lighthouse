@@ -1,0 +1,125 @@
+from datetime import date, timedelta
+from unittest.mock import MagicMock, patch
+
+import pytest
+from botocore.exceptions import BotoCoreError
+
+from aws_lighthouse.tools.cost import get_monthly_cost_summary
+
+MOD = "aws_lighthouse.tools.cost"
+
+
+def _make_day(groups):
+    """Build a single ResultsByTime entry from a list of (service, amount) pairs."""
+    return {
+        "Groups": [
+            {
+                "Keys": [svc],
+                "Metrics": {"UnblendedCost": {"Amount": str(amt)}},
+            }
+            for svc, amt in groups
+        ]
+    }
+
+
+def _make_ce(days_data):
+    """days_data: list of ResultsByTime dicts."""
+    ce = MagicMock()
+    ce.get_cost_and_usage.return_value = {"ResultsByTime": days_data}
+    return ce
+
+
+# ── aggregation ───────────────────────────────────────────────────────────────
+
+
+def test_single_day_single_service():
+    ce = _make_ce([_make_day([("Amazon EC2", 10.50)])])
+    with patch(f"{MOD}.get_client", return_value=ce):
+        result = get_monthly_cost_summary()
+    assert result["total_usd"] == pytest.approx(10.50)
+    assert result["breakdown"] == {"Amazon EC2": pytest.approx(10.50)}
+
+
+def test_multi_day_aggregates_same_service():
+    ce = _make_ce(
+        [
+            _make_day([("Amazon EC2", 5.00), ("Amazon S3", 1.00)]),
+            _make_day([("Amazon EC2", 3.00), ("Amazon S3", 2.00)]),
+        ]
+    )
+    with patch(f"{MOD}.get_client", return_value=ce):
+        result = get_monthly_cost_summary()
+    assert result["total_usd"] == pytest.approx(11.00)
+    assert result["breakdown"]["Amazon EC2"] == pytest.approx(8.00)
+    assert result["breakdown"]["Amazon S3"] == pytest.approx(3.00)
+
+
+def test_empty_results_returns_zero():
+    ce = _make_ce([])
+    with patch(f"{MOD}.get_client", return_value=ce):
+        result = get_monthly_cost_summary()
+    assert result["total_usd"] == 0.0
+    assert result["breakdown"] == {}
+
+
+def test_breakdown_sorted_descending():
+    groups = [(f"Service{i}", float(i)) for i in range(1, 6)]
+    ce = _make_ce([_make_day(groups)])
+    with patch(f"{MOD}.get_client", return_value=ce):
+        result = get_monthly_cost_summary()
+    costs = list(result["breakdown"].values())
+    assert costs == sorted(costs, reverse=True)
+
+
+# ── top-15 truncation ─────────────────────────────────────────────────────────
+
+
+def test_top_15_truncation_keeps_highest():
+    # 20 services with costs 1..20; top 15 should be services 6..20
+    groups = [(f"Service{i}", float(i)) for i in range(1, 21)]
+    ce = _make_ce([_make_day(groups)])
+    with patch(f"{MOD}.get_client", return_value=ce):
+        result = get_monthly_cost_summary()
+    assert len(result["breakdown"]) == 15
+    # Cheapest 5 (1..5) must be excluded
+    for i in range(1, 6):
+        assert f"Service{i}" not in result["breakdown"]
+    # Most expensive must be present
+    assert "Service20" in result["breakdown"]
+
+
+def test_fewer_than_15_services_all_included():
+    groups = [(f"Svc{i}", float(i)) for i in range(1, 11)]
+    ce = _make_ce([_make_day(groups)])
+    with patch(f"{MOD}.get_client", return_value=ce):
+        result = get_monthly_cost_summary()
+    assert len(result["breakdown"]) == 10
+
+
+# ── return shape ──────────────────────────────────────────────────────────────
+
+
+def test_return_shape_has_required_keys():
+    ce = _make_ce([_make_day([("EC2", 1.0)])])
+    with patch(f"{MOD}.get_client", return_value=ce):
+        result = get_monthly_cost_summary()
+    assert {"period", "start", "end", "total_usd", "breakdown"} <= result.keys()
+
+
+def test_days_param_sets_start_date():
+    ce = _make_ce([])
+    with patch(f"{MOD}.get_client", return_value=ce):
+        result = get_monthly_cost_summary(days=7)
+    expected_start = (date.today() - timedelta(days=7)).isoformat()
+    assert result["start"] == expected_start
+
+
+# ── error path ────────────────────────────────────────────────────────────────
+
+
+def test_api_error_returns_error_dict():
+    ce = MagicMock()
+    ce.get_cost_and_usage.side_effect = BotoCoreError()
+    with patch(f"{MOD}.get_client", return_value=ce):
+        result = get_monthly_cost_summary()
+    assert "error" in result
