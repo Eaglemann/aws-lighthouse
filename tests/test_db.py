@@ -148,3 +148,60 @@ class TestGetLatestCostSnapshot:
         monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "gone" / "x.db")
         result = db.get_latest_cost_snapshot("acct")
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# record_audit_log
+# ---------------------------------------------------------------------------
+
+
+def _audit_rows(tmp_path) -> list[dict]:
+    """Return all audit_log rows as dicts."""
+    with sqlite3.connect(tmp_path / "test.db") as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT tool_name, args_json, decision, result FROM audit_log"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+class TestAuditLog:
+    def test_creates_audit_log_table(self, db, tmp_path):
+        assert "audit_log" in _tables(tmp_path)
+
+    def test_record_approved(self, db, tmp_path):
+        db.record_audit_log("terminate_ec2", '{"instance_ids": ["i-abc"]}', "approved")
+        rows = _audit_rows(tmp_path)
+        assert len(rows) == 1
+        assert rows[0]["tool_name"] == "terminate_ec2"
+        assert rows[0]["decision"] == "approved"
+        assert rows[0]["result"] is None
+
+    def test_record_denied(self, db, tmp_path):
+        db.record_audit_log("delete_ebs", '{"volume_ids": ["vol-1"]}', "denied")
+        rows = _audit_rows(tmp_path)
+        assert rows[0]["decision"] == "denied"
+
+    def test_record_auto_approved(self, db, tmp_path):
+        db.record_audit_log("tool_run_security_scan", "{}", "auto_approved")
+        rows = _audit_rows(tmp_path)
+        assert rows[0]["decision"] == "auto_approved"
+
+    def test_record_with_result(self, db, tmp_path):
+        db.record_audit_log(
+            "terminate_ec2", '{"instance_ids": ["i-abc"]}', "approved", "Terminated 1"
+        )
+        rows = _audit_rows(tmp_path)
+        assert rows[0]["result"] == "Terminated 1"
+
+    def test_multiple_entries_ordered(self, db, tmp_path):
+        db.record_audit_log("tool_a", "{}", "approved")
+        db.record_audit_log("tool_b", "{}", "denied")
+        db.record_audit_log("tool_c", "{}", "auto_approved")
+        rows = _audit_rows(tmp_path)
+        assert len(rows) == 3
+        assert [r["tool_name"] for r in rows] == ["tool_a", "tool_b", "tool_c"]
+
+    def test_handles_sqlite_error_without_raising(self, db, tmp_path, monkeypatch):
+        monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "gone" / "x.db")
+        db.record_audit_log("tool", "{}", "approved")  # must not raise
