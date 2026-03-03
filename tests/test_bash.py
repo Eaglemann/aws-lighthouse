@@ -1,10 +1,60 @@
+from pathlib import Path
+
 import pytest
 
 from aws_lighthouse.tools.bash import (
     ExecuteBashInput,
+    _is_blocked_path,
     _is_dangerous_command,
     execute_bash,
 )
+
+# ── _is_blocked_path — sensitive file/directory blocklist ─────────────────────
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        # Original blocked prefixes
+        "~/.aws/credentials",
+        "~/.ssh/id_rsa",
+        "~/.gnupg/secring.gpg",
+        "~/.config/gcloud/credentials.db",
+        # New: kube credentials
+        "~/.kube/config",
+        "~/.kube/cache/discovery/token",
+        # New: exact home dotfiles
+        "~/.netrc",
+        "~/.bashrc",
+        "~/.zshrc",
+        "~/.bash_history",
+        # New: .env by name (any directory)
+        "/project/.env",
+        "/home/user/app/.env",
+        # System exact blocks (resolved to handle /etc → /private/etc on macOS)
+        str(Path("/etc/shadow").resolve()),
+        str(Path("/etc/sudoers").resolve()),
+    ],
+)
+def test_blocked_paths_are_blocked(path):
+    assert _is_blocked_path(path), f"Expected '{path}' to be blocked"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/home/user/output.txt",
+        "/home/user/project/main.py",
+        "/var/log/app.log",
+        "README.md",
+        ".env.example",  # .env.example is NOT .env — allowed
+        "config.env",  # config.env is NOT .env — allowed
+        "terraform/main.tf",
+    ],
+)
+def test_safe_paths_are_not_blocked(path):
+    assert not _is_blocked_path(path), f"Expected '{path}' to be allowed"
+
 
 # ── _is_dangerous_command — dangerous patterns must be blocked ────────────────
 
