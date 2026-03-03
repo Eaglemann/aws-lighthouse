@@ -1,8 +1,24 @@
 [project]
 name = "aws-lighthouse"
 version = "0.1.0"
-description = "Add your description here"
+description = "Terminal-first FinOps, Security, and Cloud Infrastructure Agent for AWS"
 readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "AWS Lighthouse Contributors" },
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Systems Administration",
+    "Topic :: Utilities",
+]
 requires-python = ">=3.12"
 dependencies = [
     "boto3>=1.42.56",
@@ -16,6 +32,12 @@ dependencies = [
     "rich>=14.3.3",
     "typer>=0.24.1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/your-org/aws-lighthouse"
+Repository = "https://github.com/your-org/aws-lighthouse"
+Issues = "https://github.com/your-org/aws-lighthouse/issues"
+Changelog = "https://github.com/your-org/aws-lighthouse/blob/main/CHANGELOG.md"
 
 [project.scripts]
 aws-lighthouse = "aws_lighthouse.cli:app"
@@ -51,4 +73,22 @@ ignore = ["E501"]  # line-length enforced by formatter, not linter
 
 [tool.mypy]
 ignore_missing_imports = true
+check_untyped_defs = true
+warn_return_any = true
+disallow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+# Modules that still need full annotation work — tracked as follow-up tasks.
+# New modules must be fully annotated; adding to this list requires a justification.
+module = [
+    "aws_lighthouse.auth",
+    "aws_lighthouse.tools.mcp_client",
+    "aws_lighthouse.tools.security_scan",
+    "aws_lighthouse.tools.ri_sp_coverage",
+    "aws_lighthouse.tools.iam_scan",
+    "aws_lighthouse.tools.cost_scan",
+    "aws_lighthouse.tools.cloudwatch_scan",
+    "aws_lighthouse.agent",
+]
+disallow_untyped_defs = false
 
