@@ -30,7 +30,7 @@ class LighthouseLogger:
 
     def warn(self, message: str) -> None:
         """Prints a yellow warning indicator."""
-        self.console.print(f"[yellow]![/yellow] [bold yellow]{message}[/bold yellow]")
+        self.console.print(f"[yellow]⚠ [/yellow] [bold yellow]{message}[/bold yellow]")
 
     def step(self, message: str) -> None:
         """Prints a minor granular step trace."""
