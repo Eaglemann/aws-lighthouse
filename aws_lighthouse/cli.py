@@ -54,10 +54,11 @@ _MAX_WORKERS = 5
 
 # ── Severity colour map ──────────────────────────────────────────────────────
 _SEV_STYLE = {"HIGH": "bold red", "MEDIUM": "bold yellow", "LOW": "bold blue"}
+_SEV_LABEL = {"HIGH": "● HIGH", "MEDIUM": "● MED ", "LOW": "● LOW "}
 
 
 def _severity_text(sev: str) -> Text:
-    return Text(sev, style=_SEV_STYLE.get(sev, "white"))
+    return Text(_SEV_LABEL.get(sev, sev), style=_SEV_STYLE.get(sev, "white"))
 
 
 def _count(lst: list) -> str:
@@ -106,7 +107,7 @@ def _section_inventory(
                 item["region"] = reg
         return _ec2, _rds, _lmb
 
-    with c.status("[cyan]Scanning inventory...[/cyan]", spinner="dots"):
+    with c.status("[cyan]📦  Scanning inventory...[/cyan]", spinner="dots"):
         s3s = get_s3_inventory()
         with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
             for _ec2, _rds, _lmb in pool.map(_inv_region, regions):
@@ -125,10 +126,10 @@ def _section_inventory(
     )
     inv_table.add_column("Resource", style="dim")
     inv_table.add_column("Count", justify="right", style="bold white")
-    inv_table.add_row("EC2 Instances", _count(ec2s))
-    inv_table.add_row("RDS Databases", _count(rdss))
-    inv_table.add_row("S3 Buckets", _count(s3s))
-    inv_table.add_row("Lambda Functions", _count(lambdas))
+    inv_table.add_row("⚡ EC2 Instances", _count(ec2s))
+    inv_table.add_row("🗄  RDS Databases", _count(rdss))
+    inv_table.add_row("🪣 S3 Buckets", _count(s3s))
+    inv_table.add_row("λ  Lambda", _count(lambdas))
 
     return inv_table, s3s, ec2s, rdss, lambdas, cur_bucket_exists
 
@@ -142,7 +143,7 @@ def _section_cost_columns(
     multi_region: bool,
 ) -> dict:
     """Fetch costs, build trend, and render inventory + cost side-by-side."""
-    with c.status(f"[cyan]Fetching costs ({days}d)...[/cyan]", spinner="dots"):
+    with c.status(f"[cyan]💰  Fetching costs ({days}d)...[/cyan]", spinner="dots"):
         costs = get_monthly_cost_summary(days=days)
 
     cost_table = Table(
@@ -189,13 +190,13 @@ def _section_cost_columns(
             [
                 Panel(
                     inv_table,
-                    title=f"[bold blue]Inventory[/bold blue]{inv_region_note}",
+                    title=f"[bold blue]📦 Inventory[/bold blue]{inv_region_note}",
                     border_style="blue",
                     padding=(0, 1),
                 ),
                 Panel(
                     cost_table,
-                    title=f"[bold yellow]Cost[/bold yellow]  [dim]{period_label}[/dim]{trend_suffix}",
+                    title=f"[bold yellow]💰 Cost[/bold yellow]  [dim]{period_label}[/dim]{trend_suffix}",
                     border_style="yellow",
                     padding=(0, 1),
                 ),
@@ -208,7 +209,7 @@ def _section_cost_columns(
 
 def _section_cost_anomalies(c: Console) -> list:
     """Detect and render cost anomaly panel."""
-    with c.status("[cyan]Detecting cost anomalies...[/cyan]", spinner="dots"):
+    with c.status("[cyan]🚨  Detecting cost anomalies...[/cyan]", spinner="dots"):
         anomalies = detect_cost_anomalies(threshold_pct=50.0)
 
     if anomalies:
@@ -229,7 +230,7 @@ def _section_cost_anomalies(c: Console) -> list:
         c.print(
             Panel(
                 anomaly_table,
-                title=f"[bold red]Cost Anomalies[/bold red]  [dim]{len(anomalies)} spike{'s' if len(anomalies) != 1 else ''} vs prior 7d[/dim]",
+                title=f"[bold red]🚨 Cost Anomalies[/bold red]  [dim]{len(anomalies)} spike{'s' if len(anomalies) != 1 else ''} vs prior 7d[/dim]",
                 border_style="red",
                 padding=(0, 1),
             )
@@ -238,7 +239,7 @@ def _section_cost_anomalies(c: Console) -> list:
         c.print(
             Panel(
                 "[green]✓  No cost spikes detected vs the prior 7-day baseline.[/green]",
-                title="[bold green]Cost Anomalies[/bold green]",
+                title="[bold green]✅ Cost Anomalies[/bold green]",
                 border_style="green",
                 padding=(0, 1),
             )
@@ -250,7 +251,7 @@ def _section_cost_anomalies(c: Console) -> list:
 def _section_ri_sp_coverage(c: Console, days: int) -> dict:
     """Fetch and render RI / Savings Plan coverage panel."""
     with c.status(
-        "[cyan]Checking RI / Savings Plan coverage...[/cyan]", spinner="dots"
+        "[cyan]📊  Checking RI / Savings Plan coverage...[/cyan]", spinner="dots"
     ):
         ri_sp = get_ri_sp_coverage(days=days)
 
@@ -286,10 +287,10 @@ def _section_ri_sp_coverage(c: Console, days: int) -> dict:
 
     if has_any:
         ri_sp_border = "yellow"
-        ri_sp_title = "[bold yellow]RI / Savings Plan Coverage[/bold yellow]"
+        ri_sp_title = "[bold yellow]📊 RI / Savings Plan Coverage[/bold yellow]"
     else:
         ri_sp_border = "dim"
-        ri_sp_title = "[bold dim]RI / Savings Plan Coverage[/bold dim]  [dim]no commitments detected[/dim]"
+        ri_sp_title = "[bold dim]📊 RI / Savings Plan Coverage[/bold dim]  [dim]no commitments detected[/dim]"
 
     c.print(
         Panel(
@@ -326,7 +327,7 @@ def _section_security(
         return _sec
 
     region_args = [(reg, i == 0) for i, reg in enumerate(regions)]
-    with c.status("[cyan]Running security checks...[/cyan]", spinner="dots"):
+    with c.status("[cyan]🛡️   Running security checks...[/cyan]", spinner="dots"):
         with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
             for items in pool.map(_sec_region, region_args):
                 sec_findings.extend(items)
@@ -350,7 +351,7 @@ def _section_security(
         c.print(
             Panel(
                 sec_table,
-                title=f"[bold red]Security[/bold red]  [dim]{sec_count} finding{'s' if sec_count != 1 else ''}[/dim]",
+                title=f"[bold red]🛡️  Security[/bold red]  [dim]{sec_count} finding{'s' if sec_count != 1 else ''}[/dim]",
                 border_style="red",
                 padding=(0, 1),
             )
@@ -359,7 +360,7 @@ def _section_security(
         c.print(
             Panel(
                 "[green]✓  All security checks passed.[/green]",
-                title="[bold green]Security[/bold green]",
+                title="[bold green]✅ Security[/bold green]",
                 border_style="green",
                 padding=(0, 1),
             )
@@ -370,7 +371,7 @@ def _section_security(
 
 def _section_iam(c: Console) -> list:
     """Scan for over-permissive IAM policies and render findings panel."""
-    with c.status("[cyan]Scanning IAM policies...[/cyan]", spinner="dots"):
+    with c.status("[cyan]🔑  Scanning IAM policies...[/cyan]", spinner="dots"):
         iam_findings = detect_overpermissive_iam()
 
     iam_count = len(iam_findings)
@@ -395,7 +396,7 @@ def _section_iam(c: Console) -> list:
         c.print(
             Panel(
                 iam_table,
-                title=f"[bold red]IAM Over-Permissive Policies[/bold red]  [dim]{iam_count} finding{'s' if iam_count != 1 else ''}[/dim]",
+                title=f"[bold red]🔑 IAM Over-Permissive Policies[/bold red]  [dim]{iam_count} finding{'s' if iam_count != 1 else ''}[/dim]",
                 border_style="red",
                 padding=(0, 1),
             )
@@ -404,7 +405,7 @@ def _section_iam(c: Console) -> list:
         c.print(
             Panel(
                 "[green]✓  No over-permissive IAM policies detected.[/green]",
-                title="[bold green]IAM Policies[/bold green]",
+                title="[bold green]✅ IAM Policies[/bold green]",
                 border_style="green",
                 padding=(0, 1),
             )
@@ -428,7 +429,9 @@ def _section_cloudwatch(
                 f["region"] = reg
         return _cw
 
-    with c.status("[cyan]Checking CloudWatch alarm coverage...[/cyan]", spinner="dots"):
+    with c.status(
+        "[cyan]📡  Checking CloudWatch alarm coverage...[/cyan]", spinner="dots"
+    ):
         with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
             for items in pool.map(_cw_region, regions):
                 cw_findings.extend(items)
@@ -455,7 +458,7 @@ def _section_cloudwatch(
         c.print(
             Panel(
                 cw_table,
-                title=f"[bold yellow]CloudWatch Alarm Gaps[/bold yellow]  [dim]{cw_count} resource{'s' if cw_count != 1 else ''} unmonitored[/dim]",
+                title=f"[bold yellow]📡 CloudWatch Alarm Gaps[/bold yellow]  [dim]{cw_count} resource{'s' if cw_count != 1 else ''} unmonitored[/dim]",
                 border_style="yellow",
                 padding=(0, 1),
             )
@@ -464,7 +467,7 @@ def _section_cloudwatch(
         c.print(
             Panel(
                 "[green]✓  All EC2, RDS, and Lambda resources have required CloudWatch alarms.[/green]",
-                title="[bold green]CloudWatch Alarms[/bold green]",
+                title="[bold green]✅ CloudWatch Alarms[/bold green]",
                 border_style="green",
                 padding=(0, 1),
             )
@@ -488,7 +491,7 @@ def _section_cost_waste(
                 f["region"] = reg
         return _cost
 
-    with c.status("[cyan]Scanning for cost waste...[/cyan]", spinner="dots"):
+    with c.status("[cyan]🗑️   Scanning for cost waste...[/cyan]", spinner="dots"):
         with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
             for items in pool.map(_cost_region, regions):
                 cost_findings.extend(items)
@@ -511,7 +514,7 @@ def _section_cost_waste(
         c.print(
             Panel(
                 waste_table,
-                title=f"[bold yellow]Cost Waste[/bold yellow]  [dim]{waste_count} finding{'s' if waste_count != 1 else ''}[/dim]",
+                title=f"[bold yellow]🗑️  Cost Waste[/bold yellow]  [dim]{waste_count} finding{'s' if waste_count != 1 else ''}[/dim]",
                 border_style="yellow",
                 padding=(0, 1),
             )
@@ -520,7 +523,7 @@ def _section_cost_waste(
         c.print(
             Panel(
                 "[green]✓  No cost waste detected.[/green]",
-                title="[bold green]Cost Waste[/bold green]",
+                title="[bold green]✅ Cost Waste[/bold green]",
                 border_style="green",
                 padding=(0, 1),
             )
@@ -547,7 +550,7 @@ def _section_tagging(
         return _tag
 
     tag_args = [(reg, i == 0) for i, reg in enumerate(regions)]
-    with c.status("[cyan]Checking tag compliance...[/cyan]", spinner="dots"):
+    with c.status("[cyan]🏷️   Checking tag compliance...[/cyan]", spinner="dots"):
         with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
             for items in pool.map(_tag_region, tag_args):
                 tag_findings.extend(items)
@@ -574,7 +577,7 @@ def _section_tagging(
         c.print(
             Panel(
                 tag_table,
-                title=f"[bold yellow]Tagging Compliance[/bold yellow]  [dim]{tag_count} resource{'s' if tag_count != 1 else ''} untagged[/dim]",
+                title=f"[bold yellow]🏷️  Tagging Compliance[/bold yellow]  [dim]{tag_count} resource{'s' if tag_count != 1 else ''} untagged[/dim]",
                 border_style="yellow",
                 padding=(0, 1),
             )
@@ -583,7 +586,7 @@ def _section_tagging(
         c.print(
             Panel(
                 "[green]✓  All resources carry the required tags.[/green]",
-                title="[bold green]Tagging Compliance[/bold green]",
+                title="[bold green]✅ Tagging Compliance[/bold green]",
                 border_style="green",
                 padding=(0, 1),
             )
@@ -627,7 +630,7 @@ def _section_lambda_detail(c: Console, lambdas: list) -> None:
     c.print(
         Panel(
             lambda_table,
-            title=f"[bold blue]Lambda Functions[/bold blue]  [dim]{len(valid_lambdas)} total[/dim]{stale_note}",
+            title=f"[bold blue]⚡ Lambda Functions[/bold blue]  [dim]{len(valid_lambdas)} total[/dim]{stale_note}",
             border_style="blue",
             padding=(0, 1),
         )
@@ -678,7 +681,7 @@ def _section_remediation(
         Panel(
             rem_table,
             title=(
-                f"[bold cyan]One-Click Remediation[/bold cyan]  "
+                f"[bold cyan]🔧 One-Click Remediation[/bold cyan]  "
                 f"[dim]{len(remediable)} fix{'es' if len(remediable) != 1 else ''} available[/dim]"
             ),
             border_style="cyan",
@@ -704,7 +707,9 @@ def _section_remediation(
                     logger.error(f"Unknown remediation type: {f['remediation_type']}")
                     continue
                 if typer.confirm(f"  Apply '{label}' on {resource}?", default=False):
-                    with c.status(f"[cyan]Applying {label}...[/cyan]", spinner="dots"):
+                    with c.status(
+                        f"[cyan]🔧  Applying {label}...[/cyan]", spinner="dots"
+                    ):
                         ok = action(resource)
                     if ok:
                         logger.success(f"{label} applied to {resource}.")
@@ -785,27 +790,27 @@ def analyze(
 
     # Header
     c.print()
-    c.print(Rule("[bold cyan]AWS LIGHTHOUSE[/bold cyan]", style="cyan"))
+    c.print(Rule(" 🔦  AWS LIGHTHOUSE ", style="bold cyan", align="center"))
     c.print()
 
     # Auth
-    with c.status("[cyan]Authenticating...[/cyan]", spinner="dots"):
+    with c.status("[cyan]🔐  Authenticating...[/cyan]", spinner="dots"):
         session = get_aws_session()
         account_id = session.client("sts").get_caller_identity()["Account"]
 
     c.print(
-        f"  [dim]Account[/dim]  [bold]{account_id}[/bold]  "
-        f"[dim]·  Scanned[/dim]  {datetime.now().strftime('%Y-%m-%d  %H:%M')}"
+        f"  [dim]🔐 Account[/dim]  [bold]{account_id}[/bold]  "
+        f"[dim]·  📅 {datetime.now().strftime('%Y-%m-%d  %H:%M')}[/dim]"
     )
     c.print()
 
     # Regions
     if region:
         regions: list[str | None] = [region]
-        c.print(f"  [dim]Region[/dim]  [bold]{region}[/bold]")
+        c.print(f"  [dim]🌍 Region[/dim]  [bold]{region}[/bold]")
         c.print()
     else:
-        with c.status("[cyan]Detecting enabled regions...[/cyan]", spinner="dots"):
+        with c.status("[cyan]🌍  Detecting enabled regions...[/cyan]", spinner="dots"):
             regions = list(get_enabled_regions())
         if not regions:
             regions = [None]
@@ -813,7 +818,7 @@ def analyze(
     multi_region = len(regions) > 1
     if multi_region:
         c.print(
-            f"  [dim]Scanning [bold]{len(regions)}[/bold] regions:[/dim] "
+            f"  [dim]🌍 Scanning [bold]{len(regions)}[/bold] regions:[/dim] "
             + ", ".join(r for r in regions if r)
         )
         c.print()
@@ -880,21 +885,22 @@ def shell() -> None:
     # ── Welcome banner ───────────────────────────────────────────────────────
     c.print()
     c.print(
-        Panel(
-            Align.center(
-                "[bold cyan]AWS LIGHTHOUSE[/bold cyan]\n"
-                "[dim]FinOps  ·  Security  ·  Infrastructure[/dim]\n\n"
-                "[dim]Type your request and press Enter.  [bold]exit[/bold] or Ctrl+C to quit.[/dim]"
-            ),
-            border_style="cyan",
-            padding=(1, 4),
+        Align.center(
+            Panel(
+                "🔦  [bold cyan]AWS LIGHTHOUSE[/bold cyan]\n"
+                "[dim]FinOps · Security · Infrastructure[/dim]\n"
+                "[dim]Type a request or [bold]exit[/bold] to quit.[/dim]",
+                border_style="cyan",
+                padding=(0, 2),
+                expand=False,
+            )
         )
     )
     c.print()
 
     # ── Init agent ───────────────────────────────────────────────────────────
     try:
-        with c.status("[cyan]Initializing agent...[/cyan]", spinner="dots"):
+        with c.status("[cyan]🤖  Initializing agent...[/cyan]", spinner="dots"):
             graph = create_agent_graph()
 
         system_prompt = SystemMessage(
@@ -912,7 +918,7 @@ def shell() -> None:
         )
         config = {"configurable": {"thread_id": "main"}}
         first_turn = True
-        logger.success("Agent ready.")
+        c.print(Rule("[dim cyan]  ready  [/dim cyan]", style="dim cyan"))
     except Exception as e:
         logger.error(f"Failed to initialize agent: {e}")
         return
@@ -921,10 +927,10 @@ def shell() -> None:
     while True:
         try:
             c.print()
-            user_input = Prompt.ask("[bold cyan] ❯[/bold cyan]")
+            user_input = Prompt.ask("[bold cyan]  you[/bold cyan]")
             if user_input.strip().lower() in ("exit", "quit", ""):
                 if user_input.strip().lower() in ("exit", "quit"):
-                    c.print("\n[dim]Goodbye.[/dim]\n")
+                    c.print("\n[dim]  👋 Goodbye.[/dim]\n")
                     break
                 continue
 
@@ -936,7 +942,7 @@ def shell() -> None:
             first_turn = False
 
             # Stream agent events
-            c.print("\n[dim]  ● Thinking...[/dim]")
+            c.print("\n[dim]  🤔 Thinking...[/dim]")
             for event in graph.stream({"messages": messages}, config=config):
                 if "agent" in event:
                     msg = event["agent"]["messages"][-1]
@@ -953,7 +959,7 @@ def shell() -> None:
                         )
                         # If there are tool calls coming next, show a follow-up indicator
                         if msg.tool_calls:
-                            c.print("\n[dim]  ● Preparing tool execution...[/dim]")
+                            c.print("\n[dim]  ⚙️  Preparing tool...[/dim]")
 
                 elif "tools" in event:
                     msg = event["tools"]["messages"][-1]
@@ -966,10 +972,10 @@ def shell() -> None:
                             padding=(0, 2),
                         )
                     )
-                    c.print("\n[dim]  ● Thinking...[/dim]")
+                    c.print("\n[dim]  🤔 Thinking...[/dim]")
 
         except KeyboardInterrupt:
-            c.print("\n[dim]Goodbye.[/dim]\n")
+            c.print("\n[dim]  👋 Goodbye.[/dim]\n")
             break
         except Exception as e:
             logger.error(f"Error: {e}")
