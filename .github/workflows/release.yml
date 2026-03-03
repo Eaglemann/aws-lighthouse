@@ -1,0 +1,86 @@
+name: Release
+
+# Triggered when a semver tag is pushed, e.g. v1.2.3
+# Workflow:
+#   1. Run full test suite (same as CI) to gate the release.
+#   2. Generate per-release changelog with git-cliff.
+#   3. Build sdist + wheel with uv build (backed by hatchling).
+#   4. Publish to PyPI via OIDC trusted publisher (no long-lived secret needed).
+#      Configure at: https://pypi.org/manage/account/publishing/
+#   5. Create a GitHub Release with the changelog and built artifacts.
+#
+# Version bumping: run `hatch version minor` (or patch/major) locally,
+# commit, then `git tag v$(hatch version) && git push --tags`.
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write   # create GitHub Release + upload assets
+  id-token: write   # OIDC token for PyPI trusted publishing
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0   # full history required by git-cliff
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version-file: ".python-version"
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Lint
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: Type check
+        run: uv run mypy aws_lighthouse
+
+      - name: Test
+        run: uv run pytest
+
+      # Install git-cliff to generate a changelog for this release tag.
+      # Pin the version; update when upgrading git-cliff.
+      # See https://github.com/orhun/git-cliff for configuration (cliff.toml).
+      - name: Install git-cliff
+        run: |
+          curl -sSfL \
+            "https://github.com/orhun/git-cliff/releases/download/v2.4.0/git-cliff-v2.4.0-x86_64-unknown-linux-musl.tar.gz" \
+            | tar -xz --wildcards "*/git-cliff" --strip-components=1
+          chmod +x git-cliff
+          sudo mv git-cliff /usr/local/bin/git-cliff
+
+      - name: Generate release notes
+        run: git cliff --current --strip header --output RELEASE_NOTES.md
+
+      - name: Build distribution packages
+        run: uv build
+
+      # Requires a PyPI trusted publisher configured for this repository.
+      # No PYPI_TOKEN secret needed when OIDC is set up.
+      - name: Publish to PyPI
+        run: uv publish
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "Release ${{ github.ref_name }}" \
+            --notes-file RELEASE_NOTES.md \
+            dist/*
