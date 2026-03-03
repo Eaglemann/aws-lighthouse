@@ -94,7 +94,7 @@ uv run aws-lighthouse analyze [--days N]
 4. **Fetches costs** — Cost Explorer `GetCostAndUsage` for the requested window; saves a snapshot to SQLite for trend tracking
 5. **Detects cost anomalies** — compares last 7 days vs prior 7-day baseline per service; flags >50% spikes
 6. **RI / Savings Plan coverage** — coverage % and utilization for both Reserved Instances and Savings Plans; highlights under-utilised commitments and uncovered on-demand spend
-7. **Security scan** — six checks across all regions (see [Dashboard Panels](#dashboard-panels))
+7. **Security scan** — eleven checks across all regions (see [Dashboard Panels](#dashboard-panels))
 8. **IAM over-permissive scan** — inspects every user, role, and group for dangerous policies (global)
 9. **CloudWatch alarm gaps** — finds EC2/RDS instances missing alarms on key metrics per region
 10. **Cost waste scan** — unattached EBS, stopped EC2, stale snapshots, unassociated EIPs per region
@@ -262,13 +262,13 @@ All tools are available to the agent in the interactive shell. Read-only tools b
 | `tool_check_tagging_compliance(required_tags, region)` | Missing tags on EC2/RDS/S3 |
 | `tool_detect_overpermissive_iam` | IAM wildcard policy findings |
 | `tool_detect_cloudwatch_gaps(region)` | EC2/RDS resources missing alarms |
-| `tool_read_file(filepath)` | Read a local file |
 | `parse_terraform_context` | Parse local `.tf` files |
 
 ### Mutative (require explicit approval)
 
 | Tool | Description |
 |---|---|
+| `tool_read_file(filepath)` | Read a local file — requires approval because it can access any path, including credential files; the path blocklist is a secondary defence, not a primary gate |
 | `terminate_ec2(instance_id)` | Terminate an EC2 instance |
 | `delete_ebs(volume_id)` | Delete an EBS volume |
 | `s3_block_public_access(bucket_name)` | Enable Block Public Access on an S3 bucket |
@@ -323,6 +323,44 @@ Lighthouse maintains a SQLite database at `~/.aws-lighthouse/lighthouse.db`.
 | `cost_snapshots` | One row per `analyze` run — account ID, date range, total spend, per-service breakdown. Used to compute the ▲/▼ cost trend shown in the dashboard. |
 
 The database is created automatically on first run. No data leaves your machine.
+
+---
+
+## Security Considerations
+
+### Shell command restrictions (`execute_bash`)
+
+`execute_bash` enforces a four-layer security model:
+
+1. **Denylist pre-check** — catastrophic patterns (`rm -rf /`, `mkfs`, `dd of=/dev/`, fork bombs, pipe-to-shell) are rejected before any parsing.
+2. **`shlex.split()` parsing** — no shell is invoked; semicolons, pipes, `$(…)`, and `&&` become literal arguments, not shell syntax.
+3. **Allowlist** — only `aws`, `terraform`, `kubectl`, `helm`, `uv`, `git`, `echo`, `ls`, `df`, `find`, `which`, `pwd` may execute. `python3`, `bash`, `curl`, `cat`, `nc`, and all other binaries are blocked.
+4. **`shell=False`** — no shell process is created; metacharacters cannot escape.
+
+### File path blocklist (`read_file` / `write_file`)
+
+Sensitive paths are blocked by three mechanisms:
+
+| Mechanism | Examples |
+|---|---|
+| **Directory prefix** | `~/.aws`, `~/.ssh`, `~/.gnupg`, `~/.config/gcloud`, `~/.kube` |
+| **Exact file** (resolved) | `/etc/shadow`, `/etc/sudoers`, `~/.netrc`, `~/.bashrc`, `~/.zshrc`, `~/.bash_history` |
+| **Basename match** | `.env` (any directory — `.env.example` and `config.env` are allowed) |
+
+**Known scope gaps**: the blocklist applies to the `filepath` argument of `read_file`/`write_file` only. Arguments passed inside a bash command string (e.g., `echo ... > somefile`) are not path-checked by the blocklist — they are governed by the command allowlist instead.
+
+### Audit trail
+
+Every tool invocation is recorded in `~/.aws-lighthouse/lighthouse.db` (`audit_log` table) with:
+- `tool_name` and `args_json` — what the agent requested
+- `decision` — `approved`, `denied`, or `auto_approved` (safe/read-only tools)
+- `timestamp`
+
+**Limitation**: the audit log records the _decision_ and _arguments_, not the _content_ returned by the tool (e.g., file contents, scan results). Sensitive data that an approved tool reads remains only in process memory and is not persisted to disk.
+
+### Trust model
+
+The agent is given your AWS credentials and executes with them. Treat the LLM's proposed tool calls with the same scrutiny as any infrastructure change request — the approval prompt exists precisely for this. Do not approve tool calls you do not understand.
 
 ---
 
@@ -395,7 +433,7 @@ aws_lighthouse/
     ├── remediation_actions.py  # One-click fixes: S3 BPA, delete EBS, release EIP
     ├── ri_sp_coverage.py   # RI and Savings Plan coverage + utilization
     ├── security.py         # s3_block_public_access (agent-facing mutative tool)
-    ├── security_scan.py    # Six-check security posture scan
+    ├── security_scan.py    # Eleven-check security posture scan
     ├── tagging.py          # Tagging compliance (EC2 / RDS / S3)
     └── terraform.py        # Terraform file parser
 ```
