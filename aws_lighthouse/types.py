@@ -1,10 +1,13 @@
-from typing import NotRequired, TypedDict
+from typing import Literal, NotRequired, TypedDict
+
+# Canonical severity levels used across all scan findings.
+Severity = Literal["HIGH", "MEDIUM", "LOW"]
 
 
 class SecurityFinding(TypedDict):
     """One finding emitted by run_security_scan()."""
 
-    severity: str
+    severity: Severity
     resource: str
     finding: str
     remediation_type: NotRequired[str]
@@ -45,7 +48,7 @@ class CloudWatchFinding(TypedDict):
 class IAMFinding(TypedDict):
     """One finding emitted by detect_overpermissive_iam()."""
 
-    severity: str
+    severity: Severity
     principal_type: str
     principal_name: str
     policy_type: str
