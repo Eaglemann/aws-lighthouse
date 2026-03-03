@@ -18,6 +18,7 @@ class DatabaseManager:
     def _ensure_db(self):
         """Creates the database directory and initializes tables if they don't exist."""
         DB_DIR.mkdir(parents=True, exist_ok=True)
+        DB_DIR.chmod(0o700)  # owner-only: no group/world read on the credentials dir
 
         try:
             with sqlite3.connect(DB_PATH) as conn:
@@ -48,7 +49,8 @@ class DatabaseManager:
                     )
                 """)
                 conn.commit()
-        except sqlite3.Error as e:
+            DB_PATH.chmod(0o600)  # owner read/write only — contains cost history
+        except (sqlite3.Error, OSError) as e:
             logger.error(f"Failed to initialize SQLite database: {str(e)}")
 
     def record_cost_snapshot(
