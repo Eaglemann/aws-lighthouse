@@ -74,7 +74,7 @@ jobs:
       # Requires a PyPI trusted publisher configured for this repository.
       # No PYPI_TOKEN secret needed when OIDC is set up.
       - name: Publish to PyPI
-        run: uv publish --skip-existing
+        run: uv publish --check-url https://pypi.org/simple/
 
       - name: Create GitHub Release
         env:
