@@ -48,6 +48,18 @@ class DatabaseManager:
                         service_breakdown TEXT
                     )
                 """)
+
+                # Audit log: every tool invocation the agent attempts, with decision
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS audit_log (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        tool_name TEXT NOT NULL,
+                        args_json TEXT NOT NULL,
+                        decision TEXT NOT NULL,
+                        result TEXT
+                    )
+                """)
                 conn.commit()
             DB_PATH.chmod(0o600)  # owner read/write only — contains cost history
         except (sqlite3.Error, OSError) as e:
@@ -95,6 +107,28 @@ class DatabaseManager:
         except sqlite3.Error as e:
             logger.error(f"Failed to retrieve latest cost snapshot: {str(e)}")
             return None
+
+    def record_audit_log(
+        self,
+        tool_name: str,
+        args_json: str,
+        decision: str,
+        result: str | None = None,
+    ) -> None:
+        """Record a tool invocation in the audit log.
+
+        decision is one of: 'approved', 'denied', 'auto_approved'.
+        result is the tool output string (may be None when not yet known).
+        """
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.execute(
+                    "INSERT INTO audit_log (tool_name, args_json, decision, result) VALUES (?, ?, ?, ?)",
+                    (tool_name, args_json, decision, result),
+                )
+                conn.commit()
+        except sqlite3.Error as e:
+            logger.error(f"Failed to record audit log entry: {str(e)}")
 
 
 # Global singleton
