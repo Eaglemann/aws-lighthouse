@@ -12,10 +12,10 @@ DB_PATH = DB_DIR / "lighthouse.db"
 class DatabaseManager:
     """Manages the local SQLite database for aws-lighthouse state and trends."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._ensure_db()
 
-    def _ensure_db(self):
+    def _ensure_db(self) -> None:
         """Creates the database directory and initializes tables if they don't exist."""
         DB_DIR.mkdir(parents=True, exist_ok=True)
         DB_DIR.chmod(0o700)  # owner-only: no group/world read on the credentials dir
@@ -72,7 +72,7 @@ class DatabaseManager:
         end: str,
         total: float,
         breakdown: dict[str, float],
-    ):
+    ) -> None:
         """Save a cost snapshot to track trends over time."""
         try:
             with sqlite3.connect(DB_PATH) as conn:
