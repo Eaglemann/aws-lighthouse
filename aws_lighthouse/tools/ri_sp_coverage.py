@@ -96,9 +96,7 @@ def _fetch_sp_utilization(ce, period: dict[str, str]) -> ScanResult:
         util = resp.get("Total", {}).get("Utilization", {})
         return ok_result(
             {
-                "sp_utilization_pct": float(
-                    util.get("UtilizationPercentage", 0) or 0
-                ),
+                "sp_utilization_pct": float(util.get("UtilizationPercentage", 0) or 0),
                 "sp_unused_commitment": float(util.get("UnusedCommitment", 0) or 0),
             }
         )

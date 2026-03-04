@@ -94,7 +94,9 @@ def test_ec2_missing_tags_flagged():
         "State": {"Name": "running"},
         "Tags": [{"Key": "Name", "Value": "web"}],
     }
-    findings = _data(_run(ec2=_make_ec2([instance]), required_tags=["Environment", "Owner"]))
+    findings = _data(
+        _run(ec2=_make_ec2([instance]), required_tags=["Environment", "Owner"])
+    )
     ec2_findings = [f for f in findings if f["resource_type"] == "EC2"]
     assert len(ec2_findings) == 1
     assert set(ec2_findings[0]["missing_tags"]) == {"Environment", "Owner"}
@@ -109,7 +111,9 @@ def test_ec2_fully_tagged_not_flagged():
             {"Key": "Owner", "Value": "team"},
         ],
     }
-    findings = _data(_run(ec2=_make_ec2([instance]), required_tags=["Environment", "Owner"]))
+    findings = _data(
+        _run(ec2=_make_ec2([instance]), required_tags=["Environment", "Owner"])
+    )
     assert not any(f["resource_type"] == "EC2" for f in findings)
 
 
@@ -148,7 +152,9 @@ def test_rds_fully_tagged_not_flagged():
 
 def test_s3_no_tags_flagged():
     # NoSuchTagSet → treated as missing all tags
-    findings = _data(_run(s3=_make_s3(["raw-bucket"], tag_map={}), required_tags=["Owner"]))
+    findings = _data(
+        _run(s3=_make_s3(["raw-bucket"], tag_map={}), required_tags=["Owner"])
+    )
     s3_findings = [f for f in findings if f["resource_type"] == "S3"]
     assert len(s3_findings) == 1
     assert s3_findings[0]["resource_id"] == "raw-bucket"
@@ -189,9 +195,9 @@ _FN_ARN = _FN["FunctionArn"]
 def test_lambda_missing_tags_flagged():
     findings = _data(
         _run(
-        lmb=_make_lambda([_FN]),
-        tagging=_make_tagging_client({}),
-        required_tags=["Environment", "Owner"],
+            lmb=_make_lambda([_FN]),
+            tagging=_make_tagging_client({}),
+            required_tags=["Environment", "Owner"],
         )
     )
     lmb_findings = [f for f in findings if f["resource_type"] == "Lambda"]
@@ -209,9 +215,9 @@ def test_lambda_fully_tagged_not_flagged():
     }
     findings = _data(
         _run(
-        lmb=_make_lambda([_FN]),
-        tagging=_make_tagging_client(tag_map),
-        required_tags=["Environment", "Owner"],
+            lmb=_make_lambda([_FN]),
+            tagging=_make_tagging_client(tag_map),
+            required_tags=["Environment", "Owner"],
         )
     )
     assert not any(f["resource_type"] == "Lambda" for f in findings)
@@ -221,9 +227,9 @@ def test_lambda_partially_tagged_reports_only_missing():
     tag_map = {_FN_ARN: [{"Key": "Environment", "Value": "prod"}]}
     findings = _data(
         _run(
-        lmb=_make_lambda([_FN]),
-        tagging=_make_tagging_client(tag_map),
-        required_tags=["Environment", "Owner"],
+            lmb=_make_lambda([_FN]),
+            tagging=_make_tagging_client(tag_map),
+            required_tags=["Environment", "Owner"],
         )
     )
     lmb_findings = [f for f in findings if f["resource_type"] == "Lambda"]
@@ -268,9 +274,9 @@ def test_lambda_bulk_tags_two_pages_collects_all():
     ]
     findings = _data(
         _run(
-        lmb=_make_lambda([_FN, fn2]),
-        tagging=tagging,
-        required_tags=["Owner"],
+            lmb=_make_lambda([_FN, fn2]),
+            tagging=tagging,
+            required_tags=["Owner"],
         )
     )
     assert not any(f["resource_type"] == "Lambda" for f in findings)

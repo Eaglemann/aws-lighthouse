@@ -253,10 +253,16 @@ def test_record_tool_execution_results_updates_audit_log():
     msg.content = ""
     state = {"messages": [msg]}
     output = {
-        "messages": [ToolMessage(content='{"stdout":"","error":"Timeout"}', tool_call_id="call-xyz")]
+        "messages": [
+            ToolMessage(
+                content='{"stdout":"","error":"Timeout"}', tool_call_id="call-xyz"
+            )
+        ]
     }
 
-    with patch("aws_lighthouse.agent.db_manager.update_audit_log_result") as mock_update:
+    with patch(
+        "aws_lighthouse.agent.db_manager.update_audit_log_result"
+    ) as mock_update:
         _record_tool_execution_results(state, output)
 
     mock_update.assert_called_once_with(
@@ -268,15 +274,35 @@ def test_record_tool_execution_results_updates_audit_log():
 
 
 def test_read_only_tool_schema_v1_returns_legacy_payload():
-    with patch("aws_lighthouse.agent._get_ec2_inventory", return_value={"ok": True, "data": [{"id": "i-1"}], "errors": []}):
+    with patch(
+        "aws_lighthouse.agent._get_ec2_inventory",
+        return_value={"ok": True, "data": [{"id": "i-1"}], "errors": []},
+    ):
         payload = tool_get_ec2_inventory.invoke({"region": "us-east-1"})
     assert payload == '[{"id": "i-1"}]'
 
 
 def test_read_only_tool_schema_v2_returns_envelope_payload():
-    with patch("aws_lighthouse.agent._get_ec2_inventory", return_value={"ok": False, "data": [{"id": "i-1"}], "errors": [{"code": "AccessDenied", "message": "denied", "service": "ec2", "operation": "DescribeInstances"}]}):
+    with patch(
+        "aws_lighthouse.agent._get_ec2_inventory",
+        return_value={
+            "ok": False,
+            "data": [{"id": "i-1"}],
+            "errors": [
+                {
+                    "code": "AccessDenied",
+                    "message": "denied",
+                    "service": "ec2",
+                    "operation": "DescribeInstances",
+                }
+            ],
+        },
+    ):
         payload = tool_get_ec2_inventory.invoke({"region": "us-east-1", "schema": "v2"})
-    assert payload == '{"ok": false, "data": [{"id": "i-1"}], "errors": [{"code": "AccessDenied", "message": "denied", "service": "ec2", "operation": "DescribeInstances"}]}'
+    assert (
+        payload
+        == '{"ok": false, "data": [{"id": "i-1"}], "errors": [{"code": "AccessDenied", "message": "denied", "service": "ec2", "operation": "DescribeInstances"}]}'
+    )
 
 
 def test_classify_tool_result_detects_envelope_failure():
@@ -288,6 +314,9 @@ def test_classify_tool_result_detects_envelope_failure():
 
 
 def test_schema_defaults_to_v1_for_read_only_tools():
-    with patch("aws_lighthouse.agent._detect_cost_anomalies", return_value={"ok": True, "data": [{"service": "EC2"}], "errors": []}):
+    with patch(
+        "aws_lighthouse.agent._detect_cost_anomalies",
+        return_value={"ok": True, "data": [{"service": "EC2"}], "errors": []},
+    ):
         payload = tool_detect_cost_anomalies.invoke({})
     assert payload == '[{"service": "EC2"}]'

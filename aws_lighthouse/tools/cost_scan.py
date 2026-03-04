@@ -32,8 +32,8 @@ def _check_unattached_ebs(ec2, region: str | None = None):
                         "finding": f"Unattached EBS volume ({size} GB {vol_type}) — paying for storage with no instance",
                         "remediation_type": "delete_ebs_volume",
                         "remediation_label": "Delete EBS Volume",
-                        }
-                    )
+                    }
+                )
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check unattached EBS volumes: {e}")
         return error_result(
@@ -138,8 +138,8 @@ def _check_unassociated_eips(ec2, region: str | None = None):
                         "finding": f"Elastic IP {addr['PublicIp']} is allocated but not associated — ~$0.005/hr wasted",
                         "remediation_type": "release_eip",
                         "remediation_label": "Release Elastic IP",
-                        }
-                    )
+                    }
+                )
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check unassociated Elastic IPs: {e}")
         return error_result(

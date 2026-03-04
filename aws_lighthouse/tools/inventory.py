@@ -99,9 +99,9 @@ def get_rds_inventory(region: str | None = None) -> ScanResult:
                         "Engine": db.get("Engine"),
                         "Class": db.get("DBInstanceClass"),
                         "Status": db.get("DBInstanceStatus"),
-                            "PubliclyAccessible": db.get("PubliclyAccessible", False),
-                        }
-                    )
+                        "PubliclyAccessible": db.get("PubliclyAccessible", False),
+                    }
+                )
         return ok_result(instances)
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to list RDS instances: {str(e)}")
@@ -148,8 +148,8 @@ def get_lambda_inventory(region: str | None = None) -> ScanResult:
                         "CodeSizeMB": round(fn.get("CodeSize", 0) / 1_048_576, 2),
                         "LastModified": last_modified,
                         "Stale": stale,
-                        }
-                    )
+                    }
+                )
         return ok_result(functions)
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to list Lambda functions: {str(e)}")
