@@ -15,6 +15,7 @@ from aws_lighthouse.cli import (
     _section_cost_waste,
     _section_iam,
     _section_lambda_detail,
+    _section_remediation,
     _section_security,
     app,
 )
@@ -314,6 +315,63 @@ class TestSectionLambdaDetail:
         output = buf.getvalue()
         assert "good-fn" in output
         assert "error" not in output.lower()
+
+
+# ---------------------------------------------------------------------------
+# _section_remediation
+# ---------------------------------------------------------------------------
+
+
+class TestSectionRemediation:
+    def test_regional_remediation_passes_region_to_action(self):
+        c, _ = _console()
+        sec_findings = [
+            {
+                "severity": "HIGH",
+                "resource": "vol-abc123",
+                "finding": "Unattached EBS volume",
+                "remediation_type": "delete_ebs_volume",
+                "remediation_label": "Delete EBS Volume",
+                "region": "eu-west-1",
+            }
+        ]
+        with (
+            patch("aws_lighthouse.cli.Prompt.ask", return_value="1"),
+            patch("aws_lighthouse.cli.typer.confirm", return_value=True),
+            patch(
+                "aws_lighthouse.tools.remediation_actions.delete_ebs_volume",
+                return_value=True,
+            ) as mock_action,
+        ):
+            _section_remediation(c, sec_findings, [])
+
+        mock_action.assert_called_once_with("vol-abc123", region="eu-west-1")
+
+    def test_regional_remediation_without_region_is_skipped(self):
+        c, _ = _console()
+        sec_findings = [
+            {
+                "severity": "HIGH",
+                "resource": "vol-no-region",
+                "finding": "Unattached EBS volume",
+                "remediation_type": "delete_ebs_volume",
+                "remediation_label": "Delete EBS Volume",
+            }
+        ]
+        with (
+            patch("aws_lighthouse.cli.Prompt.ask", return_value="1"),
+            patch("aws_lighthouse.cli.typer.confirm", return_value=True),
+            patch("aws_lighthouse.cli.logger.error") as mock_error,
+            patch(
+                "aws_lighthouse.tools.remediation_actions.delete_ebs_volume",
+                return_value=True,
+            ) as mock_action,
+        ):
+            _section_remediation(c, sec_findings, [])
+
+        mock_action.assert_not_called()
+        mock_error.assert_called_once()
+        assert "Missing region for remediation" in mock_error.call_args[0][0]
 
 
 # ---------------------------------------------------------------------------

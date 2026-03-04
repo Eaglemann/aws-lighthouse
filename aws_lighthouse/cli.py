@@ -667,6 +667,13 @@ def _section_remediation(
         "enforce_imdsv2": enforce_imdsv2,
         "s3_default_encryption": apply_s3_default_encryption,
     }
+    _REGION_REQUIRED = {
+        "delete_ebs_volume",
+        "release_eip",
+        "enable_guardduty",
+        "enable_cloudtrail_logging",
+        "enforce_imdsv2",
+    }
 
     rem_table = Table(
         box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False
@@ -706,11 +713,17 @@ def _section_remediation(
                 if not action:
                     logger.error(f"Unknown remediation type: {f['remediation_type']}")
                     continue
+                region = f.get("region")
+                if f["remediation_type"] in _REGION_REQUIRED and not region:
+                    logger.error(
+                        f"Missing region for remediation {f['remediation_type']} on {resource}; skipping."
+                    )
+                    continue
                 if typer.confirm(f"  Apply '{label}' on {resource}?", default=False):
                     with c.status(
                         f"[cyan]🔧  Applying {label}...[/cyan]", spinner="dots"
                     ):
-                        ok = action(resource)
+                        ok = action(resource, region=region)
                     if ok:
                         logger.success(f"{label} applied to {resource}.")
                     else:
