@@ -800,87 +800,98 @@ def analyze(
     json_mode = output == "json"
     # In JSON mode send all Rich output to a buffer so nothing leaks to stdout.
     c = Console(file=io.StringIO(), no_color=True) if json_mode else logger.console
-
-    # Header
-    c.print()
-    c.print(Rule(" 🔦  AWS LIGHTHOUSE ", style="bold cyan", align="center"))
-    c.print()
-
-    # Auth
-    with c.status("[cyan]🔐  Authenticating...[/cyan]", spinner="dots"):
-        session = get_aws_session()
-        account_id = session.client("sts").get_caller_identity()["Account"]
-
-    c.print(
-        f"  [dim]🔐 Account[/dim]  [bold]{account_id}[/bold]  "
-        f"[dim]·  📅 {datetime.now().strftime('%Y-%m-%d  %H:%M')}[/dim]"
-    )
-    c.print()
-
-    # Regions
-    if region:
-        regions: list[str | None] = [region]
-        c.print(f"  [dim]🌍 Region[/dim]  [bold]{region}[/bold]")
-        c.print()
-    else:
-        with c.status("[cyan]🌍  Detecting enabled regions...[/cyan]", spinner="dots"):
-            regions = list(get_enabled_regions())
-        if not regions:
-            regions = [None]
-
-    multi_region = len(regions) > 1
-    if multi_region:
-        c.print(
-            f"  [dim]🌍 Scanning [bold]{len(regions)}[/bold] regions:[/dim] "
-            + ", ".join(r for r in regions if r)
-        )
-        c.print()
-
-    # Sections — all section functions return their data; rendering is a side-effect
-    # that goes to the devnull console when json_mode is True.
-    inv_table, s3s, ec2s, rdss, lambdas, cur_bucket_exists = _section_inventory(
-        c, regions, multi_region
-    )
-    costs = _section_cost_columns(c, inv_table, days, account_id, regions, multi_region)
-    anomalies = _section_cost_anomalies(c)
-    ri_sp = _section_ri_sp_coverage(c, days)
-    sec_findings = _section_security(c, s3s, rdss, regions, multi_region)
-    iam_findings = _section_iam(c)
-    cw_findings = _section_cloudwatch(c, regions, multi_region)
-    cost_findings = _section_cost_waste(c, regions, multi_region)
-    tag_findings = _section_tagging(c, regions, multi_region)
-
+    original_logger_console = logger.console
     if json_mode:
-        print(
-            json.dumps(
-                {
-                    "account_id": account_id,
-                    "scanned_at": datetime.now().isoformat(),
-                    "regions": [r for r in regions if r],
-                    "inventory": {
-                        "ec2": ec2s,
-                        "rds": rdss,
-                        "s3": s3s,
-                        "lambda": lambdas,
-                    },
-                    "costs": costs,
-                    "cost_anomalies": anomalies,
-                    "ri_sp_coverage": ri_sp,
-                    "security_findings": sec_findings,
-                    "iam_findings": iam_findings,
-                    "cloudwatch_findings": cw_findings,
-                    "cost_waste": cost_findings,
-                    "tagging_findings": tag_findings,
-                },
-                indent=2,
-                default=str,
-            )
-        )
-        return
+        logger.console = c
 
-    _section_lambda_detail(c, lambdas)
-    _section_remediation(c, sec_findings, cost_findings)
-    _section_cur_upsell(c, cur_bucket_exists, account_id)
+    try:
+        # Header
+        c.print()
+        c.print(Rule(" 🔦  AWS LIGHTHOUSE ", style="bold cyan", align="center"))
+        c.print()
+
+        # Auth
+        with c.status("[cyan]🔐  Authenticating...[/cyan]", spinner="dots"):
+            session = get_aws_session()
+            account_id = session.client("sts").get_caller_identity()["Account"]
+
+        c.print(
+            f"  [dim]🔐 Account[/dim]  [bold]{account_id}[/bold]  "
+            f"[dim]·  📅 {datetime.now().strftime('%Y-%m-%d  %H:%M')}[/dim]"
+        )
+        c.print()
+
+        # Regions
+        if region:
+            regions: list[str | None] = [region]
+            c.print(f"  [dim]🌍 Region[/dim]  [bold]{region}[/bold]")
+            c.print()
+        else:
+            with c.status(
+                "[cyan]🌍  Detecting enabled regions...[/cyan]", spinner="dots"
+            ):
+                regions = list(get_enabled_regions())
+            if not regions:
+                regions = [None]
+
+        multi_region = len(regions) > 1
+        if multi_region:
+            c.print(
+                f"  [dim]🌍 Scanning [bold]{len(regions)}[/bold] regions:[/dim] "
+                + ", ".join(r for r in regions if r)
+            )
+            c.print()
+
+        # Sections — all section functions return their data; rendering is a side-effect
+        # that goes to the devnull console when json_mode is True.
+        inv_table, s3s, ec2s, rdss, lambdas, cur_bucket_exists = _section_inventory(
+            c, regions, multi_region
+        )
+        costs = _section_cost_columns(
+            c, inv_table, days, account_id, regions, multi_region
+        )
+        anomalies = _section_cost_anomalies(c)
+        ri_sp = _section_ri_sp_coverage(c, days)
+        sec_findings = _section_security(c, s3s, rdss, regions, multi_region)
+        iam_findings = _section_iam(c)
+        cw_findings = _section_cloudwatch(c, regions, multi_region)
+        cost_findings = _section_cost_waste(c, regions, multi_region)
+        tag_findings = _section_tagging(c, regions, multi_region)
+
+        if json_mode:
+            print(
+                json.dumps(
+                    {
+                        "account_id": account_id,
+                        "scanned_at": datetime.now().isoformat(),
+                        "regions": [r for r in regions if r],
+                        "inventory": {
+                            "ec2": ec2s,
+                            "rds": rdss,
+                            "s3": s3s,
+                            "lambda": lambdas,
+                        },
+                        "costs": costs,
+                        "cost_anomalies": anomalies,
+                        "ri_sp_coverage": ri_sp,
+                        "security_findings": sec_findings,
+                        "iam_findings": iam_findings,
+                        "cloudwatch_findings": cw_findings,
+                        "cost_waste": cost_findings,
+                        "tagging_findings": tag_findings,
+                    },
+                    indent=2,
+                    default=str,
+                )
+            )
+            return
+
+        _section_lambda_detail(c, lambdas)
+        _section_remediation(c, sec_findings, cost_findings)
+        _section_cur_upsell(c, cur_bucket_exists, account_id)
+    finally:
+        if json_mode:
+            logger.console = original_logger_console
 
 
 # ─────────────────────────────────────────────────────────────────────────────

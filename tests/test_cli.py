@@ -580,3 +580,29 @@ class TestAnalyzeJsonOutput:
         result = self._run()
         assert "[bold" not in result.output
         assert "\x1b[" not in result.output  # no ANSI escapes
+
+    def test_json_output_not_contaminated_by_logger_errors(self):
+        """Even when a scan path logs an error, stdout must remain valid JSON."""
+        runner = CliRunner()
+        patches = {**_PATCHES, "aws_lighthouse.cli.get_aws_session": _mock_session}
+
+        def noisy_security_scan(**kwargs):
+            from aws_lighthouse.cli import logger
+
+            logger.error("simulated scanner error")
+            return []
+
+        with patch.multiple(
+            "aws_lighthouse.cli",
+            **{
+                k.split(".")[-1]: (
+                    noisy_security_scan if k.endswith("run_security_scan") else v
+                )
+                for k, v in patches.items()
+            },
+        ):
+            result = runner.invoke(app, ["analyze", "--output", "json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["account_id"] == "123456789012"
