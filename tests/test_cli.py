@@ -182,6 +182,22 @@ class TestSectionCostAnomalies:
         # "1 spike vs" should appear (not "spikes")
         assert "spike" in output
 
+    def test_renders_degraded_panel_when_scanner_logs_errors(self):
+        c, buf = _console()
+
+        def _side_effect(threshold_pct=50.0):  # noqa: ARG001
+            from aws_lighthouse.cli import logger
+
+            logger.error("Cost Explorer throttled")
+            return []
+
+        with patch("aws_lighthouse.cli.detect_cost_anomalies", side_effect=_side_effect):
+            _section_cost_anomalies(c)
+
+        output = buf.getvalue()
+        assert "Degraded" in output
+        assert "incomplete" in output.lower() or "degraded" in output.lower()
+
 
 # ---------------------------------------------------------------------------
 # _section_iam
@@ -475,6 +491,23 @@ class TestSectionSecurity:
 
         assert calls[0] is True
         assert all(v is False for v in calls[1:])
+
+    def test_renders_degraded_panel_when_scan_logs_errors(self):
+        c, buf = _console()
+
+        def _side_effect(**kwargs):  # noqa: ARG001
+            from aws_lighthouse.cli import logger
+
+            logger.error("AccessDenied on guardduty")
+            return []
+
+        with patch("aws_lighthouse.cli.run_security_scan", side_effect=_side_effect):
+            result = _section_security(c, [], [], [None], multi_region=False)
+
+        assert result == []
+        output = buf.getvalue()
+        assert "Security (Degraded)" in output
+        assert "incomplete" in output.lower()
 
 
 # ---------------------------------------------------------------------------

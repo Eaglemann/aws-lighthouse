@@ -1,3 +1,6 @@
+from collections.abc import Generator
+from contextlib import contextmanager
+
 from rich.console import Console
 from rich.panel import Panel
 
@@ -7,6 +10,7 @@ class LighthouseLogger:
 
     def __init__(self) -> None:
         self.console = Console()
+        self._error_capture_stack: list[list[str]] = []
 
     def print_header(self, title: str) -> None:
         """Prints a major section header."""
@@ -27,6 +31,8 @@ class LighthouseLogger:
     def error(self, message: str) -> None:
         """Prints a red error indicator."""
         self.console.print(f"[red]✗[/red] [bold red]{message}[/bold red]")
+        if self._error_capture_stack:
+            self._error_capture_stack[-1].append(message)
 
     def warn(self, message: str) -> None:
         """Prints a yellow warning indicator."""
@@ -35,6 +41,16 @@ class LighthouseLogger:
     def step(self, message: str) -> None:
         """Prints a minor granular step trace."""
         self.console.print(f"    [dim]- {message}[/dim]")
+
+    @contextmanager
+    def capture_errors(self) -> Generator[list[str], None, None]:
+        """Capture logger.error messages emitted inside this context."""
+        buf: list[str] = []
+        self._error_capture_stack.append(buf)
+        try:
+            yield buf
+        finally:
+            self._error_capture_stack.pop()
 
 
 logger = LighthouseLogger()

@@ -209,8 +209,9 @@ def _section_cost_columns(
 
 def _section_cost_anomalies(c: Console) -> list:
     """Detect and render cost anomaly panel."""
-    with c.status("[cyan]🚨  Detecting cost anomalies...[/cyan]", spinner="dots"):
-        anomalies = detect_cost_anomalies(threshold_pct=50.0)
+    with logger.capture_errors() as errors:
+        with c.status("[cyan]🚨  Detecting cost anomalies...[/cyan]", spinner="dots"):
+            anomalies = detect_cost_anomalies(threshold_pct=50.0)
 
     if anomalies:
         anomaly_table = Table(
@@ -232,6 +233,15 @@ def _section_cost_anomalies(c: Console) -> list:
                 anomaly_table,
                 title=f"[bold red]🚨 Cost Anomalies[/bold red]  [dim]{len(anomalies)} spike{'s' if len(anomalies) != 1 else ''} vs prior 7d[/dim]",
                 border_style="red",
+                padding=(0, 1),
+            )
+        )
+    elif errors:
+        c.print(
+            Panel(
+                "[yellow]⚠  Cost anomaly detection is degraded due to API errors.[/yellow]",
+                title="[bold yellow]⚠ Cost Anomalies (Degraded)[/bold yellow]",
+                border_style="yellow",
                 padding=(0, 1),
             )
         )
@@ -327,10 +337,11 @@ def _section_security(
         return _sec
 
     region_args = [(reg, i == 0) for i, reg in enumerate(regions)]
-    with c.status("[cyan]🛡️   Running security checks...[/cyan]", spinner="dots"):
-        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-            for items in pool.map(_sec_region, region_args):
-                sec_findings.extend(items)
+    with logger.capture_errors() as errors:
+        with c.status("[cyan]🛡️   Running security checks...[/cyan]", spinner="dots"):
+            with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+                for items in pool.map(_sec_region, region_args):
+                    sec_findings.extend(items)
 
     sec_count = len(sec_findings)
     if sec_count:
@@ -351,8 +362,20 @@ def _section_security(
         c.print(
             Panel(
                 sec_table,
-                title=f"[bold red]🛡️  Security[/bold red]  [dim]{sec_count} finding{'s' if sec_count != 1 else ''}[/dim]",
+                title=(
+                    f"[bold red]🛡️  Security[/bold red]  [dim]{sec_count} finding{'s' if sec_count != 1 else ''}[/dim]"
+                    + ("  [yellow]degraded[/yellow]" if errors else "")
+                ),
                 border_style="red",
+                padding=(0, 1),
+            )
+        )
+    elif errors:
+        c.print(
+            Panel(
+                "[yellow]⚠  Security scan is degraded due to API errors. Findings may be incomplete.[/yellow]",
+                title="[bold yellow]⚠ Security (Degraded)[/bold yellow]",
+                border_style="yellow",
                 padding=(0, 1),
             )
         )
@@ -371,8 +394,9 @@ def _section_security(
 
 def _section_iam(c: Console) -> list:
     """Scan for over-permissive IAM policies and render findings panel."""
-    with c.status("[cyan]🔑  Scanning IAM policies...[/cyan]", spinner="dots"):
-        iam_findings = detect_overpermissive_iam()
+    with logger.capture_errors() as errors:
+        with c.status("[cyan]🔑  Scanning IAM policies...[/cyan]", spinner="dots"):
+            iam_findings = detect_overpermissive_iam()
 
     iam_count = len(iam_findings)
     if iam_count:
@@ -398,6 +422,15 @@ def _section_iam(c: Console) -> list:
                 iam_table,
                 title=f"[bold red]🔑 IAM Over-Permissive Policies[/bold red]  [dim]{iam_count} finding{'s' if iam_count != 1 else ''}[/dim]",
                 border_style="red",
+                padding=(0, 1),
+            )
+        )
+    elif errors:
+        c.print(
+            Panel(
+                "[yellow]⚠  IAM policy scan is degraded due to API errors.[/yellow]",
+                title="[bold yellow]⚠ IAM Policies (Degraded)[/bold yellow]",
+                border_style="yellow",
                 padding=(0, 1),
             )
         )
@@ -429,12 +462,13 @@ def _section_cloudwatch(
                 f["region"] = reg
         return _cw
 
-    with c.status(
-        "[cyan]📡  Checking CloudWatch alarm coverage...[/cyan]", spinner="dots"
-    ):
-        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-            for items in pool.map(_cw_region, regions):
-                cw_findings.extend(items)
+    with logger.capture_errors() as errors:
+        with c.status(
+            "[cyan]📡  Checking CloudWatch alarm coverage...[/cyan]", spinner="dots"
+        ):
+            with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+                for items in pool.map(_cw_region, regions):
+                    cw_findings.extend(items)
 
     cw_count = len(cw_findings)
     if cw_count:
@@ -459,6 +493,15 @@ def _section_cloudwatch(
             Panel(
                 cw_table,
                 title=f"[bold yellow]📡 CloudWatch Alarm Gaps[/bold yellow]  [dim]{cw_count} resource{'s' if cw_count != 1 else ''} unmonitored[/dim]",
+                border_style="yellow",
+                padding=(0, 1),
+            )
+        )
+    elif errors:
+        c.print(
+            Panel(
+                "[yellow]⚠  CloudWatch alarm coverage scan is degraded due to API errors.[/yellow]",
+                title="[bold yellow]⚠ CloudWatch Alarms (Degraded)[/bold yellow]",
                 border_style="yellow",
                 padding=(0, 1),
             )
@@ -491,10 +534,11 @@ def _section_cost_waste(
                 f["region"] = reg
         return _cost
 
-    with c.status("[cyan]🗑️   Scanning for cost waste...[/cyan]", spinner="dots"):
-        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-            for items in pool.map(_cost_region, regions):
-                cost_findings.extend(items)
+    with logger.capture_errors() as errors:
+        with c.status("[cyan]🗑️   Scanning for cost waste...[/cyan]", spinner="dots"):
+            with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+                for items in pool.map(_cost_region, regions):
+                    cost_findings.extend(items)
 
     waste_count = len(cost_findings)
     if waste_count:
@@ -515,6 +559,15 @@ def _section_cost_waste(
             Panel(
                 waste_table,
                 title=f"[bold yellow]🗑️  Cost Waste[/bold yellow]  [dim]{waste_count} finding{'s' if waste_count != 1 else ''}[/dim]",
+                border_style="yellow",
+                padding=(0, 1),
+            )
+        )
+    elif errors:
+        c.print(
+            Panel(
+                "[yellow]⚠  Cost waste scan is degraded due to API errors.[/yellow]",
+                title="[bold yellow]⚠ Cost Waste (Degraded)[/bold yellow]",
                 border_style="yellow",
                 padding=(0, 1),
             )
@@ -550,10 +603,11 @@ def _section_tagging(
         return _tag
 
     tag_args = [(reg, i == 0) for i, reg in enumerate(regions)]
-    with c.status("[cyan]🏷️   Checking tag compliance...[/cyan]", spinner="dots"):
-        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-            for items in pool.map(_tag_region, tag_args):
-                tag_findings.extend(items)
+    with logger.capture_errors() as errors:
+        with c.status("[cyan]🏷️   Checking tag compliance...[/cyan]", spinner="dots"):
+            with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+                for items in pool.map(_tag_region, tag_args):
+                    tag_findings.extend(items)
 
     tag_count = len(tag_findings)
     if tag_count:
@@ -578,6 +632,15 @@ def _section_tagging(
             Panel(
                 tag_table,
                 title=f"[bold yellow]🏷️  Tagging Compliance[/bold yellow]  [dim]{tag_count} resource{'s' if tag_count != 1 else ''} untagged[/dim]",
+                border_style="yellow",
+                padding=(0, 1),
+            )
+        )
+    elif errors:
+        c.print(
+            Panel(
+                "[yellow]⚠  Tagging compliance scan is degraded due to API errors.[/yellow]",
+                title="[bold yellow]⚠ Tagging Compliance (Degraded)[/bold yellow]",
                 border_style="yellow",
                 padding=(0, 1),
             )
