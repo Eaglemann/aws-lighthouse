@@ -2,9 +2,9 @@
 import json
 import os
 from collections.abc import Sequence
-from typing import Annotated, NotRequired, TypedDict
+from typing import Annotated, Any, NotRequired, TypedDict, cast
 
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_core.tools import tool
 from langchain_ollama import ChatOllama
 from langgraph.graph import END, StateGraph
@@ -242,7 +242,47 @@ tools = [
 from langgraph.prebuilt import ToolNode
 
 # The ToolNode executes the functions requested by the LLM
-tool_node = ToolNode(tools)
+_tool_node = ToolNode(tools)
+
+
+def _classify_tool_result(content: str) -> tuple[str, str | None]:
+    """Return (execution_status, error) for a tool output payload."""
+    stripped = content.strip()
+    if stripped.lower().startswith("error:"):
+        return "failed", stripped
+    if stripped.startswith("{"):
+        try:
+            payload = json.loads(stripped)
+            if isinstance(payload, dict) and payload.get("error"):
+                return "failed", str(payload["error"])
+        except ValueError:
+            pass
+    return "executed", None
+
+
+def _record_tool_execution_results(state: AgentState, output: dict) -> None:
+    """Persist execution outcomes for every ToolMessage emitted by ToolNode."""
+    for msg in output.get("messages", []):
+        if not isinstance(msg, ToolMessage):
+            continue
+        tool_call_id = msg.tool_call_id
+        if not tool_call_id:
+            continue
+        content = str(msg.content)
+        status, error = _classify_tool_result(content)
+        db_manager.update_audit_log_result(
+            tool_call_id=tool_call_id,
+            result=content,
+            execution_status=status,
+            error=error,
+        )
+
+
+def tools_node(state: AgentState) -> dict:
+    """Execute tools then persist execution outcomes in the audit log."""
+    output = cast(dict[str, Any], _tool_node.invoke(state))
+    _record_tool_execution_results(state, output)
+    return output
 
 
 def approval_node(state: AgentState) -> dict:
@@ -273,11 +313,17 @@ def approval_node(state: AgentState) -> dict:
     choice = typer.prompt("\nDo you approve these actions? (y/n)", default="n")
     if choice.lower() != "y":
         logger.error("User denied the execution plan.")
-        from langchain_core.messages import ToolMessage
 
         rejections = []
         for tc in last_message.tool_calls:
-            db_manager.record_audit_log(tc["name"], json.dumps(tc["args"]), "denied")
+            db_manager.record_audit_log(
+                tc["name"],
+                json.dumps(tc["args"]),
+                "denied",
+                result="User explicitly denied execution of this tool.",
+                tool_call_id=tc["id"],
+                execution_status="denied",
+            )
             rejections.append(
                 ToolMessage(
                     content="User explicitly denied execution of this tool.",
@@ -288,7 +334,13 @@ def approval_node(state: AgentState) -> dict:
         return {"approved": False, "messages": rejections}
 
     for tc in last_message.tool_calls:
-        db_manager.record_audit_log(tc["name"], json.dumps(tc["args"]), "approved")
+        db_manager.record_audit_log(
+            tc["name"],
+            json.dumps(tc["args"]),
+            "approved",
+            tool_call_id=tc["id"],
+            execution_status="pending",
+        )
     logger.success("Execution plan approved. Proceeding...")
     return {"approved": True}
 
@@ -339,7 +391,13 @@ def should_require_approval(state: AgentState) -> str:
 
     # All tools are safe — log as auto_approved before ToolNode runs
     for tc in last_message.tool_calls:
-        db_manager.record_audit_log(tc["name"], json.dumps(tc["args"]), "auto_approved")
+        db_manager.record_audit_log(
+            tc["name"],
+            json.dumps(tc["args"]),
+            "auto_approved",
+            tool_call_id=tc["id"],
+            execution_status="pending",
+        )
     return "tools"
 
 
@@ -363,7 +421,7 @@ def create_agent_graph():
 
     workflow.add_node("agent", agent_node)
     workflow.add_node("approval", approval_node)
-    workflow.add_node("tools", tool_node)
+    workflow.add_node("tools", tools_node)
 
     workflow.set_entry_point("agent")
 

@@ -191,7 +191,7 @@ def _audit_rows(tmp_path) -> list[dict]:
     with sqlite3.connect(tmp_path / "test.db") as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT tool_name, args_json, decision, result FROM audit_log"
+            "SELECT tool_call_id, tool_name, args_json, decision, execution_status, result, error FROM audit_log ORDER BY id"
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -225,6 +225,19 @@ class TestAuditLog:
         rows = _audit_rows(tmp_path)
         assert rows[0]["result"] == "Terminated 1"
 
+    def test_record_with_tool_call_id_and_status(self, db, tmp_path):
+        db.record_audit_log(
+            "tool_run_security_scan",
+            "{}",
+            "auto_approved",
+            tool_call_id="call-123",
+            execution_status="pending",
+        )
+        rows = _audit_rows(tmp_path)
+        assert rows[0]["tool_call_id"] == "call-123"
+        assert rows[0]["execution_status"] == "pending"
+        assert rows[0]["error"] is None
+
     def test_multiple_entries_ordered(self, db, tmp_path):
         db.record_audit_log("tool_a", "{}", "approved")
         db.record_audit_log("tool_b", "{}", "denied")
@@ -236,6 +249,32 @@ class TestAuditLog:
     def test_handles_sqlite_error_without_raising(self, db, tmp_path, monkeypatch):
         monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "gone" / "x.db")
         db.record_audit_log("tool", "{}", "approved")  # must not raise
+
+    def test_update_audit_log_result_updates_latest_matching_tool_call(self, db, tmp_path):
+        db.record_audit_log(
+            "tool_run_security_scan",
+            "{}",
+            "auto_approved",
+            tool_call_id="call-456",
+            execution_status="pending",
+        )
+        db.record_audit_log(
+            "tool_run_security_scan",
+            "{}",
+            "auto_approved",
+            tool_call_id="call-456",
+            execution_status="pending",
+        )
+        db.update_audit_log_result(
+            tool_call_id="call-456",
+            result="[]",
+            execution_status="executed",
+        )
+
+        rows = _audit_rows(tmp_path)
+        assert rows[0]["execution_status"] == "pending"
+        assert rows[1]["execution_status"] == "executed"
+        assert rows[1]["result"] == "[]"
 
 
 class TestCostSnapshotRetention:

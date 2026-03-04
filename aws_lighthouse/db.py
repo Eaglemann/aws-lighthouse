@@ -59,16 +59,33 @@ class DatabaseManager:
                     CREATE TABLE IF NOT EXISTS audit_log (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        tool_call_id TEXT,
                         tool_name TEXT NOT NULL,
                         args_json TEXT NOT NULL,
                         decision TEXT NOT NULL,
-                        result TEXT
+                        execution_status TEXT,
+                        result TEXT,
+                        error TEXT
                     )
                 """)
+                self._ensure_audit_log_columns(cursor)
                 conn.commit()
             DB_PATH.chmod(0o600)  # owner read/write only — contains cost history
         except (sqlite3.Error, OSError) as e:
             logger.error(f"Failed to initialize SQLite database: {str(e)}")
+
+    def _ensure_audit_log_columns(self, cursor: sqlite3.Cursor) -> None:
+        """Apply additive audit_log schema migrations for older local DB files."""
+        cols = {
+            row[1]
+            for row in cursor.execute("PRAGMA table_info(audit_log)").fetchall()
+        }
+        if "tool_call_id" not in cols:
+            cursor.execute("ALTER TABLE audit_log ADD COLUMN tool_call_id TEXT")
+        if "execution_status" not in cols:
+            cursor.execute("ALTER TABLE audit_log ADD COLUMN execution_status TEXT")
+        if "error" not in cols:
+            cursor.execute("ALTER TABLE audit_log ADD COLUMN error TEXT")
 
     def record_cost_snapshot(
         self,
@@ -136,6 +153,9 @@ class DatabaseManager:
         args_json: str,
         decision: str,
         result: str | None = None,
+        tool_call_id: str | None = None,
+        execution_status: str | None = None,
+        error: str | None = None,
     ) -> None:
         """Record a tool invocation in the audit log.
 
@@ -145,12 +165,51 @@ class DatabaseManager:
         try:
             with sqlite3.connect(DB_PATH) as conn:
                 conn.execute(
-                    "INSERT INTO audit_log (tool_name, args_json, decision, result) VALUES (?, ?, ?, ?)",
-                    (tool_name, args_json, decision, result),
+                    """
+                    INSERT INTO audit_log
+                    (tool_call_id, tool_name, args_json, decision, execution_status, result, error)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        tool_call_id,
+                        tool_name,
+                        args_json,
+                        decision,
+                        execution_status,
+                        result,
+                        error,
+                    ),
                 )
                 conn.commit()
         except sqlite3.Error as e:
             logger.error(f"Failed to record audit log entry: {str(e)}")
+
+    def update_audit_log_result(
+        self,
+        tool_call_id: str,
+        result: str,
+        execution_status: str,
+        error: str | None = None,
+    ) -> None:
+        """Update the latest audit log row for a tool call with execution outcome."""
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.execute(
+                    """
+                    UPDATE audit_log
+                    SET result = ?, execution_status = ?, error = ?
+                    WHERE id = (
+                        SELECT id FROM audit_log
+                        WHERE tool_call_id = ?
+                        ORDER BY id DESC
+                        LIMIT 1
+                    )
+                    """,
+                    (result, execution_status, error, tool_call_id),
+                )
+                conn.commit()
+        except sqlite3.Error as e:
+            logger.error(f"Failed to update audit log result: {str(e)}")
 
 
 # Global singleton

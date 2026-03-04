@@ -9,6 +9,8 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 from aws_lighthouse.agent import (
     SAFE_TOOLS,
+    _classify_tool_result,
+    _record_tool_execution_results,
     _route_after_approval,
     approval_node,
     should_require_approval,
@@ -228,4 +230,36 @@ def test_approval_reaches_tools():
     next_node = _route_after_approval({**state, **result})
     assert next_node == "tools", (
         f"After approval, graph must route to 'tools' but got {next_node!r}."
+    )
+
+
+def test_classify_tool_result_detects_error_prefix():
+    status, error = _classify_tool_result("Error: boom")
+    assert status == "failed"
+    assert error == "Error: boom"
+
+
+def test_classify_tool_result_detects_json_error_field():
+    status, error = _classify_tool_result('{"stdout":"","error":"Timeout"}')
+    assert status == "failed"
+    assert error == "Timeout"
+
+
+def test_record_tool_execution_results_updates_audit_log():
+    msg = MagicMock(spec=AIMessage)
+    msg.tool_calls = [{"name": "tool_execute_bash", "id": "call-xyz", "args": {}}]
+    msg.content = ""
+    state = {"messages": [msg]}
+    output = {
+        "messages": [ToolMessage(content='{"stdout":"","error":"Timeout"}', tool_call_id="call-xyz")]
+    }
+
+    with patch("aws_lighthouse.agent.db_manager.update_audit_log_result") as mock_update:
+        _record_tool_execution_results(state, output)
+
+    mock_update.assert_called_once_with(
+        tool_call_id="call-xyz",
+        result='{"stdout":"","error":"Timeout"}',
+        execution_status="failed",
+        error="Timeout",
     )
