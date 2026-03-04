@@ -639,3 +639,37 @@ class TestAnalyzeJsonOutput:
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
         assert data["account_id"] == "123456789012"
+
+
+class TestAnalyzeInteractiveMode:
+    def _run_text(self, args=None, extra_patches=None):
+        runner = CliRunner()
+        patches = {**_PATCHES, "aws_lighthouse.cli.get_aws_session": _mock_session}
+        if extra_patches:
+            patches.update(extra_patches)
+        with patch.multiple(
+            "aws_lighthouse.cli", **{k.split(".")[-1]: v for k, v in patches.items()}
+        ):
+            return runner.invoke(app, ["analyze"] + (args or []))
+
+    def test_default_analyze_skips_interactive_sections(self):
+        with (
+            patch("aws_lighthouse.cli._section_remediation") as mock_remediation,
+            patch("aws_lighthouse.cli._section_cur_upsell") as mock_cur,
+        ):
+            result = self._run_text()
+
+        assert result.exit_code == 0, result.output
+        mock_remediation.assert_not_called()
+        mock_cur.assert_not_called()
+
+    def test_interactive_flag_executes_interactive_sections(self):
+        with (
+            patch("aws_lighthouse.cli._section_remediation") as mock_remediation,
+            patch("aws_lighthouse.cli._section_cur_upsell") as mock_cur,
+        ):
+            result = self._run_text(args=["--interactive"])
+
+        assert result.exit_code == 0, result.output
+        mock_remediation.assert_called_once()
+        mock_cur.assert_called_once()

@@ -858,6 +858,11 @@ def analyze(
         "-o",
         help="Output format: text (default) or json",
     ),
+    interactive: bool = typer.Option(
+        False,
+        "--interactive/--no-interactive",
+        help="Enable interactive remediation and CUR deployment prompts (default: disabled).",
+    ),
 ) -> None:
     """Retrieve read-only state (inventory, cost, security) and render a dashboard."""
     json_mode = output == "json"
@@ -950,8 +955,9 @@ def analyze(
             return
 
         _section_lambda_detail(c, lambdas)
-        _section_remediation(c, sec_findings, cost_findings)
-        _section_cur_upsell(c, cur_bucket_exists, account_id)
+        if interactive:
+            _section_remediation(c, sec_findings, cost_findings)
+            _section_cur_upsell(c, cur_bucket_exists, account_id)
     finally:
         if json_mode:
             logger.console = original_logger_console
