@@ -12,6 +12,7 @@ from aws_lighthouse.cli import (
     _count,
     _dollar,
     _pct_style,
+    _scan_scope_key,
     _section_cost_anomalies,
     _section_cost_waste,
     _section_iam,
@@ -143,6 +144,14 @@ class TestDollar:
 
     def test_large_value_uses_comma_separator(self):
         assert _dollar(1_000_000.0) == "$1,000,000.00"
+
+
+class TestScanScopeKey:
+    def test_multi_region_scope_includes_days(self):
+        assert _scan_scope_key(None, 14) == "multi-region:days=14"
+
+    def test_single_region_scope_includes_days(self):
+        assert _scan_scope_key("us-east-1", 30) == "single-region:us-east-1:days=30"
 
 
 # ---------------------------------------------------------------------------
@@ -662,7 +671,110 @@ class TestAnalyzeJsonOutput:
             )
 
         assert result.exit_code == 0, result.output
+        db_mock.get_latest_scan_snapshot.assert_called_once_with(
+            "123456789012", "multi-region:days=14"
+        )
         db_mock.record_scan_snapshot.assert_called_once()
+        assert (
+            db_mock.record_scan_snapshot.call_args.kwargs["scope_key"]
+            == "multi-region:days=14"
+        )
+
+    def test_since_last_different_days_use_different_scope_keys(self):
+        runner = CliRunner()
+        db_mock = _make_db_mock()
+        patches = {
+            **_PATCHES,
+            "aws_lighthouse.cli.get_aws_session": _mock_session,
+            "aws_lighthouse.cli.db_manager": db_mock,
+        }
+        with patch.multiple(
+            "aws_lighthouse.cli", **{k.split(".")[-1]: v for k, v in patches.items()}
+        ):
+            first = runner.invoke(
+                app,
+                [
+                    "analyze",
+                    "--output",
+                    "json",
+                    "--json-schema",
+                    "v1",
+                    "--since-last",
+                    "--days",
+                    "14",
+                ],
+            )
+            second = runner.invoke(
+                app,
+                [
+                    "analyze",
+                    "--output",
+                    "json",
+                    "--json-schema",
+                    "v1",
+                    "--since-last",
+                    "--days",
+                    "30",
+                ],
+            )
+
+        assert first.exit_code == 0, first.output
+        assert second.exit_code == 0, second.output
+        observed = [
+            call.args for call in db_mock.get_latest_scan_snapshot.call_args_list
+        ]
+        assert observed == [
+            ("123456789012", "multi-region:days=14"),
+            ("123456789012", "multi-region:days=30"),
+        ]
+
+    def test_since_last_same_days_reuse_same_scope_key(self):
+        runner = CliRunner()
+        db_mock = _make_db_mock()
+        patches = {
+            **_PATCHES,
+            "aws_lighthouse.cli.get_aws_session": _mock_session,
+            "aws_lighthouse.cli.db_manager": db_mock,
+        }
+        with patch.multiple(
+            "aws_lighthouse.cli", **{k.split(".")[-1]: v for k, v in patches.items()}
+        ):
+            first = runner.invoke(
+                app,
+                [
+                    "analyze",
+                    "--output",
+                    "json",
+                    "--json-schema",
+                    "v1",
+                    "--since-last",
+                    "--days",
+                    "14",
+                ],
+            )
+            second = runner.invoke(
+                app,
+                [
+                    "analyze",
+                    "--output",
+                    "json",
+                    "--json-schema",
+                    "v1",
+                    "--since-last",
+                    "--days",
+                    "14",
+                ],
+            )
+
+        assert first.exit_code == 0, first.output
+        assert second.exit_code == 0, second.output
+        observed = [
+            call.args for call in db_mock.get_latest_scan_snapshot.call_args_list
+        ]
+        assert observed == [
+            ("123456789012", "multi-region:days=14"),
+            ("123456789012", "multi-region:days=14"),
+        ]
 
     def test_since_last_second_run_reports_new_and_resolved(self):
         runner = CliRunner()

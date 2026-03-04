@@ -94,9 +94,11 @@ _DELTA_SECTION_KEYS = (
 )
 
 
-def _scan_scope_key(region: str | None) -> str:
+def _scan_scope_key(region: str | None, days: int) -> str:
     """Return persistence scope key for scan snapshots."""
-    return f"single-region:{region}" if region else "multi-region"
+    if region:
+        return f"single-region:{region}:days={days}"
+    return f"multi-region:days={days}"
 
 
 def _normalize_snapshot_payload(data: dict[str, Any]) -> dict[str, Any]:
@@ -1221,7 +1223,7 @@ def _run_analyze_cycle(
         }
 
         delta_data: dict[str, Any] | None = None
-        scope_key = _scan_scope_key(region)
+        scope_key = _scan_scope_key(region, days)
         if since_last:
             baseline_snapshot = db_manager.get_latest_scan_snapshot(
                 account_id, scope_key
