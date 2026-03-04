@@ -307,3 +307,47 @@ class TestClientCaching:
 
         assert all(r is results[0] for r in results)
         mock_session.client.assert_called_once()
+
+
+class TestSessionRefresh:
+    def test_get_session_refreshes_and_clears_cached_clients_on_expiry(self):
+        manager = AuthManager()
+        manager._session = MagicMock(spec=boto3.Session)
+        manager._clients = {("ec2", None): MagicMock()}
+        fresh = MagicMock(spec=boto3.Session)
+
+        with (
+            patch.object(manager, "_credentials_expired", side_effect=[True, True]),
+            patch.object(manager, "authenticate") as mock_auth,
+            patch("aws_lighthouse.auth.logger"),
+        ):
+            mock_auth.side_effect = lambda: setattr(manager, "_session", fresh)
+            session = manager.get_session()
+
+        assert session is fresh
+        assert manager._clients == {}
+        assert mock_auth.call_count == 1
+
+    def test_get_client_rebuilds_stale_cached_client_after_refresh(self):
+        manager = AuthManager()
+        stale_client = MagicMock()
+        manager._session = MagicMock(spec=boto3.Session)
+        manager._clients = {("ec2", None): stale_client}
+
+        fresh_session = MagicMock(spec=boto3.Session)
+        fresh_client = MagicMock()
+        fresh_session.client.return_value = fresh_client
+
+        with (
+            patch.object(
+                manager, "_credentials_expired", side_effect=[True, True, False]
+            ),
+            patch.object(manager, "authenticate") as mock_auth,
+            patch("aws_lighthouse.auth.logger"),
+        ):
+            mock_auth.side_effect = lambda: setattr(manager, "_session", fresh_session)
+            client = manager.get_client("ec2")
+
+        assert client is fresh_client
+        assert client is not stale_client
+        fresh_session.client.assert_called_once_with("ec2", config=_RETRY_CONFIG)

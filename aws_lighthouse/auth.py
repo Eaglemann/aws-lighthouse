@@ -1,4 +1,5 @@
 import threading
+from datetime import UTC, datetime
 
 import boto3
 import typer
@@ -21,15 +22,50 @@ class AuthManager:
         self._clients: dict = {}
         self._clients_lock = threading.Lock()
 
+    def _credentials_expired(self) -> bool:
+        """Return True when the current session credentials need refresh."""
+        if self._session is None:
+            return False
+        try:
+            # boto3 session wraps a botocore session that exposes credential metadata.
+            botocore_sess = self._session._session  # type: ignore[attr-defined]
+            creds = botocore_sess.get_credentials()
+        except (AttributeError, TypeError):
+            return False
+
+        if creds is None:
+            return True
+
+        refresh_needed = getattr(creds, "refresh_needed", None)
+        if callable(refresh_needed):
+            try:
+                return bool(refresh_needed())
+            except (TypeError, ValueError):
+                return False
+
+        expiry_time = getattr(creds, "_expiry_time", None)
+        if expiry_time is None or not isinstance(expiry_time, datetime):
+            return False
+        if expiry_time.tzinfo is None:
+            expiry_time = expiry_time.replace(tzinfo=UTC)
+        return bool(expiry_time <= datetime.now(UTC))
+
     def get_session(self) -> boto3.Session:
         """Returns the active boto3 session, authenticating if necessary.
 
         Uses double-checked locking so concurrent callers (e.g. parallel region
         scans) never call authenticate() more than once.
         """
-        if self._session is None:
+        if self._session is None or self._credentials_expired():
             with self._lock:
-                if self._session is None:
+                if self._session is None or self._credentials_expired():
+                    if self._session is not None:
+                        logger.warn(
+                            "AWS session credentials expired; re-authenticating..."
+                        )
+                        with self._clients_lock:
+                            self._clients.clear()
+                        self._session = None
                     self.authenticate()
         return self._session
 
@@ -98,11 +134,11 @@ class AuthManager:
         instead of creating a new one per call (~250+ instantiations saved on a
         16-region scan).
         """
+        session = self.get_session()
         key = (service_name, region or None)
         if key not in self._clients:
             with self._clients_lock:
                 if key not in self._clients:
-                    session = self.get_session()
                     if region:
                         self._clients[key] = session.client(
                             service_name, region_name=region, config=_RETRY_CONFIG
