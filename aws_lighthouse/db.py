@@ -8,6 +8,7 @@ from .logger import logger
 DB_DIR = Path.home() / ".aws-lighthouse"
 DB_PATH = DB_DIR / "lighthouse.db"
 _MAX_COST_SNAPSHOTS_PER_ACCOUNT = 1000
+_MAX_SCAN_SNAPSHOTS_PER_SCOPE = 500
 
 
 class DatabaseManager:
@@ -54,6 +55,21 @@ class DatabaseManager:
                     ON cost_snapshots(account_id, timestamp DESC, id DESC)
                 """)
 
+                # Analyze snapshots table for delta mode and watch baselining
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS scan_snapshots (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        account_id TEXT NOT NULL,
+                        scope_key TEXT NOT NULL,
+                        data TEXT NOT NULL
+                    )
+                """)
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_scan_snapshots_account_scope_ts_id
+                    ON scan_snapshots(account_id, scope_key, timestamp DESC, id DESC)
+                """)
+
                 # Audit log: every tool invocation the agent attempts, with decision
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS audit_log (
@@ -77,8 +93,7 @@ class DatabaseManager:
     def _ensure_audit_log_columns(self, cursor: sqlite3.Cursor) -> None:
         """Apply additive audit_log schema migrations for older local DB files."""
         cols = {
-            row[1]
-            for row in cursor.execute("PRAGMA table_info(audit_log)").fetchall()
+            row[1] for row in cursor.execute("PRAGMA table_info(audit_log)").fetchall()
         }
         if "tool_call_id" not in cols:
             cursor.execute("ALTER TABLE audit_log ADD COLUMN tool_call_id TEXT")
@@ -108,7 +123,9 @@ class DatabaseManager:
         except sqlite3.Error as e:
             logger.error(f"Failed to record cost snapshot: {str(e)}")
 
-    def _prune_old_cost_snapshots(self, cursor: sqlite3.Cursor, account_id: str) -> None:
+    def _prune_old_cost_snapshots(
+        self, cursor: sqlite3.Cursor, account_id: str
+    ) -> None:
         """Keep only the newest N cost snapshots per account."""
         cursor.execute(
             """
@@ -145,6 +162,106 @@ class DatabaseManager:
                 return None
         except sqlite3.Error as e:
             logger.error(f"Failed to retrieve latest cost snapshot: {str(e)}")
+            return None
+
+    def record_scan_snapshot(
+        self,
+        account_id: str,
+        scope_key: str,
+        data: dict[str, Any],
+    ) -> None:
+        """Persist one analyze snapshot for delta computations."""
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO scan_snapshots (account_id, scope_key, data)
+                    VALUES (?, ?, ?)
+                    """,
+                    (account_id, scope_key, json.dumps(data, default=str)),
+                )
+                self._prune_old_scan_snapshots(
+                    cursor=cursor, account_id=account_id, scope_key=scope_key
+                )
+                conn.commit()
+        except sqlite3.Error as e:
+            logger.error(f"Failed to record scan snapshot: {str(e)}")
+
+    def _prune_old_scan_snapshots(
+        self, cursor: sqlite3.Cursor, account_id: str, scope_key: str
+    ) -> None:
+        """Keep only the newest N analyze snapshots per account/scope key."""
+        cursor.execute(
+            """
+            DELETE FROM scan_snapshots
+            WHERE account_id = ?
+              AND scope_key = ?
+              AND id NOT IN (
+                SELECT id FROM scan_snapshots
+                WHERE account_id = ?
+                  AND scope_key = ?
+                ORDER BY timestamp DESC, id DESC
+                LIMIT ?
+              )
+            """,
+            (
+                account_id,
+                scope_key,
+                account_id,
+                scope_key,
+                _MAX_SCAN_SNAPSHOTS_PER_SCOPE,
+            ),
+        )
+
+    def get_latest_scan_snapshot(
+        self, account_id: str, scope_key: str
+    ) -> dict[str, Any] | None:
+        """Return the newest analyze snapshot for an account/scope."""
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT timestamp, data
+                    FROM scan_snapshots
+                    WHERE account_id = ? AND scope_key = ?
+                    ORDER BY timestamp DESC, id DESC
+                    LIMIT 1
+                    """,
+                    (account_id, scope_key),
+                )
+                row = cursor.fetchone()
+                if row:
+                    return {"recorded_at": row[0], "data": json.loads(row[1])}
+                return None
+        except sqlite3.Error as e:
+            logger.error(f"Failed to retrieve latest scan snapshot: {str(e)}")
+            return None
+
+    def get_previous_scan_snapshot(
+        self, account_id: str, scope_key: str
+    ) -> dict[str, Any] | None:
+        """Return the second newest analyze snapshot for an account/scope."""
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT timestamp, data
+                    FROM scan_snapshots
+                    WHERE account_id = ? AND scope_key = ?
+                    ORDER BY timestamp DESC, id DESC
+                    LIMIT 1 OFFSET 1
+                    """,
+                    (account_id, scope_key),
+                )
+                row = cursor.fetchone()
+                if row:
+                    return {"recorded_at": row[0], "data": json.loads(row[1])}
+                return None
+        except sqlite3.Error as e:
+            logger.error(f"Failed to retrieve previous scan snapshot: {str(e)}")
             return None
 
     def record_audit_log(

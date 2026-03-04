@@ -1,5 +1,6 @@
 """Tests for DatabaseManager (db.py)."""
 
+import json
 import sqlite3
 
 import pytest
@@ -69,6 +70,12 @@ class TestEnsureDb:
 
     def test_creates_cost_snapshot_ordering_index(self, db, tmp_path):
         assert "idx_cost_snapshots_account_ts_id" in _indexes(tmp_path)
+
+    def test_creates_scan_snapshots_table(self, db, tmp_path):
+        assert "scan_snapshots" in _tables(tmp_path)
+
+    def test_creates_scan_snapshot_ordering_index(self, db, tmp_path):
+        assert "idx_scan_snapshots_account_scope_ts_id" in _indexes(tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +257,9 @@ class TestAuditLog:
         monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "gone" / "x.db")
         db.record_audit_log("tool", "{}", "approved")  # must not raise
 
-    def test_update_audit_log_result_updates_latest_matching_tool_call(self, db, tmp_path):
+    def test_update_audit_log_result_updates_latest_matching_tool_call(
+        self, db, tmp_path
+    ):
         db.record_audit_log(
             "tool_run_security_scan",
             "{}",
@@ -294,3 +303,70 @@ class TestCostSnapshotRetention:
                 ("acct",),
             ).fetchall()
         assert [r[0] for r in rows] == [2.0, 3.0]
+
+
+def _scan_snapshot_rows(tmp_path) -> list[dict]:
+    """Return all scan_snapshots rows as dicts."""
+    with sqlite3.connect(tmp_path / "test.db") as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT account_id, scope_key, data, timestamp, id FROM scan_snapshots ORDER BY id"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+class TestScanSnapshotPersistence:
+    def test_round_trip_latest_scan_snapshot(self, db):
+        db.record_scan_snapshot(
+            account_id="acct",
+            scope_key="multi-region",
+            data={"inventory": {"ec2": []}},
+        )
+        latest = db.get_latest_scan_snapshot("acct", "multi-region")
+        assert latest is not None
+        assert latest["data"]["inventory"] == {"ec2": []}
+
+    def test_previous_scan_snapshot_returns_second_latest(self, db):
+        db.record_scan_snapshot("acct", "multi-region", {"run": 1})
+        db.record_scan_snapshot("acct", "multi-region", {"run": 2})
+        previous = db.get_previous_scan_snapshot("acct", "multi-region")
+        assert previous is not None
+        assert previous["data"]["run"] == 1
+
+    def test_latest_scan_snapshot_tie_breaker_prefers_higher_id(self, db, tmp_path):
+        with sqlite3.connect(tmp_path / "test.db") as conn:
+            conn.executemany(
+                "INSERT INTO scan_snapshots (account_id, scope_key, data, timestamp) VALUES (?, ?, ?, ?)",
+                [
+                    ("acct", "multi-region", '{"run": 1}', "2026-03-04 10:00:00"),
+                    ("acct", "multi-region", '{"run": 2}', "2026-03-04 10:00:00"),
+                ],
+            )
+        latest = db.get_latest_scan_snapshot("acct", "multi-region")
+        assert latest is not None
+        assert latest["data"]["run"] == 2
+
+    def test_scan_snapshot_retention_prunes_per_scope(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(db_module, "DB_DIR", tmp_path)
+        monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "test.db")
+        monkeypatch.setattr(db_module, "_MAX_SCAN_SNAPSHOTS_PER_SCOPE", 2)
+        db = DatabaseManager()
+
+        db.record_scan_snapshot("acct", "multi-region", {"run": 1})
+        db.record_scan_snapshot("acct", "multi-region", {"run": 2})
+        db.record_scan_snapshot("acct", "multi-region", {"run": 3})
+        db.record_scan_snapshot("acct", "single-region:us-east-1", {"run": 1})
+
+        rows = _scan_snapshot_rows(tmp_path)
+        multi_runs = [
+            json.loads(r["data"])["run"]
+            for r in rows
+            if r["scope_key"] == "multi-region"
+        ]
+        single_runs = [
+            json.loads(r["data"])["run"]
+            for r in rows
+            if r["scope_key"] == "single-region:us-east-1"
+        ]
+        assert multi_runs == [2, 3]
+        assert single_runs == [1]
