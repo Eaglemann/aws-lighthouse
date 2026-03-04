@@ -13,6 +13,7 @@ Built on **LangGraph**, **LangChain**, **Ollama**, **Rich**, and **Typer**. Stri
 3. [Quick Start](#quick-start)
 4. [Commands](#commands)
    - [analyze](#analyze--the-finops-dashboard)
+   - [watch](#watch--continuous-delta-monitoring)
    - [shell](#shell--the-interactive-agent)
 5. [Dashboard Panels](#dashboard-panels)
 6. [Agent Tools Reference](#agent-tools-reference)
@@ -61,6 +62,12 @@ uv run aws-lighthouse analyze
 # Adjust cost look-back window
 uv run aws-lighthouse analyze --days 30
 
+# Delta mode: compare against previous scan in the same scope
+uv run aws-lighthouse analyze --since-last
+
+# Continuous non-interactive monitoring
+uv run aws-lighthouse watch --interval-hours 4
+
 # Interactive AI agent shell
 uv run aws-lighthouse shell
 
@@ -87,6 +94,7 @@ uv run aws-lighthouse analyze [--days N]
 | `--days`, `-d` | `14` | Cost Explorer look-back window in days |
 | `--output`, `-o` | `text` | Output format: `text` or `json` |
 | `--json-schema` | `v1` | JSON contract for `--output json`: `v1` legacy payloads, `v2` typed envelopes |
+| `--since-last` | `off` | Compute and render deltas against the previous snapshot in the same scope |
 
 Machine-output examples:
 ```bash
@@ -98,6 +106,12 @@ uv run aws-lighthouse analyze --output json --json-schema v1
 
 # Envelope output (ok/data/errors per section + overall)
 uv run aws-lighthouse analyze --output json --json-schema v2
+
+# Additive delta payload (v1) when explicitly requested
+uv run aws-lighthouse analyze --output json --json-schema v1 --since-last
+
+# Delta envelope (v2) when explicitly requested
+uv run aws-lighthouse analyze --output json --json-schema v2 --since-last
 ```
 
 **What it does, step by step:**
@@ -116,6 +130,28 @@ uv run aws-lighthouse analyze --output json --json-schema v2
 12. **Lambda inventory** — full function list with runtime, memory, code size, staleness flag
 13. **One-click remediation** — numbered menu of auto-fixable findings; confirm each fix individually before it runs
 14. **CUR upsell** — prompts to deploy the Cost & Usage Report CloudFormation stack if not already active
+
+---
+
+### `watch` — Continuous Delta Monitoring
+
+Runs `analyze` continuously in non-interactive mode and always computes deltas against the previous snapshot in the same scope.
+
+```bash
+uv run aws-lighthouse watch [--interval-hours N] [--days N]
+```
+
+**Options:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--interval-hours` | `4` | Hours to wait between scan cycles |
+| `--days`, `-d` | `14` | Cost Explorer look-back window per cycle |
+| `--region`, `-r` | _all enabled_ | Restrict watch to a single region |
+| `--output`, `-o` | `text` | Output format: `text` or `json` |
+| `--json-schema` | `v1` | JSON contract for `--output json`: `v1` legacy payloads, `v2` typed envelopes |
+
+For `--output json`, `watch` emits one JSON object per line (JSON Lines), one per cycle.
 
 ---
 
@@ -344,6 +380,8 @@ Lighthouse maintains a SQLite database at `~/.aws-lighthouse/lighthouse.db`.
 | Table | Purpose |
 |---|---|
 | `cost_snapshots` | One row per `analyze` run — account ID, date range, total spend, per-service breakdown. Used to compute the ▲/▼ cost trend shown in the dashboard. |
+| `scan_snapshots` | One row per analyze cycle payload (per account + scope key). Used for `--since-last` and `watch` delta computation. Retention is bounded to the latest 500 snapshots per scope. |
+| `audit_log` | Tool execution decision and outcome trail (`approved`, `denied`, `auto_approved`, execution status, error). |
 
 The database is created automatically on first run. No data leaves your machine.
 
@@ -468,6 +506,12 @@ aws_lighthouse/
 ```bash
 # Install all dependencies including dev extras
 uv sync --all-extras --dev
+
+# CI parity gate (lint + format check + mypy + pytest)
+./scripts/ci-parity.sh
+
+# Optional dependency audit gate (matches CI dependency-audit job)
+./scripts/dependency-audit.sh
 
 # Lint
 uv run ruff check .
