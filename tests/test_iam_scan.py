@@ -14,6 +14,11 @@ from aws_lighthouse.tools.iam_scan import (
 MOD = "aws_lighthouse.tools.iam_scan"
 
 
+def _data(result):
+    assert set(result.keys()) == {"ok", "data", "errors"}
+    return result["data"]
+
+
 # ── _normalise ────────────────────────────────────────────────────────────────
 
 
@@ -103,17 +108,22 @@ def _empty_page(**kwargs) -> dict:
 def test_no_principals_returns_empty():
     mock_iam = _make_mock_iam([_empty_page()])
     with patch(f"{MOD}.get_client", return_value=mock_iam):
-        assert detect_overpermissive_iam() == []
+        result = detect_overpermissive_iam()
+    assert result["ok"] is True
+    assert result["data"] == []
 
 
-def test_api_error_returns_empty():
+def test_api_error_returns_envelope_error():
     mock_iam = MagicMock()
     mock_iam.get_paginator.side_effect = ClientError(
         {"Error": {"Code": "AccessDenied", "Message": ""}},
         "GetAccountAuthorizationDetails",
     )
     with patch(f"{MOD}.get_client", return_value=mock_iam):
-        assert detect_overpermissive_iam() == []
+        result = detect_overpermissive_iam()
+    assert result["ok"] is False
+    assert result["data"] == []
+    assert result["errors"][0]["code"] == "AccessDenied"
 
 
 def test_user_with_admin_managed_policy_flagged():
@@ -133,7 +143,7 @@ def test_user_with_admin_managed_policy_flagged():
     )
     mock_iam = _make_mock_iam([page])
     with patch(f"{MOD}.get_client", return_value=mock_iam):
-        findings = detect_overpermissive_iam()
+        findings = _data(detect_overpermissive_iam())
     assert len(findings) == 1
     assert findings[0]["severity"] == "HIGH"
     assert findings[0]["principal_name"] == "admin-user"
@@ -158,7 +168,7 @@ def test_user_with_power_user_is_medium():
     )
     mock_iam = _make_mock_iam([page])
     with patch(f"{MOD}.get_client", return_value=mock_iam):
-        findings = detect_overpermissive_iam()
+        findings = _data(detect_overpermissive_iam())
     assert len(findings) == 1
     assert findings[0]["severity"] == "MEDIUM"
 
@@ -176,7 +186,9 @@ def test_service_linked_role_skipped():
     )
     mock_iam = _make_mock_iam([page])
     with patch(f"{MOD}.get_client", return_value=mock_iam):
-        assert detect_overpermissive_iam() == []
+        result = detect_overpermissive_iam()
+    assert result["ok"] is True
+    assert result["data"] == []
 
 
 def test_role_with_inline_star_policy_flagged():
@@ -193,7 +205,7 @@ def test_role_with_inline_star_policy_flagged():
     )
     mock_iam = _make_mock_iam([page])
     with patch(f"{MOD}.get_client", return_value=mock_iam):
-        findings = detect_overpermissive_iam()
+        findings = _data(detect_overpermissive_iam())
     assert len(findings) == 1
     assert findings[0]["severity"] == "HIGH"
     assert findings[0]["principal_name"] == "bad-role"
@@ -213,7 +225,7 @@ def test_group_with_inline_medium_policy_flagged():
     )
     mock_iam = _make_mock_iam([page])
     with patch(f"{MOD}.get_client", return_value=mock_iam):
-        findings = detect_overpermissive_iam()
+        findings = _data(detect_overpermissive_iam())
     assert len(findings) == 1
     assert findings[0]["severity"] == "MEDIUM"
     assert findings[0]["principal_name"] == "devs"
@@ -245,7 +257,7 @@ def test_customer_managed_policy_via_policy_docs():
     )
     mock_iam = _make_mock_iam([page])
     with patch(f"{MOD}.get_client", return_value=mock_iam):
-        findings = detect_overpermissive_iam()
+        findings = _data(detect_overpermissive_iam())
     assert len(findings) == 1
     assert findings[0]["severity"] == "HIGH"
     assert findings[0]["policy_type"] == "Customer Managed"
@@ -282,7 +294,7 @@ def test_customer_managed_policy_url_encoded_document():
     )
     mock_iam = _make_mock_iam([page])
     with patch(f"{MOD}.get_client", return_value=mock_iam):
-        findings = detect_overpermissive_iam()
+        findings = _data(detect_overpermissive_iam())
     assert len(findings) == 1
     assert findings[0]["severity"] == "HIGH"
 
@@ -305,7 +317,9 @@ def test_unknown_customer_managed_policy_skipped():
     )
     mock_iam = _make_mock_iam([page])
     with patch(f"{MOD}.get_client", return_value=mock_iam):
-        assert detect_overpermissive_iam() == []
+        result = detect_overpermissive_iam()
+    assert result["ok"] is True
+    assert result["data"] == []
 
 
 def test_findings_sorted_high_before_medium():
@@ -331,7 +345,7 @@ def test_findings_sorted_high_before_medium():
     )
     mock_iam = _make_mock_iam([page])
     with patch(f"{MOD}.get_client", return_value=mock_iam):
-        findings = detect_overpermissive_iam()
+        findings = _data(detect_overpermissive_iam())
     assert findings[0]["severity"] == "HIGH"
     assert findings[1]["severity"] == "MEDIUM"
 
@@ -368,7 +382,7 @@ def test_multiple_pages_aggregated():
     )
     mock_iam = _make_mock_iam([page1, page2])
     with patch(f"{MOD}.get_client", return_value=mock_iam):
-        findings = detect_overpermissive_iam()
+        findings = _data(detect_overpermissive_iam())
     assert len(findings) == 2
     names = {f["principal_name"] for f in findings}
     assert names == {"user-a", "user-b"}

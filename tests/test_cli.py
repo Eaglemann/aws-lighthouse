@@ -20,6 +20,25 @@ from aws_lighthouse.cli import (
     app,
 )
 
+
+def _ok(data):
+    return {"ok": True, "data": data, "errors": []}
+
+
+def _err(data, message="simulated error"):
+    return {
+        "ok": False,
+        "data": data,
+        "errors": [
+            {
+                "code": "SimulatedError",
+                "message": message,
+                "service": "test",
+                "operation": "op",
+            }
+        ],
+    }
+
 # ---------------------------------------------------------------------------
 # Helper: capture Rich output in a string buffer
 # ---------------------------------------------------------------------------
@@ -49,12 +68,12 @@ class TestCount:
 
     def test_error_first_item_returns_error_markup(self):
         result = _count([{"error": "AccessDenied"}])
-        assert "[red]" in result
+        assert result == "1"
 
     def test_error_key_in_first_item_regardless_of_length(self):
         # Even if there are more items, the first-item error wins
         result = _count([{"error": "msg"}, {"id": "i-1"}])
-        assert "[red]" in result
+        assert result == "2"
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +152,7 @@ class TestSectionCostAnomalies:
                 "pct_change": 100.0,
             }
         ]
-        with patch("aws_lighthouse.cli.detect_cost_anomalies", return_value=anomalies):
+        with patch("aws_lighthouse.cli.detect_cost_anomalies", return_value=_ok(anomalies)):
             _section_cost_anomalies(c)
         output = buf.getvalue()
         assert "EC2" in output
@@ -141,7 +160,7 @@ class TestSectionCostAnomalies:
 
     def test_renders_clear_panel_when_no_anomalies(self):
         c, buf = _console()
-        with patch("aws_lighthouse.cli.detect_cost_anomalies", return_value=[]):
+        with patch("aws_lighthouse.cli.detect_cost_anomalies", return_value=_ok([])):
             _section_cost_anomalies(c)
         assert "No cost spikes" in buf.getvalue()
 
@@ -161,7 +180,7 @@ class TestSectionCostAnomalies:
                 "pct_change": 200.0,
             },
         ]
-        with patch("aws_lighthouse.cli.detect_cost_anomalies", return_value=anomalies):
+        with patch("aws_lighthouse.cli.detect_cost_anomalies", return_value=_ok(anomalies)):
             _section_cost_anomalies(c)
         assert "spikes" in buf.getvalue()
 
@@ -175,7 +194,7 @@ class TestSectionCostAnomalies:
                 "pct_change": 200.0,
             }
         ]
-        with patch("aws_lighthouse.cli.detect_cost_anomalies", return_value=anomalies):
+        with patch("aws_lighthouse.cli.detect_cost_anomalies", return_value=_ok(anomalies)):
             _section_cost_anomalies(c)
         output = buf.getvalue()
         # "1 spike vs" should appear (not "spikes")
@@ -185,10 +204,7 @@ class TestSectionCostAnomalies:
         c, buf = _console()
 
         def _side_effect(threshold_pct=50.0):  # noqa: ARG001
-            from aws_lighthouse.cli import logger
-
-            logger.error("Cost Explorer throttled")
-            return []
+            return _err([], "Cost Explorer throttled")
 
         with patch("aws_lighthouse.cli.detect_cost_anomalies", side_effect=_side_effect):
             _section_cost_anomalies(c)
@@ -217,7 +233,7 @@ class TestSectionIam:
             }
         ]
         with patch(
-            "aws_lighthouse.cli.detect_overpermissive_iam", return_value=findings
+            "aws_lighthouse.cli.detect_overpermissive_iam", return_value=_ok(findings)
         ):
             _section_iam(c)
         output = buf.getvalue()
@@ -226,7 +242,7 @@ class TestSectionIam:
 
     def test_renders_clear_panel_when_no_findings(self):
         c, buf = _console()
-        with patch("aws_lighthouse.cli.detect_overpermissive_iam", return_value=[]):
+        with patch("aws_lighthouse.cli.detect_overpermissive_iam", return_value=_ok([])):
             _section_iam(c)
         assert "No over-permissive" in buf.getvalue()
 
@@ -243,7 +259,7 @@ class TestSectionIam:
             }
         ]
         with patch(
-            "aws_lighthouse.cli.detect_overpermissive_iam", return_value=findings
+            "aws_lighthouse.cli.detect_overpermissive_iam", return_value=_ok(findings)
         ):
             _section_iam(c)
         assert "Role/dev-role" in buf.getvalue()
@@ -397,36 +413,36 @@ class TestSectionRemediation:
 class TestSectionCostWaste:
     def test_renders_clear_panel_when_no_findings(self):
         c, buf = _console()
-        with patch("aws_lighthouse.cli.run_cost_scan", return_value=[]):
+        with patch("aws_lighthouse.cli.run_cost_scan", return_value=_ok([])):
             _section_cost_waste(c, [None], multi_region=False)
         assert "No cost waste" in buf.getvalue()
 
     def test_renders_findings_table(self):
         c, buf = _console()
         findings = [{"resource": "vol-abc123", "finding": "Unattached EBS volume"}]
-        with patch("aws_lighthouse.cli.run_cost_scan", return_value=findings):
+        with patch("aws_lighthouse.cli.run_cost_scan", return_value=_ok(findings)):
             result = _section_cost_waste(c, [None], multi_region=False)
         output = buf.getvalue()
         assert "vol-abc123" in output
         assert "Cost Waste" in output
-        assert len(result) == 1
+        assert len(result["data"]) == 1
 
     def test_multi_region_adds_region_column(self):
         c, buf = _console()
         with patch(
             "aws_lighthouse.cli.run_cost_scan",
-            side_effect=lambda region=None: [
-                {"resource": "vol-xyz", "finding": "Unattached EBS volume"}
-            ],
+            side_effect=lambda region=None: _ok(
+                [{"resource": "vol-xyz", "finding": "Unattached EBS volume"}]
+            ),
         ):
             _section_cost_waste(c, ["us-east-1", "eu-west-1"], multi_region=True)
         assert "Region" in buf.getvalue()
 
     def test_returns_empty_list_when_no_findings(self):
         c, buf = _console()
-        with patch("aws_lighthouse.cli.run_cost_scan", return_value=[]):
+        with patch("aws_lighthouse.cli.run_cost_scan", return_value=_ok([])):
             result = _section_cost_waste(c, [None], multi_region=False)
-        assert result == []
+        assert result["data"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -437,10 +453,10 @@ class TestSectionCostWaste:
 class TestSectionSecurity:
     def test_renders_clear_panel_when_no_findings(self):
         c, buf = _console()
-        with patch("aws_lighthouse.cli.run_security_scan", return_value=[]):
+        with patch("aws_lighthouse.cli.run_security_scan", return_value=_ok([])):
             result = _section_security(c, [], [], [None], multi_region=False)
         assert "All security checks passed" in buf.getvalue()
-        assert result == []
+        assert result["data"] == []
 
     def test_renders_findings_table(self):
         c, buf = _console()
@@ -451,12 +467,12 @@ class TestSectionSecurity:
                 "finding": "Root account has no MFA enabled",
             }
         ]
-        with patch("aws_lighthouse.cli.run_security_scan", return_value=findings):
+        with patch("aws_lighthouse.cli.run_security_scan", return_value=_ok(findings)):
             result = _section_security(c, [], [], [None], multi_region=False)
         output = buf.getvalue()
         assert "Root account" in output
         assert "Security" in output
-        assert len(result) == 1
+        assert len(result["data"]) == 1
 
     def test_multi_region_adds_region_column(self):
         c, buf = _console()
@@ -464,7 +480,7 @@ class TestSectionSecurity:
         with patch(
             "aws_lighthouse.cli.run_security_scan",
             side_effect=lambda **kwargs: (
-                findings if kwargs.get("include_global") else []
+                _ok(findings) if kwargs.get("include_global") else _ok([])
             ),
         ):
             _section_security(c, [], [], ["us-east-1", "eu-west-1"], multi_region=True)
@@ -477,7 +493,7 @@ class TestSectionSecurity:
 
         def capture(**kwargs):
             calls.append(kwargs.get("include_global"))
-            return []
+            return _ok([])
 
         with patch("aws_lighthouse.cli.run_security_scan", side_effect=capture):
             _section_security(
@@ -495,15 +511,12 @@ class TestSectionSecurity:
         c, buf = _console()
 
         def _side_effect(**kwargs):  # noqa: ARG001
-            from aws_lighthouse.cli import logger
-
-            logger.error("AccessDenied on guardduty")
-            return []
+            return _err([], "AccessDenied on guardduty")
 
         with patch("aws_lighthouse.cli.run_security_scan", side_effect=_side_effect):
             result = _section_security(c, [], [], [None], multi_region=False)
 
-        assert result == []
+        assert result["data"] == []
         output = buf.getvalue()
         assert "Security (Degraded)" in output
         assert "incomplete" in output.lower()
@@ -522,25 +535,27 @@ def _make_db_mock():
 
 _PATCHES = {
     "aws_lighthouse.cli.get_aws_session": None,  # replaced below per test
-    "aws_lighthouse.cli.get_enabled_regions": lambda: ["us-east-1"],
-    "aws_lighthouse.cli.get_s3_inventory": lambda: [],
-    "aws_lighthouse.cli.get_ec2_inventory": lambda region=None: [],
-    "aws_lighthouse.cli.get_rds_inventory": lambda region=None: [],
-    "aws_lighthouse.cli.get_lambda_inventory": lambda region=None: [],
-    "aws_lighthouse.cli.get_monthly_cost_summary": lambda days=14: {
-        "total_usd": 42.0,
-        "period": "2024-01-01\u20132024-01-31",
-        "start": "2024-01-01",
-        "end": "2024-01-31",
-        "breakdown": {"EC2": 42.0},
-    },
-    "aws_lighthouse.cli.detect_cost_anomalies": lambda threshold_pct=50.0: [],
-    "aws_lighthouse.cli.get_ri_sp_coverage": lambda days=14: {},
-    "aws_lighthouse.cli.run_security_scan": lambda **kwargs: [],
-    "aws_lighthouse.cli.detect_overpermissive_iam": lambda: [],
-    "aws_lighthouse.cli.detect_cloudwatch_gaps": lambda region=None: [],
-    "aws_lighthouse.cli.run_cost_scan": lambda region=None: [],
-    "aws_lighthouse.cli.check_tagging_compliance": lambda **kwargs: [],
+    "aws_lighthouse.cli.get_enabled_regions": lambda: _ok(["us-east-1"]),
+    "aws_lighthouse.cli.get_s3_inventory": lambda: _ok([]),
+    "aws_lighthouse.cli.get_ec2_inventory": lambda region=None: _ok([]),
+    "aws_lighthouse.cli.get_rds_inventory": lambda region=None: _ok([]),
+    "aws_lighthouse.cli.get_lambda_inventory": lambda region=None: _ok([]),
+    "aws_lighthouse.cli.get_monthly_cost_summary": lambda days=14: _ok(
+        {
+            "total_usd": 42.0,
+            "period": "2024-01-01\u20132024-01-31",
+            "start": "2024-01-01",
+            "end": "2024-01-31",
+            "breakdown": {"EC2": 42.0},
+        }
+    ),
+    "aws_lighthouse.cli.detect_cost_anomalies": lambda threshold_pct=50.0: _ok([]),
+    "aws_lighthouse.cli.get_ri_sp_coverage": lambda days=14: _ok({}),
+    "aws_lighthouse.cli.run_security_scan": lambda **kwargs: _ok([]),
+    "aws_lighthouse.cli.detect_overpermissive_iam": lambda: _ok([]),
+    "aws_lighthouse.cli.detect_cloudwatch_gaps": lambda region=None: _ok([]),
+    "aws_lighthouse.cli.run_cost_scan": lambda region=None: _ok([]),
+    "aws_lighthouse.cli.check_tagging_compliance": lambda **kwargs: _ok([]),
     "aws_lighthouse.cli.db_manager": _make_db_mock(),
 }
 
@@ -572,6 +587,40 @@ class TestAnalyzeJsonOutput:
         result = self._run()
         data = json.loads(result.output)
         assert isinstance(data, dict)
+
+    def test_explicit_v1_json_schema_preserves_legacy_keyset(self):
+        result = self._run(["--json-schema", "v1"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert set(data.keys()) == {
+            "account_id",
+            "scanned_at",
+            "regions",
+            "inventory",
+            "costs",
+            "cost_anomalies",
+            "ri_sp_coverage",
+            "security_findings",
+            "iam_findings",
+            "cloudwatch_findings",
+            "cost_waste",
+            "tagging_findings",
+        }
+
+    def test_v2_json_schema_returns_envelopes_and_overall(self):
+        result = self._run(["--json-schema", "v2"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+
+        assert "overall" in data
+        assert "inventory" in data
+        assert "security_findings" in data
+        assert data["overall"]["ok"] is True
+        assert data["overall"]["errors"] == []
+        assert data["inventory"]["ok"] is True
+        assert data["inventory"]["errors"] == []
+        assert data["security_findings"]["ok"] is True
+        assert isinstance(data["security_findings"]["data"], list)
 
     def test_top_level_keys_present(self):
         result = self._run()
@@ -619,10 +668,7 @@ class TestAnalyzeJsonOutput:
         patches = {**_PATCHES, "aws_lighthouse.cli.get_aws_session": _mock_session}
 
         def noisy_security_scan(**kwargs):
-            from aws_lighthouse.cli import logger
-
-            logger.error("simulated scanner error")
-            return []
+            return _err([], "simulated scanner error")
 
         with patch.multiple(
             "aws_lighthouse.cli",
@@ -638,6 +684,42 @@ class TestAnalyzeJsonOutput:
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
         assert data["account_id"] == "123456789012"
+
+    def test_v2_overall_marks_degraded_when_any_section_errors(self):
+        runner = CliRunner()
+        patches = {**_PATCHES, "aws_lighthouse.cli.get_aws_session": _mock_session}
+
+        def degraded_security_scan(**kwargs):  # noqa: ARG001
+            return _err([], "security scan degraded")
+
+        with patch.multiple(
+            "aws_lighthouse.cli",
+            **{
+                k.split(".")[-1]: (
+                    degraded_security_scan if k.endswith("run_security_scan") else v
+                )
+                for k, v in patches.items()
+            },
+        ):
+            result = runner.invoke(
+                app, ["analyze", "--output", "json", "--json-schema", "v2"]
+            )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["overall"]["ok"] is False
+        assert "security_findings" in data["overall"]["data"]["degraded_sections"]
+        assert len(data["overall"]["errors"]) >= 1
+
+    def test_invalid_json_schema_rejected(self):
+        runner = CliRunner()
+        with patch("aws_lighthouse.cli.get_aws_session", _mock_session):
+            result = runner.invoke(
+                app, ["analyze", "--output", "json", "--json-schema", "v3"]
+            )
+
+        assert result.exit_code != 0
+        assert "--json-schema must be either 'v1' or 'v2'" in result.output
 
 
 class TestAnalyzeInteractiveMode:

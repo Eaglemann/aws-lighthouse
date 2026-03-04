@@ -10,6 +10,11 @@ from aws_lighthouse.tools.cloudwatch_scan import (
 MOD = "aws_lighthouse.tools.cloudwatch_scan"
 
 
+def _data(result):
+    assert set(result.keys()) == {"ok", "data", "errors"}
+    return result["data"]
+
+
 # ── _build_alarm_index ────────────────────────────────────────────────────────
 
 
@@ -26,20 +31,25 @@ def test_build_alarm_index_populated():
             ]
         }
     ]
-    index = _build_alarm_index(cw)
+    result = _build_alarm_index(cw)
+    index = _data(result)
     assert ("AWS/EC2", "CPUUtilization", "InstanceId", "i-111") in index
 
 
 def test_build_alarm_index_empty_pages():
     cw = MagicMock()
     cw.get_paginator.return_value.paginate.return_value = [{"MetricAlarms": []}]
-    assert _build_alarm_index(cw) == set()
+    result = _build_alarm_index(cw)
+    assert result["ok"] is True
+    assert result["data"] == set()
 
 
 def test_build_alarm_index_api_error_returns_empty():
     cw = MagicMock()
     cw.get_paginator.side_effect = BotoCoreError()
-    assert _build_alarm_index(cw) == set()
+    result = _build_alarm_index(cw)
+    assert result["ok"] is False
+    assert result["data"] == set()
 
 
 # ── detect_cloudwatch_gaps ────────────────────────────────────────────────────
@@ -90,7 +100,7 @@ def test_ec2_missing_both_alarms_flagged():
         "Tags": [{"Key": "Name", "Value": "web"}],
     }
     cw, ec2, rds = _make_clients(instances=[instance])
-    findings = _run(cw, ec2, rds)
+    findings = _data(_run(cw, ec2, rds))
     ec2_findings = [f for f in findings if f["resource_type"] == "EC2"]
     assert len(ec2_findings) == 1
     assert set(ec2_findings[0]["missing_alarms"]) == {
@@ -114,21 +124,21 @@ def test_ec2_with_all_alarms_not_flagged():
         },
     ]
     cw, ec2, rds = _make_clients(instances=[instance], alarms=alarms)
-    findings = _run(cw, ec2, rds)
+    findings = _data(_run(cw, ec2, rds))
     assert not any(f["resource_type"] == "EC2" for f in findings)
 
 
 def test_ec2_terminated_skipped():
     instance = {"InstanceId": "i-dead", "State": {"Name": "terminated"}, "Tags": []}
     cw, ec2, rds = _make_clients(instances=[instance])
-    findings = _run(cw, ec2, rds)
+    findings = _data(_run(cw, ec2, rds))
     assert not any(f["resource_id"] == "i-dead" for f in findings)
 
 
 def test_rds_missing_alarms_flagged():
     db = {"DBInstanceIdentifier": "my-db"}
     cw, ec2, rds = _make_clients(dbs=[db])
-    findings = _run(cw, ec2, rds)
+    findings = _data(_run(cw, ec2, rds))
     rds_findings = [f for f in findings if f["resource_type"] == "RDS"]
     assert len(rds_findings) == 1
     assert set(rds_findings[0]["missing_alarms"]) == {
@@ -152,7 +162,7 @@ def test_rds_with_all_alarms_not_flagged():
         },
     ]
     cw, ec2, rds = _make_clients(dbs=[db], alarms=alarms)
-    findings = _run(cw, ec2, rds)
+    findings = _data(_run(cw, ec2, rds))
     assert not any(f["resource_type"] == "RDS" for f in findings)
 
 
@@ -164,7 +174,9 @@ def test_ec2_api_error_returns_no_ec2_findings():
     rds = MagicMock()
     rds.get_paginator.return_value.paginate.return_value = [{"DBInstances": []}]
 
-    findings = _run(cw, ec2, rds)
+    result = _run(cw, ec2, rds)
+    findings = _data(result)
+    assert result["ok"] is False
     assert not any(f["resource_type"] == "EC2" for f in findings)
 
 
@@ -174,7 +186,7 @@ def test_ec2_api_error_returns_no_ec2_findings():
 def test_lambda_missing_both_alarms_flagged():
     fn = {"FunctionName": "process-orders"}
     cw, ec2, rds = _make_clients()
-    findings = _run(cw, ec2, rds, lmb=_make_lambda_client([fn]))
+    findings = _data(_run(cw, ec2, rds, lmb=_make_lambda_client([fn])))
     lmb_findings = [f for f in findings if f["resource_type"] == "Lambda"]
     assert len(lmb_findings) == 1
     assert set(lmb_findings[0]["missing_alarms"]) == {"Errors", "Throttles"}
@@ -196,7 +208,7 @@ def test_lambda_with_all_alarms_not_flagged():
         },
     ]
     cw, ec2, rds = _make_clients(alarms=alarms)
-    findings = _run(cw, ec2, rds, lmb=_make_lambda_client([fn]))
+    findings = _data(_run(cw, ec2, rds, lmb=_make_lambda_client([fn])))
     assert not any(f["resource_type"] == "Lambda" for f in findings)
 
 
@@ -210,7 +222,7 @@ def test_lambda_missing_only_throttles_flagged():
         }
     ]
     cw, ec2, rds = _make_clients(alarms=alarms)
-    findings = _run(cw, ec2, rds, lmb=_make_lambda_client([fn]))
+    findings = _data(_run(cw, ec2, rds, lmb=_make_lambda_client([fn])))
     lmb_findings = [f for f in findings if f["resource_type"] == "Lambda"]
     assert len(lmb_findings) == 1
     assert lmb_findings[0]["missing_alarms"] == ["Throttles"]
@@ -221,7 +233,9 @@ def test_lambda_api_error_doesnt_break_other_findings():
     cw, ec2, rds = _make_clients(dbs=[db])
     bad_lmb = MagicMock()
     bad_lmb.get_paginator.side_effect = BotoCoreError()
-    findings = _run(cw, ec2, rds, lmb=bad_lmb)
+    result = _run(cw, ec2, rds, lmb=bad_lmb)
+    findings = _data(result)
+    assert result["ok"] is False
     assert not any(f["resource_type"] == "Lambda" for f in findings)
     assert any(f["resource_type"] == "RDS" for f in findings)
 
@@ -245,7 +259,7 @@ def test_ec2_two_page_pagination_collects_all_instances():
     rds = MagicMock()
     rds.get_paginator.return_value.paginate.return_value = [{"DBInstances": []}]
 
-    findings = _run(cw, ec2, rds)
+    findings = _data(_run(cw, ec2, rds))
     ids = {f["resource_id"] for f in findings if f["resource_type"] == "EC2"}
     assert ids == {"i-page1", "i-page2"}
 
@@ -266,6 +280,6 @@ def test_rds_two_page_pagination_collects_all_dbs():
         {"DBInstances": [db_p2]},
     ]
 
-    findings = _run(cw, ec2, rds)
+    findings = _data(_run(cw, ec2, rds))
     ids = {f["resource_id"] for f in findings if f["resource_type"] == "RDS"}
     assert ids == {"db-page1", "db-page2"}

@@ -17,8 +17,9 @@ def test_returns_sorted_region_names():
         ]
     }
     with patch(f"{MOD}.get_client", return_value=mock_ec2):
-        regions = get_enabled_regions()
-    assert regions == ["ap-southeast-1", "eu-west-1", "us-west-2"]
+        result = get_enabled_regions()
+    assert result["ok"] is True
+    assert result["data"] == ["ap-southeast-1", "eu-west-1", "us-west-2"]
 
 
 def test_passes_correct_opt_in_filter():
@@ -40,13 +41,16 @@ def test_empty_regions():
     mock_ec2 = MagicMock()
     mock_ec2.describe_regions.return_value = {"Regions": []}
     with patch(f"{MOD}.get_client", return_value=mock_ec2):
-        regions = get_enabled_regions()
-    assert regions == []
+        result = get_enabled_regions()
+    assert result["ok"] is True
+    assert result["data"] == []
 
 
 def test_api_error_returns_empty():
     mock_ec2 = MagicMock()
     mock_ec2.describe_regions.side_effect = BotoCoreError()
     with patch(f"{MOD}.get_client", return_value=mock_ec2):
-        regions = get_enabled_regions()
-    assert regions == []
+        result = get_enabled_regions()
+    assert result["ok"] is False
+    assert result["data"] == []
+    assert result["errors"]

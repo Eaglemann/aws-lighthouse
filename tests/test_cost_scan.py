@@ -14,6 +14,11 @@ from aws_lighthouse.tools.cost_scan import (
 MOD = "aws_lighthouse.tools.cost_scan"
 
 
+def _data(result):
+    assert set(result.keys()) == {"ok", "data", "errors"}
+    return result["data"]
+
+
 # ── _check_unattached_ebs ─────────────────────────────────────────────────────
 
 
@@ -25,7 +30,9 @@ def _make_volumes_ec2(volumes):
 
 def test_unattached_ebs_found():
     ec2 = _make_volumes_ec2([{"VolumeId": "vol-abc", "Size": 100, "VolumeType": "gp3"}])
-    findings = _check_unattached_ebs(ec2)
+    result = _check_unattached_ebs(ec2)
+    findings = _data(result)
+    assert result["ok"] is True
     assert len(findings) == 1
     assert findings[0]["resource"] == "vol-abc"
     assert "100 GB" in findings[0]["finding"]
@@ -34,7 +41,9 @@ def test_unattached_ebs_found():
 
 def test_unattached_ebs_none():
     ec2 = _make_volumes_ec2([])
-    assert _check_unattached_ebs(ec2) == []
+    result = _check_unattached_ebs(ec2)
+    assert result["ok"] is True
+    assert result["data"] == []
 
 
 def test_unattached_ebs_api_error_returns_empty():
@@ -42,7 +51,10 @@ def test_unattached_ebs_api_error_returns_empty():
     ec2.get_paginator.side_effect = ClientError(
         {"Error": {"Code": "AccessDenied", "Message": ""}}, "DescribeVolumes"
     )
-    assert _check_unattached_ebs(ec2) == []
+    result = _check_unattached_ebs(ec2)
+    assert result["ok"] is False
+    assert result["data"] == []
+    assert result["errors"][0]["code"] == "AccessDenied"
 
 
 # ── _check_stopped_ec2 ────────────────────────────────────────────────────────
@@ -70,7 +82,8 @@ def test_stopped_ec2_found():
             }
         ]
     )
-    findings = _check_stopped_ec2(ec2)
+    result = _check_stopped_ec2(ec2)
+    findings = _data(result)
     assert len(findings) == 1
     assert findings[0]["resource"] == "i-111"
     assert "my-server" in findings[0]["finding"]
@@ -86,14 +99,16 @@ def test_stopped_ec2_uses_instance_id_when_no_name():
             }
         ]
     )
-    findings = _check_stopped_ec2(ec2)
+    findings = _data(_check_stopped_ec2(ec2))
     assert len(findings) == 1
     assert "i-222" in findings[0]["finding"]
 
 
 def test_stopped_ec2_none():
     ec2 = _make_instances_ec2([])
-    assert _check_stopped_ec2(ec2) == []
+    result = _check_stopped_ec2(ec2)
+    assert result["ok"] is True
+    assert result["data"] == []
 
 
 def test_stopped_ec2_api_error_returns_empty():
@@ -101,7 +116,10 @@ def test_stopped_ec2_api_error_returns_empty():
     ec2.get_paginator.side_effect = ClientError(
         {"Error": {"Code": "AccessDenied", "Message": ""}}, "DescribeInstances"
     )
-    assert _check_stopped_ec2(ec2) == []
+    result = _check_stopped_ec2(ec2)
+    assert result["ok"] is False
+    assert result["data"] == []
+    assert result["errors"][0]["code"] == "AccessDenied"
 
 
 # ── _check_old_snapshots ──────────────────────────────────────────────────────
@@ -125,7 +143,7 @@ def test_old_snapshot_flagged():
             }
         ]
     )
-    findings = _check_old_snapshots(ec2)
+    findings = _data(_check_old_snapshots(ec2))
     assert len(findings) == 1
     assert findings[0]["resource"] == "snap-abc"
     assert "50 GB" in findings[0]["finding"]
@@ -143,7 +161,9 @@ def test_recent_snapshot_not_flagged():
             }
         ]
     )
-    assert _check_old_snapshots(ec2) == []
+    result = _check_old_snapshots(ec2)
+    assert result["ok"] is True
+    assert result["data"] == []
 
 
 def test_old_snapshots_api_error_returns_empty():
@@ -151,7 +171,10 @@ def test_old_snapshots_api_error_returns_empty():
     ec2.get_paginator.side_effect = ClientError(
         {"Error": {"Code": "AccessDenied", "Message": ""}}, "DescribeSnapshots"
     )
-    assert _check_old_snapshots(ec2) == []
+    result = _check_old_snapshots(ec2)
+    assert result["ok"] is False
+    assert result["data"] == []
+    assert result["errors"][0]["code"] == "AccessDenied"
 
 
 # ── _check_unassociated_eips ──────────────────────────────────────────────────
@@ -162,7 +185,7 @@ def test_unassociated_eip_flagged():
     ec2.describe_addresses.return_value = {
         "Addresses": [{"AllocationId": "eipalloc-123", "PublicIp": "1.2.3.4"}]
     }
-    findings = _check_unassociated_eips(ec2)
+    findings = _data(_check_unassociated_eips(ec2))
     assert len(findings) == 1
     assert findings[0]["resource"] == "eipalloc-123"
     assert "1.2.3.4" in findings[0]["finding"]
@@ -180,7 +203,9 @@ def test_associated_eip_not_flagged():
             }
         ]
     }
-    assert _check_unassociated_eips(ec2) == []
+    result = _check_unassociated_eips(ec2)
+    assert result["ok"] is True
+    assert result["data"] == []
 
 
 def test_unassociated_eips_api_error_returns_empty():
@@ -188,7 +213,10 @@ def test_unassociated_eips_api_error_returns_empty():
     ec2.describe_addresses.side_effect = ClientError(
         {"Error": {"Code": "AccessDenied", "Message": ""}}, "DescribeAddresses"
     )
-    assert _check_unassociated_eips(ec2) == []
+    result = _check_unassociated_eips(ec2)
+    assert result["ok"] is False
+    assert result["data"] == []
+    assert result["errors"][0]["code"] == "AccessDenied"
 
 
 # ── run_cost_scan wiring ──────────────────────────────────────────────────────
@@ -217,8 +245,9 @@ def _make_clean_ec2():
 def test_run_cost_scan_clean_returns_empty():
     ec2 = _make_clean_ec2()
     with patch(f"{MOD}.get_client", return_value=ec2):
-        findings = run_cost_scan()
-    assert findings == []
+        result = run_cost_scan()
+    assert result["ok"] is True
+    assert result["data"] == []
 
 
 def test_run_cost_scan_aggregates_all_checks():
@@ -258,9 +287,9 @@ def test_run_cost_scan_aggregates_all_checks():
         "Addresses": [{"AllocationId": "eipalloc-ddd", "PublicIp": "1.2.3.4"}]
     }
     with patch(f"{MOD}.get_client", return_value=ec2):
-        findings = run_cost_scan()
+        result = run_cost_scan()
 
-    resources = [f["resource"] for f in findings]
+    resources = [f["resource"] for f in result["data"]]
     assert "vol-aaa" in resources
     assert "i-bbb" in resources
     assert "snap-ccc" in resources

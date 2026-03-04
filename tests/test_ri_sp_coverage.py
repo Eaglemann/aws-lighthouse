@@ -14,6 +14,11 @@ from aws_lighthouse.tools.ri_sp_coverage import (
 MOD = "aws_lighthouse.tools.ri_sp_coverage"
 
 
+def _data(result):
+    assert set(result.keys()) == {"ok", "data", "errors"}
+    return result["data"]
+
+
 def _make_ce(
     ri_cov_pct="75.0",
     ri_od_cost="100.0",
@@ -54,16 +59,17 @@ def test_all_fields_populated():
     mock_ce = _make_ce()
     with patch(f"{MOD}.get_client", return_value=mock_ce):
         result = get_ri_sp_coverage(days=30)
+    payload = _data(result)
 
-    assert result["ri_coverage_pct"] == 75.0
-    assert result["ri_on_demand_cost"] == 100.0
-    assert result["ri_utilization_pct"] == 80.0
-    assert result["ri_unused_cost"] == 20.0
-    assert result["sp_coverage_pct"] == 60.0
-    assert result["sp_on_demand_cost"] == 50.0
-    assert result["sp_utilization_pct"] == 90.0
-    assert result["sp_unused_commitment"] == 10.0
-    assert "period" in result
+    assert payload["ri_coverage_pct"] == 75.0
+    assert payload["ri_on_demand_cost"] == 100.0
+    assert payload["ri_utilization_pct"] == 80.0
+    assert payload["ri_unused_cost"] == 20.0
+    assert payload["sp_coverage_pct"] == 60.0
+    assert payload["sp_on_demand_cost"] == 50.0
+    assert payload["sp_utilization_pct"] == 90.0
+    assert payload["sp_unused_commitment"] == 10.0
+    assert "period" in payload
 
 
 def test_ri_coverage_api_error_sets_none():
@@ -71,10 +77,12 @@ def test_ri_coverage_api_error_sets_none():
     mock_ce.get_reservation_coverage.side_effect = BotoCoreError()
     with patch(f"{MOD}.get_client", return_value=mock_ce):
         result = get_ri_sp_coverage()
-    assert result["ri_coverage_pct"] is None
-    assert result["ri_on_demand_cost"] is None
+    payload = _data(result)
+    assert result["ok"] is False
+    assert payload["ri_coverage_pct"] is None
+    assert payload["ri_on_demand_cost"] is None
     # other fields still populated
-    assert result["ri_utilization_pct"] == 80.0
+    assert payload["ri_utilization_pct"] == 80.0
 
 
 def test_ri_utilization_api_error_sets_none():
@@ -82,8 +90,10 @@ def test_ri_utilization_api_error_sets_none():
     mock_ce.get_reservation_utilization.side_effect = BotoCoreError()
     with patch(f"{MOD}.get_client", return_value=mock_ce):
         result = get_ri_sp_coverage()
-    assert result["ri_utilization_pct"] is None
-    assert result["ri_unused_cost"] is None
+    payload = _data(result)
+    assert result["ok"] is False
+    assert payload["ri_utilization_pct"] is None
+    assert payload["ri_unused_cost"] is None
 
 
 def test_sp_coverage_api_error_sets_none():
@@ -91,8 +101,10 @@ def test_sp_coverage_api_error_sets_none():
     mock_ce.get_savings_plans_coverage.side_effect = BotoCoreError()
     with patch(f"{MOD}.get_client", return_value=mock_ce):
         result = get_ri_sp_coverage()
-    assert result["sp_coverage_pct"] is None
-    assert result["sp_on_demand_cost"] is None
+    payload = _data(result)
+    assert result["ok"] is False
+    assert payload["sp_coverage_pct"] is None
+    assert payload["sp_on_demand_cost"] is None
 
 
 def test_sp_utilization_api_error_sets_none():
@@ -100,8 +112,10 @@ def test_sp_utilization_api_error_sets_none():
     mock_ce.get_savings_plans_utilization.side_effect = BotoCoreError()
     with patch(f"{MOD}.get_client", return_value=mock_ce):
         result = get_ri_sp_coverage()
-    assert result["sp_utilization_pct"] is None
-    assert result["sp_unused_commitment"] is None
+    payload = _data(result)
+    assert result["ok"] is False
+    assert payload["sp_utilization_pct"] is None
+    assert payload["sp_unused_commitment"] is None
 
 
 def test_zero_values_handled():
@@ -117,8 +131,9 @@ def test_zero_values_handled():
     )
     with patch(f"{MOD}.get_client", return_value=mock_ce):
         result = get_ri_sp_coverage()
-    assert result["ri_coverage_pct"] == 0.0
-    assert result["sp_utilization_pct"] == 0.0
+    payload = _data(result)
+    assert payload["ri_coverage_pct"] == 0.0
+    assert payload["sp_utilization_pct"] == 0.0
 
 
 # ── Unit tests for private fetchers ──────────────────────────────────────────
@@ -128,32 +143,37 @@ def test_fetch_ri_coverage_returns_correct_keys():
     ce = _make_ce()
     period = {"Start": "2025-01-01", "End": "2025-02-01"}
     out = _fetch_ri_coverage(ce, period)
-    assert out == {"ri_coverage_pct": 75.0, "ri_on_demand_cost": 100.0}
+    assert out["ok"] is True
+    assert out["data"] == {"ri_coverage_pct": 75.0, "ri_on_demand_cost": 100.0}
 
 
 def test_fetch_ri_coverage_error_returns_none_values():
     ce = MagicMock()
     ce.get_reservation_coverage.side_effect = BotoCoreError()
     out = _fetch_ri_coverage(ce, {})
-    assert out == {"ri_coverage_pct": None, "ri_on_demand_cost": None}
+    assert out["ok"] is False
+    assert out["data"] == {"ri_coverage_pct": None, "ri_on_demand_cost": None}
 
 
 def test_fetch_ri_utilization_returns_correct_keys():
     ce = _make_ce()
     out = _fetch_ri_utilization(ce, {})
-    assert out == {"ri_utilization_pct": 80.0, "ri_unused_cost": 20.0}
+    assert out["ok"] is True
+    assert out["data"] == {"ri_utilization_pct": 80.0, "ri_unused_cost": 20.0}
 
 
 def test_fetch_sp_coverage_returns_correct_keys():
     ce = _make_ce()
     out = _fetch_sp_coverage(ce, {})
-    assert out == {"sp_coverage_pct": 60.0, "sp_on_demand_cost": 50.0}
+    assert out["ok"] is True
+    assert out["data"] == {"sp_coverage_pct": 60.0, "sp_on_demand_cost": 50.0}
 
 
 def test_fetch_sp_utilization_returns_correct_keys():
     ce = _make_ce()
     out = _fetch_sp_utilization(ce, {})
-    assert out == {"sp_utilization_pct": 90.0, "sp_unused_commitment": 10.0}
+    assert out["ok"] is True
+    assert out["data"] == {"sp_utilization_pct": 90.0, "sp_unused_commitment": 10.0}
 
 
 # ── Parallelism smoke test ────────────────────────────────────────────────────
@@ -199,4 +219,4 @@ def test_all_four_ce_calls_issued_in_parallel():
         "sp_utilization_pct",
         "sp_unused_commitment",
     }
-    assert expected_keys.issubset(result.keys())
+    assert expected_keys.issubset(result["data"].keys())

@@ -12,6 +12,11 @@ from aws_lighthouse.tools.inventory import (
 MOD = "aws_lighthouse.tools.inventory"
 
 
+def _data(result):
+    assert set(result.keys()) == {"ok", "data", "errors"}
+    return result["data"]
+
+
 def _make_lambda(functions):
     lmb = MagicMock()
     lmb.get_paginator.return_value.paginate.return_value = [{"Functions": functions}]
@@ -40,8 +45,8 @@ def test_lambda_inventory_returns_expected_fields():
     lmb = _make_lambda([_fn("my-fn", recent)])
     with patch(f"{MOD}.get_client", return_value=lmb):
         result = get_lambda_inventory()
-    assert len(result) == 1
-    fn = result[0]
+    assert result["ok"] is True
+    fn = _data(result)[0]
     assert fn["FunctionName"] == "my-fn"
     assert fn["Runtime"] == "python3.12"
     assert fn["MemorySize"] == 128
@@ -60,7 +65,7 @@ def test_lambda_stale_after_180_days():
     lmb = _make_lambda([_fn("old-fn", old)])
     with patch(f"{MOD}.get_client", return_value=lmb):
         result = get_lambda_inventory()
-    assert result[0]["Stale"] is True
+    assert _data(result)[0]["Stale"] is True
 
 
 def test_lambda_not_stale_when_recent():
@@ -70,14 +75,14 @@ def test_lambda_not_stale_when_recent():
     lmb = _make_lambda([_fn("fresh-fn", recent)])
     with patch(f"{MOD}.get_client", return_value=lmb):
         result = get_lambda_inventory()
-    assert result[0]["Stale"] is False
+    assert _data(result)[0]["Stale"] is False
 
 
 def test_lambda_bad_date_format_stale_false():
     lmb = _make_lambda([_fn("broken-fn", "not-a-date")])
     with patch(f"{MOD}.get_client", return_value=lmb):
         result = get_lambda_inventory()
-    assert result[0]["Stale"] is False
+    assert _data(result)[0]["Stale"] is False
 
 
 # ── error handling ────────────────────────────────────────────────────────────
@@ -90,15 +95,17 @@ def test_lambda_api_error_returns_error_list():
     )
     with patch(f"{MOD}.get_client", return_value=lmb):
         result = get_lambda_inventory()
-    assert len(result) == 1
-    assert "error" in result[0]
+    assert result["ok"] is False
+    assert result["data"] == []
+    assert result["errors"][0]["code"] == "AccessDenied"
 
 
 def test_lambda_empty_account_returns_empty_list():
     lmb = _make_lambda([])
     with patch(f"{MOD}.get_client", return_value=lmb):
         result = get_lambda_inventory()
-    assert result == []
+    assert result["ok"] is True
+    assert result["data"] == []
 
 
 # ── get_ec2_inventory ─────────────────────────────────────────────────────────
@@ -128,26 +135,27 @@ def test_ec2_inventory_returns_expected_fields():
     ec2 = _make_ec2([{"Instances": [_inst("i-111", name="web")]}])
     with patch(f"{MOD}.get_client", return_value=ec2):
         result = get_ec2_inventory()
-    assert len(result) == 1
-    assert result[0]["InstanceId"] == "i-111"
-    assert result[0]["Name"] == "web"
-    assert result[0]["Type"] == "t3.micro"
-    assert result[0]["State"] == "running"
-    assert "error" not in result[0]
+    assert result["ok"] is True
+    row = _data(result)[0]
+    assert row["InstanceId"] == "i-111"
+    assert row["Name"] == "web"
+    assert row["Type"] == "t3.micro"
+    assert row["State"] == "running"
 
 
 def test_ec2_inventory_unknown_name_when_no_tag():
     ec2 = _make_ec2([{"Instances": [_inst("i-222")]}])
     with patch(f"{MOD}.get_client", return_value=ec2):
         result = get_ec2_inventory()
-    assert result[0]["Name"] == "Unknown"
+    assert _data(result)[0]["Name"] == "Unknown"
 
 
 def test_ec2_inventory_empty_account():
     ec2 = _make_ec2([])
     with patch(f"{MOD}.get_client", return_value=ec2):
         result = get_ec2_inventory()
-    assert result == []
+    assert result["ok"] is True
+    assert result["data"] == []
 
 
 def test_ec2_inventory_api_error_returns_error_list():
@@ -157,8 +165,9 @@ def test_ec2_inventory_api_error_returns_error_list():
     )
     with patch(f"{MOD}.get_client", return_value=ec2):
         result = get_ec2_inventory()
-    assert len(result) == 1
-    assert "error" in result[0]
+    assert result["ok"] is False
+    assert result["data"] == []
+    assert result["errors"][0]["code"] == "AccessDenied"
 
 
 # ── get_rds_inventory ─────────────────────────────────────────────────────────
@@ -186,18 +195,19 @@ def test_rds_inventory_returns_expected_fields():
     rds = _make_rds([_db("prod-db", public=True)])
     with patch(f"{MOD}.get_client", return_value=rds):
         result = get_rds_inventory()
-    assert len(result) == 1
-    assert result[0]["DBInstanceIdentifier"] == "prod-db"
-    assert result[0]["Engine"] == "mysql"
-    assert result[0]["PubliclyAccessible"] is True
-    assert "error" not in result[0]
+    assert result["ok"] is True
+    row = _data(result)[0]
+    assert row["DBInstanceIdentifier"] == "prod-db"
+    assert row["Engine"] == "mysql"
+    assert row["PubliclyAccessible"] is True
 
 
 def test_rds_inventory_empty_account():
     rds = _make_rds([])
     with patch(f"{MOD}.get_client", return_value=rds):
         result = get_rds_inventory()
-    assert result == []
+    assert result["ok"] is True
+    assert result["data"] == []
 
 
 def test_rds_inventory_api_error_returns_error_list():
@@ -207,5 +217,6 @@ def test_rds_inventory_api_error_returns_error_list():
     )
     with patch(f"{MOD}.get_client", return_value=rds):
         result = get_rds_inventory()
-    assert len(result) == 1
-    assert "error" in result[0]
+    assert result["ok"] is False
+    assert result["data"] == []
+    assert result["errors"][0]["code"] == "AccessDenied"

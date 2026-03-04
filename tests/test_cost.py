@@ -9,6 +9,11 @@ from aws_lighthouse.tools.cost import get_monthly_cost_summary
 MOD = "aws_lighthouse.tools.cost"
 
 
+def _data(result):
+    assert set(result.keys()) == {"ok", "data", "errors"}
+    return result["data"]
+
+
 def _make_day(groups):
     """Build a single ResultsByTime entry from a list of (service, amount) pairs."""
     return {
@@ -36,8 +41,10 @@ def test_single_day_single_service():
     ce = _make_ce([_make_day([("Amazon EC2", 10.50)])])
     with patch(f"{MOD}.get_client", return_value=ce):
         result = get_monthly_cost_summary()
-    assert result["total_usd"] == pytest.approx(10.50)
-    assert result["breakdown"] == {"Amazon EC2": pytest.approx(10.50)}
+    payload = _data(result)
+    assert result["ok"] is True
+    assert payload["total_usd"] == pytest.approx(10.50)
+    assert payload["breakdown"] == {"Amazon EC2": pytest.approx(10.50)}
 
 
 def test_multi_day_aggregates_same_service():
@@ -49,17 +56,19 @@ def test_multi_day_aggregates_same_service():
     )
     with patch(f"{MOD}.get_client", return_value=ce):
         result = get_monthly_cost_summary()
-    assert result["total_usd"] == pytest.approx(11.00)
-    assert result["breakdown"]["Amazon EC2"] == pytest.approx(8.00)
-    assert result["breakdown"]["Amazon S3"] == pytest.approx(3.00)
+    payload = _data(result)
+    assert payload["total_usd"] == pytest.approx(11.00)
+    assert payload["breakdown"]["Amazon EC2"] == pytest.approx(8.00)
+    assert payload["breakdown"]["Amazon S3"] == pytest.approx(3.00)
 
 
 def test_empty_results_returns_zero():
     ce = _make_ce([])
     with patch(f"{MOD}.get_client", return_value=ce):
         result = get_monthly_cost_summary()
-    assert result["total_usd"] == 0.0
-    assert result["breakdown"] == {}
+    payload = _data(result)
+    assert payload["total_usd"] == 0.0
+    assert payload["breakdown"] == {}
 
 
 def test_breakdown_sorted_descending():
@@ -67,7 +76,7 @@ def test_breakdown_sorted_descending():
     ce = _make_ce([_make_day(groups)])
     with patch(f"{MOD}.get_client", return_value=ce):
         result = get_monthly_cost_summary()
-    costs = list(result["breakdown"].values())
+    costs = list(_data(result)["breakdown"].values())
     assert costs == sorted(costs, reverse=True)
 
 
@@ -80,12 +89,13 @@ def test_top_15_truncation_keeps_highest():
     ce = _make_ce([_make_day(groups)])
     with patch(f"{MOD}.get_client", return_value=ce):
         result = get_monthly_cost_summary()
-    assert len(result["breakdown"]) == 15
+    payload = _data(result)
+    assert len(payload["breakdown"]) == 15
     # Cheapest 5 (1..5) must be excluded
     for i in range(1, 6):
-        assert f"Service{i}" not in result["breakdown"]
+        assert f"Service{i}" not in payload["breakdown"]
     # Most expensive must be present
-    assert "Service20" in result["breakdown"]
+    assert "Service20" in payload["breakdown"]
 
 
 def test_fewer_than_15_services_all_included():
@@ -93,7 +103,7 @@ def test_fewer_than_15_services_all_included():
     ce = _make_ce([_make_day(groups)])
     with patch(f"{MOD}.get_client", return_value=ce):
         result = get_monthly_cost_summary()
-    assert len(result["breakdown"]) == 10
+    assert len(_data(result)["breakdown"]) == 10
 
 
 # ── return shape ──────────────────────────────────────────────────────────────
@@ -103,7 +113,7 @@ def test_return_shape_has_required_keys():
     ce = _make_ce([_make_day([("EC2", 1.0)])])
     with patch(f"{MOD}.get_client", return_value=ce):
         result = get_monthly_cost_summary()
-    assert {"period", "start", "end", "total_usd", "breakdown"} <= result.keys()
+    assert {"period", "start", "end", "total_usd", "breakdown"} <= _data(result).keys()
 
 
 def test_days_param_sets_start_date():
@@ -111,15 +121,18 @@ def test_days_param_sets_start_date():
     with patch(f"{MOD}.get_client", return_value=ce):
         result = get_monthly_cost_summary(days=7)
     expected_start = (date.today() - timedelta(days=7)).isoformat()
-    assert result["start"] == expected_start
+    assert _data(result)["start"] == expected_start
 
 
 # ── error path ────────────────────────────────────────────────────────────────
 
 
-def test_api_error_returns_error_dict():
+def test_api_error_returns_envelope_error():
     ce = MagicMock()
     ce.get_cost_and_usage.side_effect = BotoCoreError()
     with patch(f"{MOD}.get_client", return_value=ce):
         result = get_monthly_cost_summary()
-    assert "error" in result
+    payload = _data(result)
+    assert result["ok"] is False
+    assert result["errors"]
+    assert payload["total_usd"] == 0.0

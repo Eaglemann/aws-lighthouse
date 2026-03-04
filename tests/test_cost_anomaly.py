@@ -50,17 +50,19 @@ def _run(mock_ce):
 def test_anomaly_detected_above_threshold():
     # baseline=10, recent=25 → 150% spike
     results = _run(_make_ce(10.0, 25.0))
-    assert len(results) == 1
-    assert results[0]["service"] == "Amazon EC2"
-    assert results[0]["pct_change"] == 150.0
-    assert results[0]["baseline_7d"] == 10.0
-    assert results[0]["recent_7d"] == 25.0
+    assert results["ok"] is True
+    assert len(results["data"]) == 1
+    assert results["data"][0]["service"] == "Amazon EC2"
+    assert results["data"][0]["pct_change"] == 150.0
+    assert results["data"][0]["baseline_7d"] == 10.0
+    assert results["data"][0]["recent_7d"] == 25.0
 
 
 def test_no_anomaly_below_threshold():
     # baseline=10, recent=14 → 40% (< 50% threshold)
     results = _run(_make_ce(10.0, 14.0))
-    assert results == []
+    assert results["ok"] is True
+    assert results["data"] == []
 
 
 def test_new_service_no_baseline_skipped():
@@ -80,13 +82,15 @@ def test_new_service_no_baseline_skipped():
         ]
     }
     results = _run(mock_ce)
-    assert results == []
+    assert results["ok"] is True
+    assert results["data"] == []
 
 
 def test_negligible_baseline_skipped():
     # baseline < _MIN_BASELINE_USD (1.0) → skip
     results = _run(_make_ce(0.5, 5.0))
-    assert results == []
+    assert results["ok"] is True
+    assert results["data"] == []
 
 
 def test_results_sorted_by_pct_change_descending():
@@ -110,12 +114,12 @@ def test_results_sorted_by_pct_change_descending():
         ]
     }
     results = _run(mock_ce)
-    assert len(results) == 2
-    assert results[0]["service"] == "EC2"  # 200% > 100%
-    assert results[1]["service"] == "S3"
+    assert len(results["data"]) == 2
+    assert results["data"][0]["service"] == "EC2"  # 200% > 100%
+    assert results["data"][1]["service"] == "S3"
 
 
-def test_api_error_returns_empty():
+def test_api_error_returns_envelope_error():
     from botocore.exceptions import ClientError
 
     mock_ce = MagicMock()
@@ -126,4 +130,6 @@ def test_api_error_returns_empty():
         with patch(f"{MOD}.date") as mock_date:
             mock_date.today.return_value = _TODAY
             results = detect_cost_anomalies()
-    assert results == []
+    assert results["ok"] is False
+    assert results["data"] == []
+    assert results["errors"][0]["code"] == "AccessDenied"
