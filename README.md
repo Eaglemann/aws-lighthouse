@@ -511,6 +511,7 @@ uv sync --all-extras --dev
 ./scripts/ci-parity.sh
 
 # Optional dependency audit gate (matches CI dependency-audit job)
+# Exports production requirements then runs pip-audit with --no-deps --disable-pip
 ./scripts/dependency-audit.sh
 
 # Lint

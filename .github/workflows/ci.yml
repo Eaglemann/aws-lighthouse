@@ -53,13 +53,8 @@ jobs:
       with:
         python-version-file: ".python-version"
 
-    - name: Install pip-audit
-      run: pip install pip-audit
-
-    - name: Export production dependencies and audit
-      run: |
-        uv export --no-dev --format requirements-txt --no-hashes > /tmp/requirements.txt
-        pip-audit -r /tmp/requirements.txt
+    - name: Dependency audit
+      run: ./scripts/dependency-audit.sh
 
   secrets-scan:
     runs-on: ubuntu-latest
