@@ -2,6 +2,7 @@ import io
 import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from typing import cast
 
 import typer
 from rich import box
@@ -18,6 +19,7 @@ from rich.text import Text
 from .auth import get_aws_session
 from .db import db_manager
 from .logger import logger
+from .scan_contract import error_result, merge_list_results
 from .tools.cloudwatch_scan import detect_cloudwatch_gaps
 from .tools.cost import get_monthly_cost_summary
 from .tools.cost_anomaly import detect_cost_anomalies
@@ -33,7 +35,7 @@ from .tools.multi_region import get_enabled_regions
 from .tools.ri_sp_coverage import get_ri_sp_coverage
 from .tools.security_scan import run_security_scan
 from .tools.tagging import check_tagging_compliance
-from .types import CostFinding, SecurityFinding
+from .types import CostFinding, ScanResult, SecurityFinding
 
 app = typer.Typer(
     help="AWS Lighthouse: Terminal-first FinOps, Security, and Scaffolding Agent.",
@@ -62,9 +64,7 @@ def _severity_text(sev: str) -> Text:
 
 
 def _count(lst: list) -> str:
-    """Return resource count, or '[red]Error[/red]' for explicit error payloads."""
-    if lst and "error" in lst[0]:
-        return "[red]Error[/red]"
+    """Return resource count."""
     return str(len(lst))
 
 
@@ -89,36 +89,43 @@ def _section_inventory(
     c: Console,
     regions: list[str | None],
     multi_region: bool,
-) -> tuple[Table, list, list, list, list, bool]:
+) -> tuple[Table, ScanResult, ScanResult, ScanResult, ScanResult, bool]:
     """Fetch inventory across all regions; return data for downstream sections."""
-    s3s: list = []
-    ec2s: list = []
-    rdss: list = []
-    lambdas: list = []
+    ec2_region_results: list[ScanResult] = []
+    rds_region_results: list[ScanResult] = []
+    lambda_region_results: list[ScanResult] = []
 
-    def _inv_region(reg: str | None) -> tuple[list, list, list]:
+    def _inv_region(reg: str | None) -> tuple[ScanResult, ScanResult, ScanResult]:
         _ec2 = get_ec2_inventory(region=reg)
         _rds = get_rds_inventory(region=reg)
         _lmb = get_lambda_inventory(region=reg)
         if multi_region and reg is not None:
-            for item in _ec2:
+            for item in _ec2["data"]:
                 item["region"] = reg
-            for item in _rds:
+            for item in _rds["data"]:
                 item["region"] = reg
-            for item in _lmb:
+            for item in _lmb["data"]:
                 item["region"] = reg
         return _ec2, _rds, _lmb
 
     with c.status("[cyan]📦  Scanning inventory...[/cyan]", spinner="dots"):
-        s3s = get_s3_inventory()
+        s3_result = get_s3_inventory()
         with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
             for _ec2, _rds, _lmb in pool.map(_inv_region, regions):
-                ec2s.extend(_ec2)
-                rdss.extend(_rds)
-                lambdas.extend(_lmb)
+                ec2_region_results.append(_ec2)
+                rds_region_results.append(_rds)
+                lambda_region_results.append(_lmb)
+
+    ec2_result = merge_list_results(ec2_region_results)
+    rds_result = merge_list_results(rds_region_results)
+    lambda_result = merge_list_results(lambda_region_results)
+    s3s = s3_result["data"]
+    ec2s = ec2_result["data"]
+    rdss = rds_result["data"]
+    lambdas = lambda_result["data"]
 
     cur_bucket_exists = False
-    if s3s and "error" not in s3s[0]:
+    if s3s:
         cur_bucket_exists = any(
             b.get("BucketName", "").startswith("cur-data-lighthouse-") for b in s3s
         )
@@ -133,7 +140,14 @@ def _section_inventory(
     inv_table.add_row("🪣 S3 Buckets", _count(s3s))
     inv_table.add_row("λ  Lambda", _count(lambdas))
 
-    return inv_table, s3s, ec2s, rdss, lambdas, cur_bucket_exists
+    return (
+        inv_table,
+        s3_result,
+        ec2_result,
+        rds_result,
+        lambda_result,
+        cur_bucket_exists,
+    )
 
 
 def _section_cost_columns(
@@ -143,17 +157,18 @@ def _section_cost_columns(
     account_id: str,
     regions: list[str | None],
     multi_region: bool,
-) -> dict:
+) -> ScanResult:
     """Fetch costs, build trend, and render inventory + cost side-by-side."""
     with c.status(f"[cyan]💰  Fetching costs ({days}d)...[/cyan]", spinner="dots"):
-        costs = get_monthly_cost_summary(days=days)
+        costs_result = get_monthly_cost_summary(days=days)
+    costs = costs_result["data"]
 
     cost_table = Table(
         box=box.SIMPLE_HEAD, show_header=False, padding=(0, 1), show_edge=False
     )
     cost_table.add_column("Service", style="dim")
     cost_table.add_column("USD", justify="right")
-    if "error" not in costs:
+    if costs_result["ok"]:
         cost_table.add_row(
             Text("Total", style="bold white"),
             Text(f"${costs['total_usd']:,.2f}", style="bold yellow"),
@@ -161,10 +176,15 @@ def _section_cost_columns(
         for svc, amt in list(costs.get("breakdown", {}).items())[:6]:
             cost_table.add_row(svc, f"${amt:,.2f}")
     else:
-        cost_table.add_row("Error", costs["error"])
+        err_msg = (
+            costs_result["errors"][0]["message"]
+            if costs_result["errors"]
+            else "Unknown error"
+        )
+        cost_table.add_row("Error", err_msg)
 
     prev_snapshot = db_manager.get_latest_cost_snapshot(account_id)
-    if "error" not in costs:
+    if costs_result["ok"]:
         db_manager.record_cost_snapshot(
             account_id=account_id,
             start=costs["start"],
@@ -174,7 +194,7 @@ def _section_cost_columns(
         )
 
     trend_suffix = ""
-    if prev_snapshot and "error" not in costs:
+    if prev_snapshot and costs_result["ok"]:
         prev_total = prev_snapshot["total_usd"]
         curr_total = costs["total_usd"]
         if prev_total > 0:
@@ -185,7 +205,7 @@ def _section_cost_columns(
                 f"  [{color}]{arrow} {pct:+.1f}%[/{color}] [dim]vs last scan[/dim]"
             )
 
-    period_label = costs.get("period", "—") if "error" not in costs else "—"
+    period_label = costs.get("period", "—")
     inv_region_note = f"  [dim]· {len(regions)} regions[/dim]" if multi_region else ""
     c.print(
         Columns(
@@ -206,14 +226,14 @@ def _section_cost_columns(
         )
     )
     c.print()
-    return costs
+    return costs_result
 
 
-def _section_cost_anomalies(c: Console) -> list:
+def _section_cost_anomalies(c: Console) -> ScanResult:
     """Detect and render cost anomaly panel."""
-    with logger.capture_errors() as errors:
-        with c.status("[cyan]🚨  Detecting cost anomalies...[/cyan]", spinner="dots"):
-            anomalies = detect_cost_anomalies(threshold_pct=50.0)
+    with c.status("[cyan]🚨  Detecting cost anomalies...[/cyan]", spinner="dots"):
+        anomalies_result = detect_cost_anomalies(threshold_pct=50.0)
+    anomalies = anomalies_result["data"]
 
     if anomalies:
         anomaly_table = Table(
@@ -238,7 +258,7 @@ def _section_cost_anomalies(c: Console) -> list:
                 padding=(0, 1),
             )
         )
-    elif errors:
+    elif anomalies_result["errors"]:
         c.print(
             Panel(
                 "[yellow]⚠  Cost anomaly detection is degraded due to API errors.[/yellow]",
@@ -255,17 +275,18 @@ def _section_cost_anomalies(c: Console) -> list:
                 border_style="green",
                 padding=(0, 1),
             )
-        )
+    )
     c.print()
-    return anomalies
+    return anomalies_result
 
 
-def _section_ri_sp_coverage(c: Console, days: int) -> dict:
+def _section_ri_sp_coverage(c: Console, days: int) -> ScanResult:
     """Fetch and render RI / Savings Plan coverage panel."""
     with c.status(
         "[cyan]📊  Checking RI / Savings Plan coverage...[/cyan]", spinner="dots"
     ):
-        ri_sp = get_ri_sp_coverage(days=days)
+        ri_sp_result = get_ri_sp_coverage(days=days)
+    ri_sp = ri_sp_result["data"]
 
     ri_cov = ri_sp.get("ri_coverage_pct")
     ri_util = ri_sp.get("ri_utilization_pct")
@@ -313,7 +334,7 @@ def _section_ri_sp_coverage(c: Console, days: int) -> dict:
         )
     )
     c.print()
-    return ri_sp
+    return ri_sp_result
 
 
 def _section_security(
@@ -322,28 +343,29 @@ def _section_security(
     rdss: list,
     regions: list[str | None],
     multi_region: bool,
-) -> list[SecurityFinding]:
+) -> ScanResult:
     """Run security scan across all regions and render findings panel."""
-    sec_findings: list[SecurityFinding] = []
+    sec_results: list[ScanResult] = []
 
-    def _sec_region(args: tuple[str | None, bool]) -> list[SecurityFinding]:
+    def _sec_region(args: tuple[str | None, bool]) -> ScanResult:
         reg, include_global = args
         _rdss_r = [r for r in rdss if r.get("region") == reg] if multi_region else rdss
         _sec = run_security_scan(
             s3s=s3s, rdss=_rdss_r, region=reg, include_global=include_global
         )
         if multi_region and reg is not None:
-            for f in _sec:
+            for f in _sec["data"]:
                 if "region" not in f:
                     f["region"] = reg
         return _sec
 
     region_args = [(reg, i == 0) for i, reg in enumerate(regions)]
-    with logger.capture_errors() as errors:
-        with c.status("[cyan]🛡️   Running security checks...[/cyan]", spinner="dots"):
-            with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-                for items in pool.map(_sec_region, region_args):
-                    sec_findings.extend(items)
+    with c.status("[cyan]🛡️   Running security checks...[/cyan]", spinner="dots"):
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+            for result in pool.map(_sec_region, region_args):
+                sec_results.append(result)
+    sec_result = merge_list_results(sec_results)
+    sec_findings: list[SecurityFinding] = sec_result["data"]
 
     sec_count = len(sec_findings)
     if sec_count:
@@ -366,13 +388,13 @@ def _section_security(
                 sec_table,
                 title=(
                     f"[bold red]🛡️  Security[/bold red]  [dim]{sec_count} finding{'s' if sec_count != 1 else ''}[/dim]"
-                    + ("  [yellow]degraded[/yellow]" if errors else "")
+                    + ("  [yellow]degraded[/yellow]" if sec_result["errors"] else "")
                 ),
                 border_style="red",
                 padding=(0, 1),
             )
         )
-    elif errors:
+    elif sec_result["errors"]:
         c.print(
             Panel(
                 "[yellow]⚠  Security scan is degraded due to API errors. Findings may be incomplete.[/yellow]",
@@ -391,14 +413,14 @@ def _section_security(
             )
         )
     c.print()
-    return sec_findings
+    return sec_result
 
 
-def _section_iam(c: Console) -> list:
+def _section_iam(c: Console) -> ScanResult:
     """Scan for over-permissive IAM policies and render findings panel."""
-    with logger.capture_errors() as errors:
-        with c.status("[cyan]🔑  Scanning IAM policies...[/cyan]", spinner="dots"):
-            iam_findings = detect_overpermissive_iam()
+    with c.status("[cyan]🔑  Scanning IAM policies...[/cyan]", spinner="dots"):
+        iam_result = cast(ScanResult, detect_overpermissive_iam())
+    iam_findings = iam_result["data"]
 
     iam_count = len(iam_findings)
     if iam_count:
@@ -427,7 +449,7 @@ def _section_iam(c: Console) -> list:
                 padding=(0, 1),
             )
         )
-    elif errors:
+    elif iam_result["errors"]:
         c.print(
             Panel(
                 "[yellow]⚠  IAM policy scan is degraded due to API errors.[/yellow]",
@@ -446,31 +468,30 @@ def _section_iam(c: Console) -> list:
             )
         )
     c.print()
-    return iam_findings
+    return iam_result
 
 
 def _section_cloudwatch(
     c: Console,
     regions: list[str | None],
     multi_region: bool,
-) -> list:
+) -> ScanResult:
     """Check CloudWatch alarm coverage across all regions and render panel."""
-    cw_findings: list = []
+    cw_results: list[ScanResult] = []
 
-    def _cw_region(reg: str | None) -> list:
+    def _cw_region(reg: str | None) -> ScanResult:
         _cw = detect_cloudwatch_gaps(region=reg)
         if multi_region and reg is not None:
-            for f in _cw:
+            for f in _cw["data"]:
                 f["region"] = reg
-        return _cw
+        return cast(ScanResult, _cw)
 
-    with logger.capture_errors() as errors:
-        with c.status(
-            "[cyan]📡  Checking CloudWatch alarm coverage...[/cyan]", spinner="dots"
-        ):
-            with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-                for items in pool.map(_cw_region, regions):
-                    cw_findings.extend(items)
+    with c.status("[cyan]📡  Checking CloudWatch alarm coverage...[/cyan]", spinner="dots"):
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+            for result in pool.map(_cw_region, regions):
+                cw_results.append(result)
+    cw_result = merge_list_results(cw_results)
+    cw_findings = cw_result["data"]
 
     cw_count = len(cw_findings)
     if cw_count:
@@ -499,7 +520,7 @@ def _section_cloudwatch(
                 padding=(0, 1),
             )
         )
-    elif errors:
+    elif cw_result["errors"]:
         c.print(
             Panel(
                 "[yellow]⚠  CloudWatch alarm coverage scan is degraded due to API errors.[/yellow]",
@@ -518,29 +539,30 @@ def _section_cloudwatch(
             )
         )
     c.print()
-    return cw_findings
+    return cw_result
 
 
 def _section_cost_waste(
     c: Console,
     regions: list[str | None],
     multi_region: bool,
-) -> list[CostFinding]:
+) -> ScanResult:
     """Scan for cost waste across all regions and render findings panel."""
-    cost_findings: list[CostFinding] = []
+    cost_results: list[ScanResult] = []
 
-    def _cost_region(reg: str | None) -> list[CostFinding]:
+    def _cost_region(reg: str | None) -> ScanResult:
         _cost = run_cost_scan(region=reg)
         if multi_region and reg is not None:
-            for f in _cost:
+            for f in _cost["data"]:
                 f["region"] = reg
-        return _cost
+        return cast(ScanResult, _cost)
 
-    with logger.capture_errors() as errors:
-        with c.status("[cyan]🗑️   Scanning for cost waste...[/cyan]", spinner="dots"):
-            with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-                for items in pool.map(_cost_region, regions):
-                    cost_findings.extend(items)
+    with c.status("[cyan]🗑️   Scanning for cost waste...[/cyan]", spinner="dots"):
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+            for result in pool.map(_cost_region, regions):
+                cost_results.append(result)
+    cost_result = merge_list_results(cost_results)
+    cost_findings: list[CostFinding] = cost_result["data"]
 
     waste_count = len(cost_findings)
     if waste_count:
@@ -565,7 +587,7 @@ def _section_cost_waste(
                 padding=(0, 1),
             )
         )
-    elif errors:
+    elif cost_result["errors"]:
         c.print(
             Panel(
                 "[yellow]⚠  Cost waste scan is degraded due to API errors.[/yellow]",
@@ -584,32 +606,33 @@ def _section_cost_waste(
             )
         )
     c.print()
-    return cost_findings
+    return cost_result
 
 
 def _section_tagging(
     c: Console,
     regions: list[str | None],
     multi_region: bool,
-) -> list:
+) -> ScanResult:
     """Check tagging compliance across all regions and render panel."""
-    tag_findings: list = []
+    tag_results: list[ScanResult] = []
 
-    def _tag_region(args: tuple[str | None, bool]) -> list:
+    def _tag_region(args: tuple[str | None, bool]) -> ScanResult:
         reg, include_s3 = args
         _tag = check_tagging_compliance(region=reg, include_s3=include_s3)
         if multi_region and reg is not None:
-            for f in _tag:
+            for f in _tag["data"]:
                 if "region" not in f:
                     f["region"] = reg
-        return _tag
+        return cast(ScanResult, _tag)
 
     tag_args = [(reg, i == 0) for i, reg in enumerate(regions)]
-    with logger.capture_errors() as errors:
-        with c.status("[cyan]🏷️   Checking tag compliance...[/cyan]", spinner="dots"):
-            with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-                for items in pool.map(_tag_region, tag_args):
-                    tag_findings.extend(items)
+    with c.status("[cyan]🏷️   Checking tag compliance...[/cyan]", spinner="dots"):
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+            for result in pool.map(_tag_region, tag_args):
+                tag_results.append(result)
+    tag_result = merge_list_results(tag_results)
+    tag_findings = tag_result["data"]
 
     tag_count = len(tag_findings)
     if tag_count:
@@ -638,7 +661,7 @@ def _section_tagging(
                 padding=(0, 1),
             )
         )
-    elif errors:
+    elif tag_result["errors"]:
         c.print(
             Panel(
                 "[yellow]⚠  Tagging compliance scan is degraded due to API errors.[/yellow]",
@@ -657,12 +680,12 @@ def _section_tagging(
             )
         )
     c.print()
-    return tag_findings
+    return tag_result
 
 
 def _section_lambda_detail(c: Console, lambdas: list) -> None:
     """Render Lambda function detail panel if any valid functions exist."""
-    valid_lambdas = [fn for fn in lambdas if "error" not in fn]
+    valid_lambdas = [fn for fn in lambdas if isinstance(fn, dict) and "FunctionName" in fn]
     if not valid_lambdas:
         return
 
@@ -860,6 +883,11 @@ def analyze(
         "-o",
         help="Output format: text (default) or json",
     ),
+    json_schema: str = typer.Option(
+        "v1",
+        "--json-schema",
+        help="JSON schema version for --output json: v1 (legacy payloads) or v2 (typed envelopes).",
+    ),
     interactive: bool = typer.Option(
         False,
         "--interactive/--no-interactive",
@@ -868,6 +896,9 @@ def analyze(
 ) -> None:
     """Retrieve read-only state (inventory, cost, security) and render a dashboard."""
     json_mode = output == "json"
+    schema = json_schema.lower().strip()
+    if schema not in {"v1", "v2"}:
+        raise typer.BadParameter("--json-schema must be either 'v1' or 'v2'")
     # In JSON mode send all Rich output to a buffer so nothing leaks to stdout.
     c = Console(file=io.StringIO(), no_color=True) if json_mode else logger.console
     original_logger_console = logger.console
@@ -892,6 +923,7 @@ def analyze(
         c.print()
 
         # Regions
+        region_errors = []
         if region:
             regions: list[str | None] = [region]
             c.print(f"  [dim]🌍 Region[/dim]  [bold]{region}[/bold]")
@@ -900,7 +932,9 @@ def analyze(
             with c.status(
                 "[cyan]🌍  Detecting enabled regions...[/cyan]", spinner="dots"
             ):
-                regions = list(get_enabled_regions())
+                region_result = get_enabled_regions()
+            regions = list(region_result["data"])
+            region_errors.extend(region_result["errors"])
             if not regions:
                 regions = [None]
 
@@ -914,49 +948,103 @@ def analyze(
 
         # Sections — all section functions return their data; rendering is a side-effect
         # that goes to the devnull console when json_mode is True.
-        inv_table, s3s, ec2s, rdss, lambdas, cur_bucket_exists = _section_inventory(
+        (
+            inv_table,
+            s3_result,
+            ec2_result,
+            rds_result,
+            lambda_result,
+            cur_bucket_exists,
+        ) = _section_inventory(
             c, regions, multi_region
         )
-        costs = _section_cost_columns(
+        inventory_result = error_result(
+            data={
+                "ec2": ec2_result["data"],
+                "rds": rds_result["data"],
+                "s3": s3_result["data"],
+                "lambda": lambda_result["data"],
+            },
+            errors=[
+                *s3_result["errors"],
+                *ec2_result["errors"],
+                *rds_result["errors"],
+                *lambda_result["errors"],
+            ],
+        )
+        costs_result = _section_cost_columns(
             c, inv_table, days, account_id, regions, multi_region
         )
-        anomalies = _section_cost_anomalies(c)
-        ri_sp = _section_ri_sp_coverage(c, days)
-        sec_findings = _section_security(c, s3s, rdss, regions, multi_region)
-        iam_findings = _section_iam(c)
-        cw_findings = _section_cloudwatch(c, regions, multi_region)
-        cost_findings = _section_cost_waste(c, regions, multi_region)
-        tag_findings = _section_tagging(c, regions, multi_region)
+        anomalies_result = _section_cost_anomalies(c)
+        ri_sp_result = _section_ri_sp_coverage(c, days)
+        sec_result = _section_security(
+            c, s3_result["data"], rds_result["data"], regions, multi_region
+        )
+        iam_result = _section_iam(c)
+        cw_result = _section_cloudwatch(c, regions, multi_region)
+        cost_waste_result = _section_cost_waste(c, regions, multi_region)
+        tag_result = _section_tagging(c, regions, multi_region)
+        sec_findings: list[SecurityFinding] = sec_result["data"]
+        cost_findings: list[CostFinding] = cost_waste_result["data"]
 
         if json_mode:
+            section_results = {
+                "inventory": inventory_result,
+                "costs": costs_result,
+                "cost_anomalies": anomalies_result,
+                "ri_sp_coverage": ri_sp_result,
+                "security_findings": sec_result,
+                "iam_findings": iam_result,
+                "cloudwatch_findings": cw_result,
+                "cost_waste": cost_waste_result,
+                "tagging_findings": tag_result,
+            }
+            all_errors = list(region_errors)
+            degraded_sections: list[str] = []
+            for section_name, section_result in section_results.items():
+                all_errors.extend(section_result["errors"])
+                if section_result["errors"]:
+                    degraded_sections.append(section_name)
+            overall_result = error_result(
+                data={
+                    "degraded_sections": degraded_sections,
+                    "error_count": len(all_errors),
+                },
+                errors=all_errors,
+            )
             print(
                 json.dumps(
-                    {
-                        "account_id": account_id,
-                        "scanned_at": datetime.now().isoformat(),
-                        "regions": [r for r in regions if r],
-                        "inventory": {
-                            "ec2": ec2s,
-                            "rds": rdss,
-                            "s3": s3s,
-                            "lambda": lambdas,
-                        },
-                        "costs": costs,
-                        "cost_anomalies": anomalies,
-                        "ri_sp_coverage": ri_sp,
-                        "security_findings": sec_findings,
-                        "iam_findings": iam_findings,
-                        "cloudwatch_findings": cw_findings,
-                        "cost_waste": cost_findings,
-                        "tagging_findings": tag_findings,
-                    },
+                    (
+                        {
+                            "account_id": account_id,
+                            "scanned_at": datetime.now().isoformat(),
+                            "regions": [r for r in regions if r],
+                            "inventory": inventory_result["data"],
+                            "costs": costs_result["data"],
+                            "cost_anomalies": anomalies_result["data"],
+                            "ri_sp_coverage": ri_sp_result["data"],
+                            "security_findings": sec_result["data"],
+                            "iam_findings": iam_result["data"],
+                            "cloudwatch_findings": cw_result["data"],
+                            "cost_waste": cost_waste_result["data"],
+                            "tagging_findings": tag_result["data"],
+                        }
+                        if schema == "v1"
+                        else {
+                            "account_id": account_id,
+                            "scanned_at": datetime.now().isoformat(),
+                            "regions": [r for r in regions if r],
+                            "overall": overall_result,
+                            **section_results,
+                        }
+                    ),
                     indent=2,
                     default=str,
                 )
             )
             return
 
-        _section_lambda_detail(c, lambdas)
+        _section_lambda_detail(c, lambda_result["data"])
         if interactive:
             _section_remediation(c, sec_findings, cost_findings)
             _section_cur_upsell(c, cur_bucket_exists, account_id)
