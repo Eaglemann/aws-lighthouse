@@ -1047,6 +1047,36 @@ class TestWatchCommand:
         assert "delta" in payload
         assert payload["delta"]["baseline_found"] is False
 
+    def test_watch_json_v2_emits_valid_json_line(self):
+        runner = CliRunner()
+        with (
+            patch(
+                "aws_lighthouse.cli._run_analyze_cycle",
+                return_value=self._payload(),
+            ),
+            patch("aws_lighthouse.cli.time.sleep", side_effect=KeyboardInterrupt),
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "watch",
+                    "--output",
+                    "json",
+                    "--json-schema",
+                    "v2",
+                    "--interval-hours",
+                    "0.001",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        lines = [line for line in result.output.splitlines() if line.strip()]
+        assert len(lines) == 1
+        payload = json.loads(lines[0])
+        assert payload["account_id"] == "123456789012"
+        assert payload["overall"]["ok"] is True
+        assert payload["delta"]["ok"] is True
+
     def test_watch_text_continues_after_cycle_error(self):
         runner = CliRunner()
         with (
@@ -1099,6 +1129,41 @@ class TestWatchCommand:
         assert first["cycle"] == 1
         assert first["message"] == "boom"
         assert second["account_id"] == "123456789012"
+
+    def test_watch_json_v2_mixed_stream_lines_are_parseable(self):
+        runner = CliRunner()
+        with (
+            patch(
+                "aws_lighthouse.cli._run_analyze_cycle",
+                side_effect=[RuntimeError("boom"), self._payload()],
+            ),
+            patch(
+                "aws_lighthouse.cli.time.sleep", side_effect=[None, KeyboardInterrupt]
+            ),
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "watch",
+                    "--output",
+                    "json",
+                    "--json-schema",
+                    "v2",
+                    "--interval-hours",
+                    "0.001",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        lines = [line for line in result.output.splitlines() if line.strip()]
+        assert len(lines) == 2
+        first = json.loads(lines[0])
+        second = json.loads(lines[1])
+        assert first["event"] == "error"
+        assert first["cycle"] == 1
+        assert first["message"] == "boom"
+        assert second["account_id"] == "123456789012"
+        assert second["overall"]["ok"] is True
 
     def test_watch_rejects_invalid_interval(self):
         runner = CliRunner()
