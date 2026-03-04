@@ -4,14 +4,15 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from ..auth import get_client
 from ..logger import logger
-from ..types import CostAnomaly
+from ..scan_contract import error_result, ok_result, scan_error_from_exception
+from ..types import CostAnomaly, ScanResult
 
 # Minimum baseline spend (USD) for a service to be evaluated.
 # Avoids noise from $0.01 → $0.02 triggering a 100% "anomaly".
 _MIN_BASELINE_USD = 1.0
 
 
-def detect_cost_anomalies(threshold_pct: float = 50.0) -> list[CostAnomaly]:
+def detect_cost_anomalies(threshold_pct: float = 50.0) -> ScanResult:
     """
     Compare the last 7 days of per-service spend against the prior 7-day baseline.
     Returns services whose recent spend exceeds the baseline by more than threshold_pct.
@@ -33,7 +34,16 @@ def detect_cost_anomalies(threshold_pct: float = 50.0) -> list[CostAnomaly]:
         )
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to fetch cost data for anomaly detection: {e}")
-        return []
+        return error_result(
+            data=[],
+            errors=[
+                scan_error_from_exception(
+                    service="ce",
+                    operation="GetCostAndUsage",
+                    exc=e,
+                )
+            ],
+        )
 
     baseline: dict[str, float] = {}
     recent: dict[str, float] = {}
@@ -66,4 +76,4 @@ def detect_cost_anomalies(threshold_pct: float = 50.0) -> list[CostAnomaly]:
             )
 
     anomalies.sort(key=lambda x: float(x["pct_change"]), reverse=True)
-    return anomalies
+    return ok_result(anomalies)

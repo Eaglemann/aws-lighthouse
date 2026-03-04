@@ -8,10 +8,16 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from ..auth import get_aws_client, get_client
 from ..logger import logger
-from ..types import SecurityFinding
+from ..scan_contract import (
+    error_result,
+    merge_list_results,
+    ok_result,
+    scan_error_from_exception,
+)
+from ..types import ScanResult, SecurityFinding
 
 
-def _get_credential_report(iam) -> list[dict]:
+def _get_credential_report(iam) -> ScanResult:
     """Generate and return the IAM credential report as a list of row dicts.
 
     Polls generate_credential_report until State == COMPLETE (max 10 × 2 s).
@@ -24,36 +30,68 @@ def _get_credential_report(iam) -> list[dict]:
             time.sleep(2)
         else:
             logger.error("IAM credential report did not complete in time")
-            return []
+            return error_result(
+                data=[],
+                errors=[
+                    {
+                        "code": "CredentialReportTimeout",
+                        "message": "IAM credential report did not complete in time",
+                        "service": "iam",
+                        "operation": "GenerateCredentialReport",
+                        "retryable": True,
+                    }
+                ],
+            )
         report = iam.get_credential_report()
         content = report["Content"]
         if isinstance(content, bytes):
             content = content.decode("utf-8")
-        return list(csv.DictReader(io.StringIO(content)))
+        return ok_result(list(csv.DictReader(io.StringIO(content))))
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to get IAM credential report: {e}")
-        return []
+        return error_result(
+            data=[],
+            errors=[
+                scan_error_from_exception(
+                    service="iam",
+                    operation="GetCredentialReport",
+                    exc=e,
+                )
+            ],
+        )
 
 
-def _check_root_mfa() -> list[SecurityFinding]:
+def _check_root_mfa() -> ScanResult:
     """Check whether the root account has MFA enabled."""
     try:
         iam = get_aws_client("iam")
         summary = iam.get_account_summary().get("SummaryMap", {})
         if not summary.get("AccountMFAEnabled", 0):
-            return [
-                {
-                    "severity": "HIGH",
-                    "resource": "root",
-                    "finding": "Root account does not have MFA enabled",
-                }
-            ]
+            return ok_result(
+                [
+                    {
+                        "severity": "HIGH",
+                        "resource": "root",
+                        "finding": "Root account does not have MFA enabled",
+                    }
+                ]
+            )
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check root MFA: {e}")
-    return []
+        return error_result(
+            data=[],
+            errors=[
+                scan_error_from_exception(
+                    service="iam",
+                    operation="GetAccountSummary",
+                    exc=e,
+                )
+            ],
+        )
+    return ok_result([])
 
 
-def _check_open_security_groups(ec2) -> list[SecurityFinding]:
+def _check_open_security_groups(ec2, region: str | None = None) -> ScanResult:
     """Flag security groups that allow unrestricted ingress on SSH (22) or RDP (3389)."""
     findings: list[SecurityFinding] = []
     try:
@@ -88,10 +126,21 @@ def _check_open_security_groups(ec2) -> list[SecurityFinding]:
                             )
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check security groups: {e}")
-    return findings
+        return error_result(
+            data=findings,
+            errors=[
+                scan_error_from_exception(
+                    service="ec2",
+                    operation="DescribeSecurityGroups",
+                    exc=e,
+                    region=region,
+                )
+            ],
+        )
+    return ok_result(findings)
 
 
-def _check_iam_users_mfa() -> list[SecurityFinding]:
+def _check_iam_users_mfa() -> ScanResult:
     """Flag IAM users with console access (password_enabled) but no MFA device.
 
     Uses the IAM credential report (2 API calls) instead of per-user
@@ -100,7 +149,8 @@ def _check_iam_users_mfa() -> list[SecurityFinding]:
     findings: list[SecurityFinding] = []
     try:
         iam = get_aws_client("iam")
-        for row in _get_credential_report(iam):
+        report = _get_credential_report(iam)
+        for row in report["data"]:
             username = row.get("user", "")
             if username == "<root_account>":
                 continue
@@ -117,10 +167,20 @@ def _check_iam_users_mfa() -> list[SecurityFinding]:
                 )
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check IAM user MFA: {e}")
-    return findings
+        return error_result(
+            data=findings,
+            errors=[
+                scan_error_from_exception(
+                    service="iam",
+                    operation="GenerateCredentialReport",
+                    exc=e,
+                )
+            ],
+        )
+    return error_result(data=findings, errors=report["errors"])
 
 
-def _check_iam_key_age() -> list[SecurityFinding]:
+def _check_iam_key_age() -> ScanResult:
     """Flag active IAM access keys older than 90 days.
 
     Uses the IAM credential report (2 API calls) instead of per-user
@@ -130,7 +190,8 @@ def _check_iam_key_age() -> list[SecurityFinding]:
     try:
         iam = get_aws_client("iam")
         now = datetime.now(UTC)
-        for row in _get_credential_report(iam):
+        report = _get_credential_report(iam)
+        for row in report["data"]:
             username = row.get("user", "")
             if username == "<root_account>":
                 continue
@@ -151,31 +212,44 @@ def _check_iam_key_age() -> list[SecurityFinding]:
                     )
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check IAM access key age: {e}")
-    return findings
+        return error_result(
+            data=findings,
+            errors=[
+                scan_error_from_exception(
+                    service="iam",
+                    operation="GenerateCredentialReport",
+                    exc=e,
+                )
+            ],
+        )
+    return error_result(data=findings, errors=report["errors"])
 
 
-def _check_public_rds(rdss: list[dict[str, Any]]) -> list[SecurityFinding]:
+def _check_public_rds(rdss: list[dict[str, Any]]) -> ScanResult:
     """Flag RDS instances that are publicly accessible."""
-    return [
-        {
-            "severity": "HIGH",
-            "resource": db["DBInstanceIdentifier"],
-            "finding": f"RDS instance is publicly accessible (engine: {db['Engine']}, class: {db['Class']})",
-        }
-        for db in rdss
-        if "error" not in db and db.get("PubliclyAccessible")
-    ]
+    return ok_result(
+        [
+            {
+                "severity": "HIGH",
+                "resource": db["DBInstanceIdentifier"],
+                "finding": f"RDS instance is publicly accessible (engine: {db['Engine']}, class: {db['Class']})",
+            }
+            for db in rdss
+            if db.get("PubliclyAccessible")
+        ]
+    )
 
 
-def _check_s3_block_public_access(s3s: list[dict[str, Any]]) -> list[SecurityFinding]:
+def _check_s3_block_public_access(s3s: list[dict[str, Any]]) -> ScanResult:
     """Flag S3 buckets that do not have Block Public Access fully enabled."""
     findings: list[SecurityFinding] = []
+    errors = []
     try:
         s3 = get_aws_client("s3")
         for bucket in s3s:
-            if "error" in bucket:
+            name = bucket.get("BucketName")
+            if not name:
                 continue
-            name = bucket["BucketName"]
             try:
                 block = s3.get_public_access_block(Bucket=name)[
                     "PublicAccessBlockConfiguration"
@@ -211,20 +285,36 @@ def _check_s3_block_public_access(s3s: list[dict[str, Any]]) -> list[SecurityFin
                             "remediation_label": "Enable S3 Block Public Access",
                         }
                     )
+                else:
+                    errors.append(
+                        scan_error_from_exception(
+                            service="s3",
+                            operation="GetPublicAccessBlock",
+                            exc=e,
+                        )
+                    )
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check S3 public access: {e}")
-    return findings
+        errors.append(
+            scan_error_from_exception(
+                service="s3",
+                operation="GetPublicAccessBlock",
+                exc=e,
+            )
+        )
+    return error_result(data=findings, errors=errors)
 
 
-def _check_s3_encryption(s3s: list[dict[str, Any]]) -> list[SecurityFinding]:
+def _check_s3_encryption(s3s: list[dict[str, Any]]) -> ScanResult:
     """Flag S3 buckets that have no default server-side encryption rule."""
     findings: list[SecurityFinding] = []
+    errors = []
     try:
         s3 = get_aws_client("s3")
         for bucket in s3s:
-            if "error" in bucket:
+            name = bucket.get("BucketName")
+            if not name:
                 continue
-            name = bucket["BucketName"]
             try:
                 rules = (
                     s3.get_bucket_encryption(Bucket=name)
@@ -255,12 +345,27 @@ def _check_s3_encryption(s3s: list[dict[str, Any]]) -> list[SecurityFinding]:
                             "remediation_label": "Enable S3 Default Encryption",
                         }
                     )
+                else:
+                    errors.append(
+                        scan_error_from_exception(
+                            service="s3",
+                            operation="GetBucketEncryption",
+                            exc=e,
+                        )
+                    )
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check S3 encryption: {e}")
-    return findings
+        errors.append(
+            scan_error_from_exception(
+                service="s3",
+                operation="GetBucketEncryption",
+                exc=e,
+            )
+        )
+    return error_result(data=findings, errors=errors)
 
 
-def _check_imdsv2(ec2) -> list[SecurityFinding]:
+def _check_imdsv2(ec2, region: str | None = None) -> ScanResult:
     """Flag EC2 instances that still allow IMDSv1 (HttpTokens != required)."""
     findings: list[SecurityFinding] = []
     try:
@@ -293,10 +398,21 @@ def _check_imdsv2(ec2) -> list[SecurityFinding]:
                         )
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check IMDSv2 enforcement: {e}")
-    return findings
+        return error_result(
+            data=findings,
+            errors=[
+                scan_error_from_exception(
+                    service="ec2",
+                    operation="DescribeInstances",
+                    exc=e,
+                    region=region,
+                )
+            ],
+        )
+    return ok_result(findings)
 
 
-def _check_ebs_encryption(ec2) -> list[SecurityFinding]:
+def _check_ebs_encryption(ec2, region: str | None = None) -> ScanResult:
     """Flag EBS volumes that are not encrypted at rest."""
     findings: list[SecurityFinding] = []
     try:
@@ -316,22 +432,35 @@ def _check_ebs_encryption(ec2) -> list[SecurityFinding]:
                     )
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check EBS encryption: {e}")
-    return findings
+        return error_result(
+            data=findings,
+            errors=[
+                scan_error_from_exception(
+                    service="ec2",
+                    operation="DescribeVolumes",
+                    exc=e,
+                    region=region,
+                )
+            ],
+        )
+    return ok_result(findings)
 
 
-def _check_cloudtrail(ct) -> list[SecurityFinding]:
+def _check_cloudtrail(ct, region: str | None = None) -> ScanResult:
     """Check that CloudTrail is configured and actively logging in this region."""
     findings: list[SecurityFinding] = []
     try:
         trails = ct.describe_trails(includeShadowTrails=False).get("trailList", [])
         if not trails:
-            return [
-                {
-                    "severity": "HIGH",
-                    "resource": "cloudtrail",
-                    "finding": "No CloudTrail trails configured in this region",
-                }
-            ]
+            return ok_result(
+                [
+                    {
+                        "severity": "HIGH",
+                        "resource": "cloudtrail",
+                        "finding": "No CloudTrail trails configured in this region",
+                    }
+                ]
+            )
         for trail in trails:
             status = ct.get_trail_status(Name=trail["TrailARN"])
             if not status.get("IsLogging"):
@@ -346,38 +475,64 @@ def _check_cloudtrail(ct) -> list[SecurityFinding]:
                 )
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check CloudTrail: {e}")
-    return findings
+        return error_result(
+            data=findings,
+            errors=[
+                scan_error_from_exception(
+                    service="cloudtrail",
+                    operation="DescribeTrails",
+                    exc=e,
+                    region=region,
+                )
+            ],
+        )
+    return ok_result(findings)
 
 
-def _check_guardduty_enabled(gd) -> list[SecurityFinding]:
+def _check_guardduty_enabled(gd, region: str | None = None) -> ScanResult:
     """Check that GuardDuty is enabled in this region."""
     try:
         detector_ids = gd.list_detectors().get("DetectorIds", [])
         if not detector_ids:
-            return [
-                {
-                    "severity": "HIGH",
-                    "resource": "guardduty",
-                    "finding": "GuardDuty is not enabled in this region",
-                    "remediation_type": "enable_guardduty",
-                    "remediation_label": "Enable GuardDuty",
-                }
-            ]
-        for detector_id in detector_ids:
-            det = gd.get_detector(DetectorId=detector_id)
-            if det.get("Status") != "ENABLED":
-                return [
+            return ok_result(
+                [
                     {
                         "severity": "HIGH",
-                        "resource": detector_id,
-                        "finding": "GuardDuty detector exists but is not enabled",
+                        "resource": "guardduty",
+                        "finding": "GuardDuty is not enabled in this region",
                         "remediation_type": "enable_guardduty",
                         "remediation_label": "Enable GuardDuty",
                     }
                 ]
+            )
+        for detector_id in detector_ids:
+            det = gd.get_detector(DetectorId=detector_id)
+            if det.get("Status") != "ENABLED":
+                return ok_result(
+                    [
+                        {
+                            "severity": "HIGH",
+                            "resource": detector_id,
+                            "finding": "GuardDuty detector exists but is not enabled",
+                            "remediation_type": "enable_guardduty",
+                            "remediation_label": "Enable GuardDuty",
+                        }
+                    ]
+                )
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check GuardDuty: {e}")
-    return []
+        return error_result(
+            data=[],
+            errors=[
+                scan_error_from_exception(
+                    service="guardduty",
+                    operation="ListDetectors",
+                    exc=e,
+                    region=region,
+                )
+            ],
+        )
+    return ok_result([])
 
 
 def run_security_scan(
@@ -385,7 +540,7 @@ def run_security_scan(
     rdss: list[dict[str, Any]],
     region: str | None = None,
     include_global: bool = True,
-) -> list[SecurityFinding]:
+) -> ScanResult:
     """Run security checks and return a unified list of findings.
 
     include_global controls whether account-wide checks (root MFA, IAM key age,
@@ -396,18 +551,18 @@ def run_security_scan(
     def _cl(svc):
         return get_client(svc, region)
 
-    findings: list[SecurityFinding] = []
+    results: list[ScanResult] = []
     if include_global:
-        findings.extend(_check_root_mfa())
-        findings.extend(_check_iam_users_mfa())
-        findings.extend(_check_iam_key_age())
-        findings.extend(_check_s3_block_public_access(s3s))
-        findings.extend(_check_s3_encryption(s3s))
+        results.append(_check_root_mfa())
+        results.append(_check_iam_users_mfa())
+        results.append(_check_iam_key_age())
+        results.append(_check_s3_block_public_access(s3s))
+        results.append(_check_s3_encryption(s3s))
     ec2 = _cl("ec2")
-    findings.extend(_check_open_security_groups(ec2))
-    findings.extend(_check_imdsv2(ec2))
-    findings.extend(_check_ebs_encryption(ec2))
-    findings.extend(_check_public_rds(rdss))
-    findings.extend(_check_cloudtrail(_cl("cloudtrail")))
-    findings.extend(_check_guardduty_enabled(_cl("guardduty")))
-    return findings
+    results.append(_check_open_security_groups(ec2, region))
+    results.append(_check_imdsv2(ec2, region))
+    results.append(_check_ebs_encryption(ec2, region))
+    results.append(_check_public_rds(rdss))
+    results.append(_check_cloudtrail(_cl("cloudtrail"), region))
+    results.append(_check_guardduty_enabled(_cl("guardduty"), region))
+    return merge_list_results(results)

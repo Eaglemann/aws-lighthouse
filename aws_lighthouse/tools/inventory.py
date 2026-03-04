@@ -5,16 +5,18 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from ..auth import get_client
 from ..logger import logger
+from ..scan_contract import error_result, ok_result, scan_error_from_exception
+from ..types import ScanResult
 
 _LAMBDA_STALE_DAYS = 180
 
 
-def get_s3_inventory() -> list[dict[str, Any]]:
+def get_s3_inventory() -> ScanResult:
     """List S3 buckets and basic stats."""
     s3 = get_client("s3")
+    buckets: list[dict[str, Any]] = []
     try:
         response = s3.list_buckets()
-        buckets = []
         for bucket in response.get("Buckets", []):
             buckets.append(
                 {
@@ -24,16 +26,25 @@ def get_s3_inventory() -> list[dict[str, Any]]:
                     ),
                 }
             )
-        return buckets
+        return ok_result(buckets)
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to list S3 buckets: {str(e)}")
-        return [{"error": str(e)}]
+        return error_result(
+            data=buckets,
+            errors=[
+                scan_error_from_exception(
+                    service="s3",
+                    operation="ListBuckets",
+                    exc=e,
+                )
+            ],
+        )
 
 
-def get_ec2_inventory(region: str | None = None) -> list[dict[str, Any]]:
+def get_ec2_inventory(region: str | None = None) -> ScanResult:
     """Retrieve all EC2 instances and state."""
     ec2 = get_client("ec2", region)
-    instances = []
+    instances: list[dict[str, Any]] = []
     try:
         paginator = ec2.get_paginator("describe_instances")
         for page in paginator.paginate():
@@ -58,16 +69,26 @@ def get_ec2_inventory(region: str | None = None) -> list[dict[str, Any]]:
                             "KeyName": inst.get("KeyName", "None"),
                         }
                     )
-        return instances
+        return ok_result(instances)
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to list EC2 instances: {str(e)}")
-        return [{"error": str(e)}]
+        return error_result(
+            data=instances,
+            errors=[
+                scan_error_from_exception(
+                    service="ec2",
+                    operation="DescribeInstances",
+                    exc=e,
+                    region=region,
+                )
+            ],
+        )
 
 
-def get_rds_inventory(region: str | None = None) -> list[dict[str, Any]]:
+def get_rds_inventory(region: str | None = None) -> ScanResult:
     """Retrieve all RDS instances and basic metrics."""
     rds = get_client("rds", region)
-    instances = []
+    instances: list[dict[str, Any]] = []
     try:
         paginator = rds.get_paginator("describe_db_instances")
         for page in paginator.paginate():
@@ -78,19 +99,29 @@ def get_rds_inventory(region: str | None = None) -> list[dict[str, Any]]:
                         "Engine": db.get("Engine"),
                         "Class": db.get("DBInstanceClass"),
                         "Status": db.get("DBInstanceStatus"),
-                        "PubliclyAccessible": db.get("PubliclyAccessible", False),
-                    }
-                )
-        return instances
+                            "PubliclyAccessible": db.get("PubliclyAccessible", False),
+                        }
+                    )
+        return ok_result(instances)
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to list RDS instances: {str(e)}")
-        return [{"error": str(e)}]
+        return error_result(
+            data=instances,
+            errors=[
+                scan_error_from_exception(
+                    service="rds",
+                    operation="DescribeDBInstances",
+                    exc=e,
+                    region=region,
+                )
+            ],
+        )
 
 
-def get_lambda_inventory(region: str | None = None) -> list[dict[str, Any]]:
+def get_lambda_inventory(region: str | None = None) -> ScanResult:
     """List all Lambda functions with runtime, memory, timeout, code size, and staleness flag."""
     lmb = get_client("lambda", region)
-    functions = []
+    functions: list[dict[str, Any]] = []
     cutoff = datetime.now(UTC) - timedelta(days=_LAMBDA_STALE_DAYS)
     try:
         paginator = lmb.get_paginator("list_functions")
@@ -117,9 +148,19 @@ def get_lambda_inventory(region: str | None = None) -> list[dict[str, Any]]:
                         "CodeSizeMB": round(fn.get("CodeSize", 0) / 1_048_576, 2),
                         "LastModified": last_modified,
                         "Stale": stale,
-                    }
-                )
-        return functions
+                        }
+                    )
+        return ok_result(functions)
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to list Lambda functions: {str(e)}")
-        return [{"error": str(e)}]
+        return error_result(
+            data=functions,
+            errors=[
+                scan_error_from_exception(
+                    service="lambda",
+                    operation="ListFunctions",
+                    exc=e,
+                    region=region,
+                )
+            ],
+        )

@@ -2,7 +2,8 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from ..auth import get_client
 from ..logger import logger
-from ..types import TagFinding
+from ..scan_contract import error_result, scan_error_from_exception
+from ..types import ScanError, ScanResult, TagFinding
 
 # Default tags every resource should carry
 DEFAULT_REQUIRED_TAGS = ["Environment", "Owner"]
@@ -12,7 +13,7 @@ def check_tagging_compliance(
     required_tags: list[str] | None = None,
     region: str | None = None,
     include_s3: bool = True,
-) -> list[TagFinding]:
+) -> ScanResult:
     """
     Check EC2 instances, RDS databases, Lambda functions, and S3 buckets for
     missing required tags. Returns one finding per resource that is missing at
@@ -28,6 +29,7 @@ def check_tagging_compliance(
         return get_client(svc, region)
 
     findings: list[TagFinding] = []
+    errors: list[ScanError] = []
 
     # ── EC2 ──────────────────────────────────────────────────────────────────
     try:
@@ -60,6 +62,14 @@ def check_tagging_compliance(
                         )
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check EC2 tags: {e}")
+        errors.append(
+            scan_error_from_exception(
+                service="ec2",
+                operation="DescribeInstances",
+                exc=e,
+                region=region,
+            )
+        )
 
     # ── RDS ──────────────────────────────────────────────────────────────────
     try:
@@ -80,6 +90,14 @@ def check_tagging_compliance(
                     )
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check RDS tags: {e}")
+        errors.append(
+            scan_error_from_exception(
+                service="rds",
+                operation="DescribeDBInstances",
+                exc=e,
+                region=region,
+            )
+        )
 
     # ── Lambda ────────────────────────────────────────────────────────────────
     try:
@@ -96,6 +114,14 @@ def check_tagging_compliance(
         except (ClientError, BotoCoreError) as e:
             logger.error(
                 f"Bulk Lambda tag fetch failed, tagging check will use empty sets: {e}"
+            )
+            errors.append(
+                scan_error_from_exception(
+                    service="resourcegroupstaggingapi",
+                    operation="GetResources",
+                    exc=e,
+                    region=region,
+                )
             )
 
         lmb = _cl("lambda")
@@ -116,10 +142,18 @@ def check_tagging_compliance(
                     )
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check Lambda tags: {e}")
+        errors.append(
+            scan_error_from_exception(
+                service="lambda",
+                operation="ListFunctions",
+                exc=e,
+                region=region,
+            )
+        )
 
     # ── S3 (global service — skip when iterating per-region to avoid duplicates) ──
     if not include_s3:
-        return findings
+        return error_result(data=findings, errors=errors)
     try:
         s3 = get_client("s3")
         for bucket in s3.list_buckets().get("Buckets", []):
@@ -131,6 +165,13 @@ def check_tagging_compliance(
                 if e.response["Error"]["Code"] == "NoSuchTagSet":
                     existing = set()
                 else:
+                    errors.append(
+                        scan_error_from_exception(
+                            service="s3",
+                            operation="GetBucketTagging",
+                            exc=e,
+                        )
+                    )
                     continue  # permission or other transient error — skip bucket
             missing = [tag for tag in required_tags if tag not in existing]
             if missing:
@@ -144,5 +185,12 @@ def check_tagging_compliance(
                 )
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check S3 tags: {e}")
+        errors.append(
+            scan_error_from_exception(
+                service="s3",
+                operation="ListBuckets",
+                exc=e,
+            )
+        )
 
-    return findings
+    return error_result(data=findings, errors=errors)

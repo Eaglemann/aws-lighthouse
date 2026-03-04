@@ -1,69 +1,119 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
 from botocore.exceptions import BotoCoreError, ClientError
 
 from ..auth import get_client
 from ..logger import logger
+from ..scan_contract import error_result, ok_result, scan_error_from_exception
+from ..types import ScanError, ScanResult
 
 
-def _fetch_ri_coverage(ce, period: dict) -> dict[str, Any]:
+def _fetch_ri_coverage(ce, period: dict[str, str]) -> ScanResult:
     try:
         resp = ce.get_reservation_coverage(TimePeriod=period, Granularity="MONTHLY")
         totals = resp.get("Total", {})
-        return {
-            "ri_coverage_pct": float(
-                totals.get("CoverageHours", {}).get("CoverageHoursPercentage", 0) or 0
-            ),
-            "ri_on_demand_cost": float(
-                totals.get("CoverageCost", {}).get("OnDemandCost", 0) or 0
-            ),
-        }
+        return ok_result(
+            {
+                "ri_coverage_pct": float(
+                    totals.get("CoverageHours", {}).get("CoverageHoursPercentage", 0)
+                    or 0
+                ),
+                "ri_on_demand_cost": float(
+                    totals.get("CoverageCost", {}).get("OnDemandCost", 0) or 0
+                ),
+            }
+        )
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to fetch RI coverage: {e}")
-        return {"ri_coverage_pct": None, "ri_on_demand_cost": None}
+        return error_result(
+            data={"ri_coverage_pct": None, "ri_on_demand_cost": None},
+            errors=[
+                scan_error_from_exception(
+                    service="ce",
+                    operation="GetReservationCoverage",
+                    exc=e,
+                )
+            ],
+        )
 
 
-def _fetch_ri_utilization(ce, period: dict) -> dict[str, Any]:
+def _fetch_ri_utilization(ce, period: dict[str, str]) -> ScanResult:
     try:
         resp = ce.get_reservation_utilization(TimePeriod=period, Granularity="MONTHLY")
         totals = resp.get("Total", {})
-        return {
-            "ri_utilization_pct": float(totals.get("UtilizationPercentage", 0) or 0),
-            "ri_unused_cost": float(totals.get("UnusedRecurringFee", 0) or 0),
-        }
+        return ok_result(
+            {
+                "ri_utilization_pct": float(
+                    totals.get("UtilizationPercentage", 0) or 0
+                ),
+                "ri_unused_cost": float(totals.get("UnusedRecurringFee", 0) or 0),
+            }
+        )
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to fetch RI utilization: {e}")
-        return {"ri_utilization_pct": None, "ri_unused_cost": None}
+        return error_result(
+            data={"ri_utilization_pct": None, "ri_unused_cost": None},
+            errors=[
+                scan_error_from_exception(
+                    service="ce",
+                    operation="GetReservationUtilization",
+                    exc=e,
+                )
+            ],
+        )
 
 
-def _fetch_sp_coverage(ce, period: dict) -> dict[str, Any]:
+def _fetch_sp_coverage(ce, period: dict[str, str]) -> ScanResult:
     try:
         resp = ce.get_savings_plans_coverage(TimePeriod=period, Granularity="MONTHLY")
         cov = resp.get("Total", {}).get("Coverage", {})
-        return {
-            "sp_coverage_pct": float(cov.get("CoveragePercentage", 0) or 0),
-            "sp_on_demand_cost": float(cov.get("OnDemandCost", 0) or 0),
-        }
+        return ok_result(
+            {
+                "sp_coverage_pct": float(cov.get("CoveragePercentage", 0) or 0),
+                "sp_on_demand_cost": float(cov.get("OnDemandCost", 0) or 0),
+            }
+        )
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to fetch SP coverage: {e}")
-        return {"sp_coverage_pct": None, "sp_on_demand_cost": None}
+        return error_result(
+            data={"sp_coverage_pct": None, "sp_on_demand_cost": None},
+            errors=[
+                scan_error_from_exception(
+                    service="ce",
+                    operation="GetSavingsPlansCoverage",
+                    exc=e,
+                )
+            ],
+        )
 
 
-def _fetch_sp_utilization(ce, period: dict) -> dict[str, Any]:
+def _fetch_sp_utilization(ce, period: dict[str, str]) -> ScanResult:
     try:
         resp = ce.get_savings_plans_utilization(
             TimePeriod=period, Granularity="MONTHLY"
         )
         util = resp.get("Total", {}).get("Utilization", {})
-        return {
-            "sp_utilization_pct": float(util.get("UtilizationPercentage", 0) or 0),
-            "sp_unused_commitment": float(util.get("UnusedCommitment", 0) or 0),
-        }
+        return ok_result(
+            {
+                "sp_utilization_pct": float(
+                    util.get("UtilizationPercentage", 0) or 0
+                ),
+                "sp_unused_commitment": float(util.get("UnusedCommitment", 0) or 0),
+            }
+        )
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to fetch SP utilization: {e}")
-        return {"sp_utilization_pct": None, "sp_unused_commitment": None}
+        return error_result(
+            data={"sp_utilization_pct": None, "sp_unused_commitment": None},
+            errors=[
+                scan_error_from_exception(
+                    service="ce",
+                    operation="GetSavingsPlansUtilization",
+                    exc=e,
+                )
+            ],
+        )
 
 
 _FETCHERS = [
@@ -74,7 +124,7 @@ _FETCHERS = [
 ]
 
 
-def get_ri_sp_coverage(days: int = 30) -> dict[str, Any]:
+def get_ri_sp_coverage(days: int = 30) -> ScanResult:
     """
     Fetch Reserved Instance and Savings Plan coverage + utilization from
     AWS Cost Explorer for the given look-back window.
@@ -98,11 +148,26 @@ def get_ri_sp_coverage(days: int = 30) -> dict[str, Any]:
     start = end - timedelta(days=days)
     period = {"Start": start.strftime("%Y-%m-%d"), "End": end.strftime("%Y-%m-%d")}
 
-    result: dict[str, Any] = {"period": f"{period['Start']} → {period['End']}"}
+    result_data: dict[str, float | str | None] = {
+        "period": f"{period['Start']} → {period['End']}",
+        "ri_coverage_pct": None,
+        "ri_on_demand_cost": None,
+        "ri_utilization_pct": None,
+        "ri_unused_cost": None,
+        "sp_coverage_pct": None,
+        "sp_on_demand_cost": None,
+        "sp_utilization_pct": None,
+        "sp_unused_commitment": None,
+    }
+    errors: list[ScanError] = []
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = [executor.submit(fn, ce, period) for fn in _FETCHERS]
         for future in as_completed(futures):
-            result.update(future.result())
+            result = future.result()
+            payload = result.get("data", {})
+            if isinstance(payload, dict):
+                result_data.update(payload)
+            errors.extend(result.get("errors", []))
 
-    return result
+    return error_result(data=result_data, errors=errors)

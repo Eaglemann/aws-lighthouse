@@ -6,6 +6,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from ..auth import get_client
 from ..logger import logger
+from ..scan_contract import error_result, scan_error_from_exception
 from ..types import IAMFinding
 
 # AWS-managed policies that are inherently over-permissive — checked by name
@@ -64,7 +65,7 @@ def _parse_inline_doc(raw_doc: Any) -> Any:
     return raw_doc
 
 
-def detect_overpermissive_iam() -> list[IAMFinding]:
+def detect_overpermissive_iam():
     """
     Scan IAM users, roles, and groups for policies that grant
     Action:* on Resource:* (HIGH) or Action:<svc>:* on Resource:* (MEDIUM).
@@ -74,6 +75,7 @@ def detect_overpermissive_iam() -> list[IAMFinding]:
     """
     iam = get_client("iam")
     findings: list[IAMFinding] = []
+    errors = []
 
     users: list[Any] = []
     roles: list[Any] = []
@@ -100,7 +102,16 @@ def detect_overpermissive_iam() -> list[IAMFinding]:
                         break
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to fetch account authorization details: {e}")
-        return []
+        return error_result(
+            data=[],
+            errors=[
+                scan_error_from_exception(
+                    service="iam",
+                    operation="GetAccountAuthorizationDetails",
+                    exc=e,
+                )
+            ],
+        )
 
     def _add(
         severity, principal_type, principal_name, policy_type, policy_name, reason
@@ -136,6 +147,13 @@ def detect_overpermissive_iam() -> list[IAMFinding]:
                     )
             except (ValueError, KeyError) as e:
                 logger.error(f"Failed to parse inline policy on {principal_name}: {e}")
+                errors.append(
+                    scan_error_from_exception(
+                        service="iam",
+                        operation="ParseInlinePolicy",
+                        exc=e,
+                    )
+                )
 
     def _check_attached_list(
         principal_type: str, principal_name: str, attached: list[Any]
@@ -191,4 +209,4 @@ def detect_overpermissive_iam() -> list[IAMFinding]:
     findings.sort(
         key=lambda f: (0 if f["severity"] == "HIGH" else 1, f["principal_name"])
     )
-    return findings
+    return error_result(data=findings, errors=errors)
