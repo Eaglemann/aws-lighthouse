@@ -12,7 +12,9 @@ from langgraph.graph.message import add_messages
 
 from .db import db_manager
 from .logger import logger
+from .scan_contract import error_result, ok_result, to_v1_payload, to_v2_payload
 from .tools.bash import execute_bash, read_file, write_file
+from .types import ScanResult
 
 
 # 1. State Definition
@@ -85,43 +87,48 @@ from .tools.terraform import parse_terraform_context
 
 
 @tool
-def tool_get_enabled_regions() -> str:
+def tool_get_enabled_regions(schema: str = "v1") -> str:
     """
     List all AWS regions that are enabled for this account (opted-in or opt-in-not-required).
     Call this first when the user asks for a multi-region analysis so you know which regions to scan.
     """
-    return json.dumps(_get_enabled_regions())
+    result = _get_enabled_regions()
+    return json.dumps(to_v2_payload(result) if schema == "v2" else to_v1_payload(result))
 
 
 @tool
-def tool_get_ec2_inventory(region: str = "") -> str:
+def tool_get_ec2_inventory(region: str = "", schema: str = "v1") -> str:
     """Retrieve all EC2 instances and their current state.
     Pass a region name (e.g. 'us-west-2') to scan a specific region, or leave empty for the default."""
-    return json.dumps(_get_ec2_inventory(region=region or None))
+    result = _get_ec2_inventory(region=region or None)
+    return json.dumps(to_v2_payload(result) if schema == "v2" else to_v1_payload(result))
 
 
 @tool
-def tool_get_rds_inventory(region: str = "") -> str:
+def tool_get_rds_inventory(region: str = "", schema: str = "v1") -> str:
     """Retrieve all RDS instances and their current state.
     Pass a region name (e.g. 'eu-west-1') to scan a specific region, or leave empty for the default."""
-    return json.dumps(_get_rds_inventory(region=region or None))
+    result = _get_rds_inventory(region=region or None)
+    return json.dumps(to_v2_payload(result) if schema == "v2" else to_v1_payload(result))
 
 
 @tool
-def tool_get_s3_inventory() -> str:
+def tool_get_s3_inventory(schema: str = "v1") -> str:
     """List all S3 buckets. S3 is a global service — no region parameter needed."""
-    return json.dumps(_get_s3_inventory())
+    result = _get_s3_inventory()
+    return json.dumps(to_v2_payload(result) if schema == "v2" else to_v1_payload(result))
 
 
 @tool
-def tool_get_lambda_inventory(region: str = "") -> str:
+def tool_get_lambda_inventory(region: str = "", schema: str = "v1") -> str:
     """List all Lambda functions with runtime, memory size, timeout, code size, and whether they are stale (>180 days since last deploy).
     Pass a region name to scan a specific region, or leave empty for the default."""
-    return json.dumps(_get_lambda_inventory(region=region or None))
+    result = _get_lambda_inventory(region=region or None)
+    return json.dumps(to_v2_payload(result) if schema == "v2" else to_v1_payload(result))
 
 
 @tool
-def tool_detect_cloudwatch_gaps(region: str = "") -> str:
+def tool_detect_cloudwatch_gaps(region: str = "", schema: str = "v1") -> str:
     """
     Find EC2 instances, RDS databases, and Lambda functions missing CloudWatch alarms.
     EC2: CPUUtilization, StatusCheckFailed.
@@ -130,11 +137,12 @@ def tool_detect_cloudwatch_gaps(region: str = "") -> str:
     Returns one finding per resource listing every uncovered metric.
     Pass a region name to check a specific region, or leave empty for the default.
     """
-    return json.dumps(_detect_cloudwatch_gaps(region=region or None))
+    result = _detect_cloudwatch_gaps(region=region or None)
+    return json.dumps(to_v2_payload(result) if schema == "v2" else to_v1_payload(result))
 
 
 @tool
-def tool_detect_overpermissive_iam() -> str:
+def tool_detect_overpermissive_iam(schema: str = "v1") -> str:
     """
     Scan IAM users, roles, and groups for over-permissive policies.
     Flags Action:* on Resource:* as HIGH (full admin) and
@@ -142,12 +150,13 @@ def tool_detect_overpermissive_iam() -> str:
     Covers inline policies, customer-managed policies, and known dangerous
     AWS-managed policies (AdministratorAccess, PowerUserAccess).
     """
-    return json.dumps(_detect_overpermissive_iam())
+    result = _detect_overpermissive_iam()
+    return json.dumps(to_v2_payload(result) if schema == "v2" else to_v1_payload(result))
 
 
 @tool
 def tool_check_tagging_compliance(
-    required_tags: str = "Environment,Owner", region: str = ""
+    required_tags: str = "Environment,Owner", region: str = "", schema: str = "v1"
 ) -> str:
     """
     Check EC2, RDS, S3, and Lambda resources for missing required tags.
@@ -156,33 +165,36 @@ def tool_check_tagging_compliance(
     Returns one finding per non-compliant resource.
     """
     tags = [t.strip() for t in required_tags.split(",") if t.strip()]
-    return json.dumps(
-        _check_tagging_compliance(required_tags=tags, region=region or None)
-    )
+    result = _check_tagging_compliance(required_tags=tags, region=region or None)
+    return json.dumps(to_v2_payload(result) if schema == "v2" else to_v1_payload(result))
 
 
 @tool
-def tool_get_ri_sp_coverage(days: int = 30) -> str:
+def tool_get_ri_sp_coverage(days: int = 30, schema: str = "v1") -> str:
     """
     Fetch Reserved Instance and Savings Plan coverage and utilization from Cost Explorer.
     Shows what % of eligible spend is covered by commitments vs on-demand,
     how well existing commitments are utilized, and the dollar value of uncovered spend.
     """
-    return json.dumps(_get_ri_sp_coverage(days=days))
+    result = _get_ri_sp_coverage(days=days)
+    return json.dumps(to_v2_payload(result) if schema == "v2" else to_v1_payload(result))
 
 
 @tool
-def tool_detect_cost_anomalies(threshold_pct: float = 50.0) -> str:
+def tool_detect_cost_anomalies(threshold_pct: float = 50.0, schema: str = "v1") -> str:
     """
     Compare the last 7 days of per-service AWS spend against the prior 7-day baseline.
     Returns services whose cost increased by more than threshold_pct (default 50%).
     Useful for spotting unexpected spending spikes before the bill arrives.
     """
-    return json.dumps(_detect_cost_anomalies(threshold_pct=threshold_pct))
+    result = _detect_cost_anomalies(threshold_pct=threshold_pct)
+    return json.dumps(to_v2_payload(result) if schema == "v2" else to_v1_payload(result))
 
 
 @tool
-def tool_run_security_scan(region: str = "", include_global: bool = True) -> str:
+def tool_run_security_scan(
+    region: str = "", include_global: bool = True, schema: str = "v1"
+) -> str:
     """
     Run a comprehensive security scan against the current AWS account.
     Checks: root MFA, IAM access key age (>90 days), IAM users without MFA,
@@ -197,15 +209,23 @@ def tool_run_security_scan(region: str = "", include_global: bool = True) -> str
     Returns a list of findings, each with severity (HIGH/MEDIUM), resource, and finding.
     """
     r = region or None
-    s3s = _get_s3_inventory() if include_global else []
-    rdss = _get_rds_inventory(region=r)
-    return json.dumps(
-        _run_security_scan(s3s=s3s, rdss=rdss, region=r, include_global=include_global)
+    s3_result: ScanResult = _get_s3_inventory() if include_global else ok_result([])
+    rds_result = _get_rds_inventory(region=r)
+    sec_result = _run_security_scan(
+        s3s=s3_result["data"],
+        rdss=rds_result["data"],
+        region=r,
+        include_global=include_global,
     )
+    combined = error_result(
+        data=sec_result["data"],
+        errors=[*s3_result["errors"], *rds_result["errors"], *sec_result["errors"]],
+    )
+    return json.dumps(to_v2_payload(combined) if schema == "v2" else to_v1_payload(combined))
 
 
 @tool
-def tool_run_cost_scan(region: str = "") -> str:
+def tool_run_cost_scan(region: str = "", schema: str = "v1") -> str:
     """
     Scan for cost waste in the AWS account.
     Checks: unattached EBS volumes, stopped EC2 instances (still paying for EBS),
@@ -214,7 +234,8 @@ def tool_run_cost_scan(region: str = "") -> str:
     Pass a region name to target a specific region; leave empty for the default region.
     Returns a list of findings with resource ID, description, and remediation hints.
     """
-    return json.dumps(_run_cost_scan(region=region or None))
+    result = _run_cost_scan(region=region or None)
+    return json.dumps(to_v2_payload(result) if schema == "v2" else to_v1_payload(result))
 
 
 tools = [
@@ -255,6 +276,16 @@ def _classify_tool_result(content: str) -> tuple[str, str | None]:
             payload = json.loads(stripped)
             if isinstance(payload, dict) and payload.get("error"):
                 return "failed", str(payload["error"])
+            if isinstance(payload, dict) and payload.get("ok") is False:
+                errors = payload.get("errors", [])
+                if isinstance(errors, list) and errors:
+                    first = errors[0]
+                    if isinstance(first, dict):
+                        message = first.get("message")
+                        if message:
+                            return "failed", str(message)
+                    return "failed", str(first)
+                return "failed", "Tool reported ok=false"
         except ValueError:
             pass
     return "executed", None
