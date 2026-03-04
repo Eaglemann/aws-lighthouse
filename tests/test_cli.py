@@ -44,9 +44,8 @@ class TestCount:
     def test_single_item_returns_one(self):
         assert _count([{"id": "i-1"}]) == "1"
 
-    def test_empty_list_returns_error_markup(self):
-        result = _count([])
-        assert "[red]" in result
+    def test_empty_list_returns_zero(self):
+        assert _count([]) == "0"
 
     def test_error_first_item_returns_error_markup(self):
         result = _count([{"error": "AccessDenied"}])
@@ -673,3 +672,9 @@ class TestAnalyzeInteractiveMode:
         assert result.exit_code == 0, result.output
         mock_remediation.assert_called_once()
         mock_cur.assert_called_once()
+
+    def test_empty_inventory_renders_zero_counts_not_error(self):
+        result = self._run_text()
+        assert result.exit_code == 0, result.output
+        assert "Error" not in result.output
+        assert "EC2 Instances" in result.output

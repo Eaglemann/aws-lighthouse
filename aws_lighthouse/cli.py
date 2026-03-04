@@ -62,8 +62,10 @@ def _severity_text(sev: str) -> Text:
 
 
 def _count(lst: list) -> str:
-    """Return count string, or '[red]Error[/red]' if list is empty/errored."""
-    return str(len(lst)) if lst and "error" not in lst[0] else "[red]Error[/red]"
+    """Return resource count, or '[red]Error[/red]' for explicit error payloads."""
+    if lst and "error" in lst[0]:
+        return "[red]Error[/red]"
+    return str(len(lst))
 
 
 def _pct_style(val: float | None, low: float = 60.0, high: float = 80.0) -> str:
