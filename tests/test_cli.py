@@ -894,13 +894,23 @@ class TestAnalyzeJsonOutput:
 
 
 class TestWatchCommand:
+    @staticmethod
+    def _payload(account_id: str = "123456789012") -> dict:
+        return {
+            "v1": {"account_id": account_id, "delta": {"baseline_found": False}},
+            "v2": {
+                "account_id": account_id,
+                "overall": {"ok": True, "data": {}, "errors": []},
+                "delta": {"ok": True, "data": {}, "errors": []},
+            },
+        }
+
     def test_watch_json_emits_valid_json_line(self):
         runner = CliRunner()
-        patches = {**_PATCHES, "aws_lighthouse.cli.get_aws_session": _mock_session}
         with (
-            patch.multiple(
-                "aws_lighthouse.cli",
-                **{k.split(".")[-1]: v for k, v in patches.items()},
+            patch(
+                "aws_lighthouse.cli._run_analyze_cycle",
+                return_value=self._payload(),
             ),
             patch("aws_lighthouse.cli.time.sleep", side_effect=KeyboardInterrupt),
         ):
@@ -924,6 +934,59 @@ class TestWatchCommand:
         assert payload["account_id"] == "123456789012"
         assert "delta" in payload
         assert payload["delta"]["baseline_found"] is False
+
+    def test_watch_text_continues_after_cycle_error(self):
+        runner = CliRunner()
+        with (
+            patch(
+                "aws_lighthouse.cli._run_analyze_cycle",
+                side_effect=[RuntimeError("boom"), self._payload()],
+            ) as mock_cycle,
+            patch("aws_lighthouse.cli.logger.error") as mock_error,
+            patch(
+                "aws_lighthouse.cli.time.sleep", side_effect=[None, KeyboardInterrupt]
+            ),
+        ):
+            result = runner.invoke(app, ["watch", "--interval-hours", "0.001"])
+
+        assert result.exit_code == 0, result.output
+        assert mock_cycle.call_count == 2
+        mock_error.assert_called_once()
+        assert "Watch cycle 1 failed: boom" in mock_error.call_args[0][0]
+
+    def test_watch_json_emits_error_line_then_success_line(self):
+        runner = CliRunner()
+        with (
+            patch(
+                "aws_lighthouse.cli._run_analyze_cycle",
+                side_effect=[RuntimeError("boom"), self._payload()],
+            ),
+            patch(
+                "aws_lighthouse.cli.time.sleep", side_effect=[None, KeyboardInterrupt]
+            ),
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "watch",
+                    "--output",
+                    "json",
+                    "--json-schema",
+                    "v1",
+                    "--interval-hours",
+                    "0.001",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        lines = [line for line in result.output.splitlines() if line.strip()]
+        assert len(lines) == 2
+        first = json.loads(lines[0])
+        second = json.loads(lines[1])
+        assert first["event"] == "error"
+        assert first["cycle"] == 1
+        assert first["message"] == "boom"
+        assert second["account_id"] == "123456789012"
 
     def test_watch_rejects_invalid_interval(self):
         runner = CliRunner()

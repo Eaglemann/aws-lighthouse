@@ -1337,20 +1337,39 @@ def watch(
     try:
         while True:
             cycle += 1
-            payloads = _run_analyze_cycle(
-                days=days,
-                region=region,
-                output_mode=output_mode,
-                interactive=False,
-                since_last=True,
-                watch_cycle=cycle,
-            )
-            if output_mode == "json":
-                print(json.dumps(payloads[schema], default=str, separators=(",", ":")))
-            else:
-                logger.console.print(
-                    f"[dim]Next scan in {interval_hours:g}h. Press Ctrl+C to stop.[/dim]"
+            try:
+                payloads = _run_analyze_cycle(
+                    days=days,
+                    region=region,
+                    output_mode=output_mode,
+                    interactive=False,
+                    since_last=True,
+                    watch_cycle=cycle,
                 )
+                if output_mode == "json":
+                    print(
+                        json.dumps(payloads[schema], default=str, separators=(",", ":"))
+                    )
+                else:
+                    logger.console.print(
+                        f"[dim]Next scan in {interval_hours:g}h. Press Ctrl+C to stop.[/dim]"
+                    )
+            except Exception as e:
+                if output_mode == "json":
+                    print(
+                        json.dumps(
+                            {
+                                "event": "error",
+                                "cycle": cycle,
+                                "scanned_at": datetime.now().isoformat(),
+                                "message": str(e),
+                            },
+                            default=str,
+                            separators=(",", ":"),
+                        )
+                    )
+                else:
+                    logger.error(f"Watch cycle {cycle} failed: {e}")
             time.sleep(interval_hours * 3600)
     except KeyboardInterrupt:
         if output_mode != "json":
