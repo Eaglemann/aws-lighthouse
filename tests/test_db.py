@@ -30,6 +30,17 @@ def _tables(tmp_path) -> set:
         }
 
 
+def _indexes(tmp_path) -> set:
+    """Return the set of index names in the test DB."""
+    with sqlite3.connect(tmp_path / "test.db") as conn:
+        return {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()
+        }
+
+
 # ---------------------------------------------------------------------------
 # _ensure_db — init
 # ---------------------------------------------------------------------------
@@ -55,6 +66,9 @@ class TestEnsureDb:
         monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "test.db")
         DatabaseManager()  # should not raise
         assert "cost_snapshots" in _tables(tmp_path)
+
+    def test_creates_cost_snapshot_ordering_index(self, db, tmp_path):
+        assert "idx_cost_snapshots_account_ts_id" in _indexes(tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +163,23 @@ class TestGetLatestCostSnapshot:
         result = db.get_latest_cost_snapshot("acct")
         assert result is None
 
+    def test_tie_breaker_uses_higher_id_when_timestamps_equal(self, db, tmp_path):
+        db_path = tmp_path / "test.db"
+        rows = [
+            ("acct", "2024-01-01", "2024-01-31", 100.0, "{}", "2024-01-01 10:00:00"),
+            ("acct", "2024-02-01", "2024-02-28", 200.0, "{}", "2024-01-01 10:00:00"),
+        ]
+        with sqlite3.connect(db_path) as conn:
+            conn.executemany(
+                "INSERT INTO cost_snapshots "
+                "(account_id, period_start, period_end, total_usd, service_breakdown, timestamp) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+        result = db.get_latest_cost_snapshot("acct")
+        assert result is not None
+        assert result["total_usd"] == 200.0
+
 
 # ---------------------------------------------------------------------------
 # record_audit_log
@@ -205,3 +236,22 @@ class TestAuditLog:
     def test_handles_sqlite_error_without_raising(self, db, tmp_path, monkeypatch):
         monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "gone" / "x.db")
         db.record_audit_log("tool", "{}", "approved")  # must not raise
+
+
+class TestCostSnapshotRetention:
+    def test_prunes_old_snapshots_per_account(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(db_module, "DB_DIR", tmp_path)
+        monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "test.db")
+        monkeypatch.setattr(db_module, "_MAX_COST_SNAPSHOTS_PER_ACCOUNT", 2)
+        db = DatabaseManager()
+
+        db.record_cost_snapshot("acct", "2024-01-01", "2024-01-31", 1.0, {})
+        db.record_cost_snapshot("acct", "2024-02-01", "2024-02-28", 2.0, {})
+        db.record_cost_snapshot("acct", "2024-03-01", "2024-03-31", 3.0, {})
+
+        with sqlite3.connect(tmp_path / "test.db") as conn:
+            rows = conn.execute(
+                "SELECT total_usd FROM cost_snapshots WHERE account_id = ? ORDER BY id",
+                ("acct",),
+            ).fetchall()
+        assert [r[0] for r in rows] == [2.0, 3.0]

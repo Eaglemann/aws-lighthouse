@@ -7,6 +7,7 @@ from .logger import logger
 
 DB_DIR = Path.home() / ".aws-lighthouse"
 DB_PATH = DB_DIR / "lighthouse.db"
+_MAX_COST_SNAPSHOTS_PER_ACCOUNT = 1000
 
 
 class DatabaseManager:
@@ -48,6 +49,10 @@ class DatabaseManager:
                         service_breakdown TEXT
                     )
                 """)
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_cost_snapshots_account_ts_id
+                    ON cost_snapshots(account_id, timestamp DESC, id DESC)
+                """)
 
                 # Audit log: every tool invocation the agent attempts, with decision
                 cursor.execute("""
@@ -81,9 +86,26 @@ class DatabaseManager:
                     "INSERT INTO cost_snapshots (account_id, period_start, period_end, total_usd, service_breakdown) VALUES (?, ?, ?, ?, ?)",
                     (account_id, start, end, total, json.dumps(breakdown)),
                 )
+                self._prune_old_cost_snapshots(cursor=cursor, account_id=account_id)
                 conn.commit()
         except sqlite3.Error as e:
             logger.error(f"Failed to record cost snapshot: {str(e)}")
+
+    def _prune_old_cost_snapshots(self, cursor: sqlite3.Cursor, account_id: str) -> None:
+        """Keep only the newest N cost snapshots per account."""
+        cursor.execute(
+            """
+            DELETE FROM cost_snapshots
+            WHERE account_id = ?
+              AND id NOT IN (
+                SELECT id FROM cost_snapshots
+                WHERE account_id = ?
+                ORDER BY timestamp DESC, id DESC
+                LIMIT ?
+              )
+            """,
+            (account_id, account_id, _MAX_COST_SNAPSHOTS_PER_ACCOUNT),
+        )
 
     def get_latest_cost_snapshot(self, account_id: str) -> dict[str, Any] | None:
         """Retrieve the most recent cost snapshot for comparison."""
@@ -91,7 +113,7 @@ class DatabaseManager:
             with sqlite3.connect(DB_PATH) as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT timestamp, period_start, period_end, total_usd, service_breakdown FROM cost_snapshots WHERE account_id = ? ORDER BY timestamp DESC LIMIT 1",
+                    "SELECT timestamp, period_start, period_end, total_usd, service_breakdown FROM cost_snapshots WHERE account_id = ? ORDER BY timestamp DESC, id DESC LIMIT 1",
                     (account_id,),
                 )
                 row = cursor.fetchone()
