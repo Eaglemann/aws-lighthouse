@@ -1,7 +1,26 @@
-from typing import Literal, NotRequired, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
 # Canonical severity levels used across all scan findings.
 Severity = Literal["HIGH", "MEDIUM", "LOW"]
+
+
+class ScanError(TypedDict):
+    """Structured scanner error metadata surfaced in result envelopes."""
+
+    code: str
+    message: str
+    service: str
+    operation: str
+    region: NotRequired[str]
+    retryable: NotRequired[bool]
+
+
+class ScanResult(TypedDict):
+    """Generic scanner result envelope used across runtime boundaries."""
+
+    ok: bool
+    data: Any
+    errors: list[ScanError]
 
 
 class SecurityFinding(TypedDict):
