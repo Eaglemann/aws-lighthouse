@@ -65,7 +65,7 @@ def _run_coro_in_new_thread(
             result = loop.run_until_complete(
                 asyncio.wait_for(coro, timeout=timeout_seconds)
             )
-        except (TimeoutError, OSError, RuntimeError) as exc:
+        except Exception as exc:
             error = exc
         finally:
             asyncio.set_event_loop(None)
@@ -76,6 +76,11 @@ def _run_coro_in_new_thread(
     thread.join(timeout=timeout_seconds + 1.0)
 
     if thread.is_alive():
+        logger.error(
+            f"Timed out waiting for AWS MCP initialization after {timeout_seconds:.1f}s."
+        )
+        return []
+    if isinstance(error, TimeoutError):
         logger.error(
             f"Timed out waiting for AWS MCP initialization after {timeout_seconds:.1f}s."
         )
@@ -97,7 +102,7 @@ def get_mcp_tools() -> list[BaseTool]:
                     mcp_manager.initialize_tools(), timeout=_MCP_INIT_TIMEOUT_SECONDS
                 )
             )
-        except (TimeoutError, OSError, RuntimeError) as exc:
+        except Exception as exc:
             logger.error(f"AWS MCP initialization failed: {str(exc)}")
             return []
 

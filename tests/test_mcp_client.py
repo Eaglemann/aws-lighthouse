@@ -85,3 +85,14 @@ def test_run_coro_in_new_thread_times_out():
 
     assert result == []
     mock_error.assert_called()
+
+
+def test_run_coro_in_new_thread_handles_unexpected_exception():
+    async def _boom():
+        raise ValueError("unexpected")
+
+    with patch("aws_lighthouse.tools.mcp_client.logger.error") as mock_error:
+        result = _run_coro_in_new_thread(factory=_boom, timeout_seconds=1.0)
+
+    assert result == []
+    mock_error.assert_called_once_with("AWS MCP initialization failed: unexpected")
