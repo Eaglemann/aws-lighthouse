@@ -69,9 +69,20 @@ jobs:
 
           (cd /tmp && sha512sum -c "${CLIFF_SHA_FILE}")
 
-          tar -xzf "/tmp/${CLIFF_ASSET}" --wildcards "*/git-cliff" --strip-components=1 -C /tmp
-          chmod +x /tmp/git-cliff
-          echo "/tmp" >> "${GITHUB_PATH}"
+          CLIFF_EXTRACT_DIR="/tmp/git-cliff-${CLIFF_VERSION}"
+          rm -rf "${CLIFF_EXTRACT_DIR}"
+          mkdir -p "${CLIFF_EXTRACT_DIR}"
+          tar -xzf "/tmp/${CLIFF_ASSET}" -C "${CLIFF_EXTRACT_DIR}"
+
+          CLIFF_BIN="$(find "${CLIFF_EXTRACT_DIR}" -type f -name git-cliff -print -quit)"
+          if [ -z "${CLIFF_BIN}" ]; then
+            echo "git-cliff binary not found after extraction."
+            find "${CLIFF_EXTRACT_DIR}" -maxdepth 3 -type f | sort
+            exit 1
+          fi
+
+          chmod +x "${CLIFF_BIN}"
+          echo "$(dirname "${CLIFF_BIN}")" >> "${GITHUB_PATH}"
 
       - name: Generate release notes
         run: git cliff --current --strip header --output RELEASE_NOTES.md
