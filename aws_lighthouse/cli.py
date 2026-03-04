@@ -1,8 +1,9 @@
 import io
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from typing import cast
+from typing import Any, cast
 
 import typer
 from rich import box
@@ -35,7 +36,7 @@ from .tools.multi_region import get_enabled_regions
 from .tools.ri_sp_coverage import get_ri_sp_coverage
 from .tools.security_scan import run_security_scan
 from .tools.tagging import check_tagging_compliance
-from .types import CostFinding, ScanResult, SecurityFinding
+from .types import CostFinding, ScanError, ScanResult, SecurityFinding
 
 app = typer.Typer(
     help="AWS Lighthouse: Terminal-first FinOps, Security, and Scaffolding Agent.",
@@ -78,6 +79,198 @@ def _pct_style(val: float | None, low: float = 60.0, high: float = 80.0) -> str:
 
 def _dollar(val: float | None) -> str:
     return f"${val:,.2f}" if val is not None else "[dim]N/A[/dim]"
+
+
+_DELTA_SECTION_KEYS = (
+    "inventory",
+    "costs",
+    "cost_anomalies",
+    "ri_sp_coverage",
+    "security_findings",
+    "iam_findings",
+    "cloudwatch_findings",
+    "cost_waste",
+    "tagging_findings",
+)
+
+
+def _scan_scope_key(region: str | None) -> str:
+    """Return persistence scope key for scan snapshots."""
+    return f"single-region:{region}" if region else "multi-region"
+
+
+def _normalize_snapshot_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Deep-copy payload into a deterministic JSON-safe structure."""
+    return cast(
+        dict[str, Any],
+        json.loads(json.dumps(data, sort_keys=True, default=str)),
+    )
+
+
+def _canonicalize_for_diff(value: Any) -> str:
+    """Create a stable string identity for list/set diffing."""
+    return json.dumps(value, sort_keys=True, default=str, separators=(",", ":"))
+
+
+def _diff_lists(previous: list[Any], current: list[Any]) -> dict[str, Any]:
+    prev_map = {_canonicalize_for_diff(item): item for item in previous}
+    curr_map = {_canonicalize_for_diff(item): item for item in current}
+    prev_keys = set(prev_map.keys())
+    curr_keys = set(curr_map.keys())
+    new_keys = sorted(curr_keys - prev_keys)
+    resolved_keys = sorted(prev_keys - curr_keys)
+    unchanged_keys = prev_keys & curr_keys
+    return {
+        "new": [curr_map[key] for key in new_keys],
+        "resolved": [prev_map[key] for key in resolved_keys],
+        "unchanged_count": len(unchanged_keys),
+    }
+
+
+def _diff_mappings(previous: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+    new: list[dict[str, Any]] = []
+    resolved: list[dict[str, Any]] = []
+    unchanged = 0
+    for key in sorted(set(previous.keys()) | set(current.keys())):
+        prev_exists = key in previous
+        curr_exists = key in current
+        if not prev_exists and curr_exists:
+            new.append({"field": key, "value": current[key]})
+            continue
+        if prev_exists and not curr_exists:
+            resolved.append({"field": key, "value": previous[key]})
+            continue
+
+        prev_value = previous[key]
+        curr_value = current[key]
+        if _canonicalize_for_diff(prev_value) == _canonicalize_for_diff(curr_value):
+            unchanged += 1
+            continue
+        new.append({"field": key, "value": curr_value, "previous": prev_value})
+        resolved.append({"field": key, "value": prev_value, "current": curr_value})
+    return {"new": new, "resolved": resolved, "unchanged_count": unchanged}
+
+
+def _build_section_delta(previous: Any, current: Any) -> dict[str, Any]:
+    if isinstance(previous, list) and isinstance(current, list):
+        return _diff_lists(previous, current)
+    if isinstance(previous, dict) and isinstance(current, dict):
+        return _diff_mappings(previous, current)
+
+    same = _canonicalize_for_diff(previous) == _canonicalize_for_diff(current)
+    return {
+        "new": [] if same else [current],
+        "resolved": [] if same else [previous],
+        "unchanged_count": 1 if same else 0,
+    }
+
+
+def _build_delta_payload(
+    *,
+    baseline_snapshot: dict[str, Any] | None,
+    current_sections: dict[str, Any],
+    scope_key: str,
+    overall_errors: list[ScanError],
+) -> dict[str, Any]:
+    baseline_found = baseline_snapshot is not None
+    previous_sections = (
+        cast(dict[str, Any], baseline_snapshot.get("data", {}))
+        if baseline_snapshot
+        else {}
+    )
+
+    section_deltas: dict[str, dict[str, Any]] = {}
+    total_new = 0
+    total_resolved = 0
+    sections_with_new: list[str] = []
+    sections_with_resolved: list[str] = []
+
+    for section in _DELTA_SECTION_KEYS:
+        if baseline_found:
+            section_delta = _build_section_delta(
+                previous_sections.get(section),
+                current_sections.get(section),
+            )
+        else:
+            section_delta = {"new": [], "resolved": [], "unchanged_count": 0}
+
+        section_deltas[section] = section_delta
+        if section_delta["new"]:
+            sections_with_new.append(section)
+        if section_delta["resolved"]:
+            sections_with_resolved.append(section)
+        total_new += len(section_delta["new"])
+        total_resolved += len(section_delta["resolved"])
+
+    summary = {
+        "total_new": total_new,
+        "total_resolved": total_resolved,
+        "sections_with_new": sections_with_new,
+        "sections_with_resolved": sections_with_resolved,
+        "degraded": bool(overall_errors),
+        "error_count": len(overall_errors),
+    }
+    return {
+        "baseline_found": baseline_found,
+        "baseline_recorded_at": baseline_snapshot.get("recorded_at")
+        if baseline_snapshot
+        else None,
+        "scope_key": scope_key,
+        "summary": summary,
+        "sections": section_deltas,
+    }
+
+
+def _render_delta_panel(
+    c: Console, delta: dict[str, Any], errors: list[ScanError]
+) -> None:
+    """Render high-level delta summary in text mode."""
+    summary = cast(dict[str, Any], delta["summary"])
+    if not delta.get("baseline_found", False):
+        c.print(
+            Panel(
+                "[cyan]No previous baseline was found for this scope. A new baseline has been recorded.[/cyan]",
+                title="[bold cyan]Δ Delta[/bold cyan]  [dim]baseline created[/dim]",
+                border_style="cyan",
+                padding=(0, 1),
+            )
+        )
+        c.print()
+        return
+
+    table = Table(
+        box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False
+    )
+    table.add_column("Section", style="dim", no_wrap=True)
+    table.add_column("New", justify="right", style="green")
+    table.add_column("Resolved", justify="right", style="yellow")
+    table.add_column("Unchanged", justify="right", style="dim")
+    for section in _DELTA_SECTION_KEYS:
+        section_delta = cast(dict[str, Any], delta["sections"][section])
+        table.add_row(
+            section,
+            str(len(section_delta["new"])),
+            str(len(section_delta["resolved"])),
+            str(section_delta["unchanged_count"]),
+        )
+
+    border = "yellow" if errors else "cyan"
+    title = (
+        "[bold yellow]Δ Delta (Degraded)[/bold yellow]"
+        if errors
+        else "[bold cyan]Δ Delta[/bold cyan]"
+    )
+    c.print(
+        Panel(
+            table,
+            title=(
+                f"{title}  [dim]+{summary['total_new']} / -{summary['total_resolved']}[/dim]"
+            ),
+            border_style=border,
+            padding=(0, 1),
+        )
+    )
+    c.print()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -275,7 +468,7 @@ def _section_cost_anomalies(c: Console) -> ScanResult:
                 border_style="green",
                 padding=(0, 1),
             )
-    )
+        )
     c.print()
     return anomalies_result
 
@@ -486,7 +679,9 @@ def _section_cloudwatch(
                 f["region"] = reg
         return cast(ScanResult, _cw)
 
-    with c.status("[cyan]📡  Checking CloudWatch alarm coverage...[/cyan]", spinner="dots"):
+    with c.status(
+        "[cyan]📡  Checking CloudWatch alarm coverage...[/cyan]", spinner="dots"
+    ):
         with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
             for result in pool.map(_cw_region, regions):
                 cw_results.append(result)
@@ -685,7 +880,9 @@ def _section_tagging(
 
 def _section_lambda_detail(c: Console, lambdas: list) -> None:
     """Render Lambda function detail panel if any valid functions exist."""
-    valid_lambdas = [fn for fn in lambdas if isinstance(fn, dict) and "FunctionName" in fn]
+    valid_lambdas = [
+        fn for fn in lambdas if isinstance(fn, dict) and "FunctionName" in fn
+    ]
     if not valid_lambdas:
         return
 
@@ -866,52 +1063,48 @@ def _section_cur_upsell(
 # ─────────────────────────────────────────────────────────────────────────────
 # analyze command
 # ─────────────────────────────────────────────────────────────────────────────
-@app.command()
-def analyze(
-    days: int = typer.Option(
-        14, "--days", "-d", help="Days of cost history to analyze"
-    ),
-    region: str | None = typer.Option(
-        None,
-        "--region",
-        "-r",
-        help="Scan a single region (default: all enabled regions)",
-    ),
-    output: str = typer.Option(
-        "text",
-        "--output",
-        "-o",
-        help="Output format: text (default) or json",
-    ),
-    json_schema: str = typer.Option(
-        "v1",
-        "--json-schema",
-        help="JSON schema version for --output json: v1 (legacy payloads) or v2 (typed envelopes).",
-    ),
-    interactive: bool = typer.Option(
-        False,
-        "--interactive/--no-interactive",
-        help="Enable interactive remediation and CUR deployment prompts (default: disabled).",
-    ),
-) -> None:
-    """Retrieve read-only state (inventory, cost, security) and render a dashboard."""
-    json_mode = output == "json"
+def _validate_output_options(output: str, json_schema: str) -> tuple[str, str]:
+    output_mode = output.lower().strip()
     schema = json_schema.lower().strip()
+    if output_mode not in {"text", "json"}:
+        raise typer.BadParameter("--output must be either 'text' or 'json'")
     if schema not in {"v1", "v2"}:
         raise typer.BadParameter("--json-schema must be either 'v1' or 'v2'")
-    # In JSON mode send all Rich output to a buffer so nothing leaks to stdout.
+    return output_mode, schema
+
+
+def _run_analyze_cycle(
+    *,
+    days: int,
+    region: str | None,
+    output_mode: str,
+    interactive: bool,
+    since_last: bool,
+    watch_cycle: int | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Execute one analyze cycle and return both v1 and v2 machine payloads."""
+    json_mode = output_mode == "json"
     c = Console(file=io.StringIO(), no_color=True) if json_mode else logger.console
     original_logger_console = logger.console
     if json_mode:
         logger.console = c
 
     try:
-        # Header
+        if watch_cycle is not None and not json_mode:
+            c.print()
+            c.print(
+                Rule(
+                    f" 🔁  AWS LIGHTHOUSE WATCH · cycle {watch_cycle} ",
+                    style="bold cyan",
+                    align="center",
+                )
+            )
+            c.print()
+
         c.print()
         c.print(Rule(" 🔦  AWS LIGHTHOUSE ", style="bold cyan", align="center"))
         c.print()
 
-        # Auth
         with c.status("[cyan]🔐  Authenticating...[/cyan]", spinner="dots"):
             session = get_aws_session()
             account_id = session.client("sts").get_caller_identity()["Account"]
@@ -922,8 +1115,7 @@ def analyze(
         )
         c.print()
 
-        # Regions
-        region_errors = []
+        region_errors: list[ScanError] = []
         if region:
             regions: list[str | None] = [region]
             c.print(f"  [dim]🌍 Region[/dim]  [bold]{region}[/bold]")
@@ -946,8 +1138,6 @@ def analyze(
             )
             c.print()
 
-        # Sections — all section functions return their data; rendering is a side-effect
-        # that goes to the devnull console when json_mode is True.
         (
             inv_table,
             s3_result,
@@ -955,9 +1145,7 @@ def analyze(
             rds_result,
             lambda_result,
             cur_bucket_exists,
-        ) = _section_inventory(
-            c, regions, multi_region
-        )
+        ) = _section_inventory(c, regions, multi_region)
         inventory_result = error_result(
             data={
                 "ec2": ec2_result["data"],
@@ -987,70 +1175,186 @@ def analyze(
         sec_findings: list[SecurityFinding] = sec_result["data"]
         cost_findings: list[CostFinding] = cost_waste_result["data"]
 
-        if json_mode:
-            section_results = {
-                "inventory": inventory_result,
-                "costs": costs_result,
-                "cost_anomalies": anomalies_result,
-                "ri_sp_coverage": ri_sp_result,
-                "security_findings": sec_result,
-                "iam_findings": iam_result,
-                "cloudwatch_findings": cw_result,
-                "cost_waste": cost_waste_result,
-                "tagging_findings": tag_result,
-            }
-            all_errors = list(region_errors)
-            degraded_sections: list[str] = []
-            for section_name, section_result in section_results.items():
-                all_errors.extend(section_result["errors"])
-                if section_result["errors"]:
-                    degraded_sections.append(section_name)
-            overall_result = error_result(
-                data={
-                    "degraded_sections": degraded_sections,
-                    "error_count": len(all_errors),
-                },
-                errors=all_errors,
-            )
-            print(
-                json.dumps(
-                    (
-                        {
-                            "account_id": account_id,
-                            "scanned_at": datetime.now().isoformat(),
-                            "regions": [r for r in regions if r],
-                            "inventory": inventory_result["data"],
-                            "costs": costs_result["data"],
-                            "cost_anomalies": anomalies_result["data"],
-                            "ri_sp_coverage": ri_sp_result["data"],
-                            "security_findings": sec_result["data"],
-                            "iam_findings": iam_result["data"],
-                            "cloudwatch_findings": cw_result["data"],
-                            "cost_waste": cost_waste_result["data"],
-                            "tagging_findings": tag_result["data"],
-                        }
-                        if schema == "v1"
-                        else {
-                            "account_id": account_id,
-                            "scanned_at": datetime.now().isoformat(),
-                            "regions": [r for r in regions if r],
-                            "overall": overall_result,
-                            **section_results,
-                        }
-                    ),
-                    indent=2,
-                    default=str,
-                )
-            )
-            return
+        section_results: dict[str, ScanResult] = {
+            "inventory": inventory_result,
+            "costs": costs_result,
+            "cost_anomalies": anomalies_result,
+            "ri_sp_coverage": ri_sp_result,
+            "security_findings": sec_result,
+            "iam_findings": iam_result,
+            "cloudwatch_findings": cw_result,
+            "cost_waste": cost_waste_result,
+            "tagging_findings": tag_result,
+        }
+        all_errors = list(region_errors)
+        degraded_sections: list[str] = []
+        for section_name, section_result in section_results.items():
+            all_errors.extend(section_result["errors"])
+            if section_result["errors"]:
+                degraded_sections.append(section_name)
+        overall_result = error_result(
+            data={
+                "degraded_sections": degraded_sections,
+                "error_count": len(all_errors),
+            },
+            errors=all_errors,
+        )
 
-        _section_lambda_detail(c, lambda_result["data"])
-        if interactive:
-            _section_remediation(c, sec_findings, cost_findings)
-            _section_cur_upsell(c, cur_bucket_exists, account_id)
+        scanned_at = datetime.now().isoformat()
+        rendered_regions = [r for r in regions if r]
+        section_payloads = {
+            section_name: section_result["data"]
+            for section_name, section_result in section_results.items()
+        }
+        v1_payload: dict[str, Any] = {
+            "account_id": account_id,
+            "scanned_at": scanned_at,
+            "regions": rendered_regions,
+            **section_payloads,
+        }
+        v2_payload: dict[str, Any] = {
+            "account_id": account_id,
+            "scanned_at": scanned_at,
+            "regions": rendered_regions,
+            "overall": overall_result,
+            **section_results,
+        }
+
+        delta_data: dict[str, Any] | None = None
+        scope_key = _scan_scope_key(region)
+        if since_last:
+            baseline_snapshot = db_manager.get_latest_scan_snapshot(
+                account_id, scope_key
+            )
+            delta_data = _build_delta_payload(
+                baseline_snapshot=baseline_snapshot,
+                current_sections=section_payloads,
+                scope_key=scope_key,
+                overall_errors=all_errors,
+            )
+            v1_payload["delta"] = delta_data
+            v2_payload["delta"] = error_result(data=delta_data, errors=all_errors)
+
+        db_manager.record_scan_snapshot(
+            account_id=account_id,
+            scope_key=scope_key,
+            data=_normalize_snapshot_payload(section_payloads),
+        )
+
+        if not json_mode:
+            _section_lambda_detail(c, lambda_result["data"])
+            if since_last and delta_data is not None:
+                _render_delta_panel(c, delta_data, all_errors)
+            if interactive:
+                _section_remediation(c, sec_findings, cost_findings)
+                _section_cur_upsell(c, cur_bucket_exists, account_id)
+
+        return {"v1": v1_payload, "v2": v2_payload}
     finally:
         if json_mode:
             logger.console = original_logger_console
+
+
+@app.command()
+def analyze(
+    days: int = typer.Option(
+        14, "--days", "-d", help="Days of cost history to analyze"
+    ),
+    region: str | None = typer.Option(
+        None,
+        "--region",
+        "-r",
+        help="Scan a single region (default: all enabled regions)",
+    ),
+    output: str = typer.Option(
+        "text",
+        "--output",
+        "-o",
+        help="Output format: text (default) or json",
+    ),
+    json_schema: str = typer.Option(
+        "v1",
+        "--json-schema",
+        help="JSON schema version for --output json: v1 (legacy payloads) or v2 (typed envelopes).",
+    ),
+    since_last: bool = typer.Option(
+        False,
+        "--since-last/--no-since-last",
+        help="Compare current scan against the previous snapshot in the same scope.",
+    ),
+    interactive: bool = typer.Option(
+        False,
+        "--interactive/--no-interactive",
+        help="Enable interactive remediation and CUR deployment prompts (default: disabled).",
+    ),
+) -> None:
+    """Retrieve read-only state (inventory, cost, security) and render a dashboard."""
+    output_mode, schema = _validate_output_options(output, json_schema)
+    payloads = _run_analyze_cycle(
+        days=days,
+        region=region,
+        output_mode=output_mode,
+        interactive=interactive,
+        since_last=since_last,
+    )
+    if output_mode == "json":
+        print(json.dumps(payloads[schema], indent=2, default=str))
+
+
+@app.command()
+def watch(
+    interval_hours: float = typer.Option(
+        4.0,
+        "--interval-hours",
+        help="Hours between scan cycles.",
+    ),
+    days: int = typer.Option(
+        14, "--days", "-d", help="Days of cost history to analyze"
+    ),
+    region: str | None = typer.Option(
+        None,
+        "--region",
+        "-r",
+        help="Scan a single region (default: all enabled regions)",
+    ),
+    output: str = typer.Option(
+        "text",
+        "--output",
+        "-o",
+        help="Output format: text (default) or json",
+    ),
+    json_schema: str = typer.Option(
+        "v1",
+        "--json-schema",
+        help="JSON schema version for --output json: v1 (legacy payloads) or v2 (typed envelopes).",
+    ),
+) -> None:
+    """Continuously run non-interactive analyze cycles and emit deltas."""
+    if interval_hours <= 0:
+        raise typer.BadParameter("--interval-hours must be greater than zero")
+    output_mode, schema = _validate_output_options(output, json_schema)
+    cycle = 0
+    try:
+        while True:
+            cycle += 1
+            payloads = _run_analyze_cycle(
+                days=days,
+                region=region,
+                output_mode=output_mode,
+                interactive=False,
+                since_last=True,
+                watch_cycle=cycle,
+            )
+            if output_mode == "json":
+                print(json.dumps(payloads[schema], default=str, separators=(",", ":")))
+            else:
+                logger.console.print(
+                    f"[dim]Next scan in {interval_hours:g}h. Press Ctrl+C to stop.[/dim]"
+                )
+            time.sleep(interval_hours * 3600)
+    except KeyboardInterrupt:
+        if output_mode != "json":
+            logger.console.print("\n[dim]Watch stopped.[/dim]")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

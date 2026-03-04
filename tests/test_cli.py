@@ -39,6 +39,7 @@ def _err(data, message="simulated error"):
         ],
     }
 
+
 # ---------------------------------------------------------------------------
 # Helper: capture Rich output in a string buffer
 # ---------------------------------------------------------------------------
@@ -152,7 +153,9 @@ class TestSectionCostAnomalies:
                 "pct_change": 100.0,
             }
         ]
-        with patch("aws_lighthouse.cli.detect_cost_anomalies", return_value=_ok(anomalies)):
+        with patch(
+            "aws_lighthouse.cli.detect_cost_anomalies", return_value=_ok(anomalies)
+        ):
             _section_cost_anomalies(c)
         output = buf.getvalue()
         assert "EC2" in output
@@ -180,7 +183,9 @@ class TestSectionCostAnomalies:
                 "pct_change": 200.0,
             },
         ]
-        with patch("aws_lighthouse.cli.detect_cost_anomalies", return_value=_ok(anomalies)):
+        with patch(
+            "aws_lighthouse.cli.detect_cost_anomalies", return_value=_ok(anomalies)
+        ):
             _section_cost_anomalies(c)
         assert "spikes" in buf.getvalue()
 
@@ -194,7 +199,9 @@ class TestSectionCostAnomalies:
                 "pct_change": 200.0,
             }
         ]
-        with patch("aws_lighthouse.cli.detect_cost_anomalies", return_value=_ok(anomalies)):
+        with patch(
+            "aws_lighthouse.cli.detect_cost_anomalies", return_value=_ok(anomalies)
+        ):
             _section_cost_anomalies(c)
         output = buf.getvalue()
         # "1 spike vs" should appear (not "spikes")
@@ -206,7 +213,9 @@ class TestSectionCostAnomalies:
         def _side_effect(threshold_pct=50.0):  # noqa: ARG001
             return _err([], "Cost Explorer throttled")
 
-        with patch("aws_lighthouse.cli.detect_cost_anomalies", side_effect=_side_effect):
+        with patch(
+            "aws_lighthouse.cli.detect_cost_anomalies", side_effect=_side_effect
+        ):
             _section_cost_anomalies(c)
 
         output = buf.getvalue()
@@ -242,7 +251,9 @@ class TestSectionIam:
 
     def test_renders_clear_panel_when_no_findings(self):
         c, buf = _console()
-        with patch("aws_lighthouse.cli.detect_overpermissive_iam", return_value=_ok([])):
+        with patch(
+            "aws_lighthouse.cli.detect_overpermissive_iam", return_value=_ok([])
+        ):
             _section_iam(c)
         assert "No over-permissive" in buf.getvalue()
 
@@ -530,6 +541,7 @@ class TestSectionSecurity:
 def _make_db_mock():
     m = MagicMock()
     m.get_latest_cost_snapshot.return_value = None
+    m.get_latest_scan_snapshot.return_value = None
     return m
 
 
@@ -606,6 +618,106 @@ class TestAnalyzeJsonOutput:
             "cost_waste",
             "tagging_findings",
         }
+
+    def test_since_last_v1_adds_delta_object(self):
+        result = self._run(["--json-schema", "v1", "--since-last"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert "delta" in data
+        assert data["delta"]["baseline_found"] is False
+        assert data["delta"]["summary"]["total_new"] == 0
+        assert data["delta"]["summary"]["total_resolved"] == 0
+
+    def test_since_last_v2_adds_delta_envelope(self):
+        result = self._run(["--json-schema", "v2", "--since-last"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert "delta" in data
+        assert data["delta"]["ok"] is True
+        assert data["delta"]["data"]["baseline_found"] is False
+        assert data["delta"]["errors"] == []
+
+    def test_since_last_persists_snapshot(self):
+        runner = CliRunner()
+        db_mock = _make_db_mock()
+        patches = {
+            **_PATCHES,
+            "aws_lighthouse.cli.get_aws_session": _mock_session,
+            "aws_lighthouse.cli.db_manager": db_mock,
+        }
+        with patch.multiple(
+            "aws_lighthouse.cli", **{k.split(".")[-1]: v for k, v in patches.items()}
+        ):
+            result = runner.invoke(
+                app,
+                ["analyze", "--output", "json", "--json-schema", "v1", "--since-last"],
+            )
+
+        assert result.exit_code == 0, result.output
+        db_mock.record_scan_snapshot.assert_called_once()
+
+    def test_since_last_second_run_reports_new_and_resolved(self):
+        runner = CliRunner()
+        db_mock = _make_db_mock()
+        db_mock.get_latest_scan_snapshot.return_value = {
+            "recorded_at": "2026-03-04T10:00:00",
+            "data": {
+                "inventory": {"ec2": [], "rds": [], "s3": [], "lambda": []},
+                "costs": {
+                    "total_usd": 42.0,
+                    "period": "2024-01-01-2024-01-31",
+                    "start": "2024-01-01",
+                    "end": "2024-01-31",
+                    "breakdown": {"EC2": 42.0},
+                },
+                "cost_anomalies": [],
+                "ri_sp_coverage": {},
+                "security_findings": [
+                    {
+                        "severity": "HIGH",
+                        "resource": "old-resource",
+                        "finding": "old finding",
+                    }
+                ],
+                "iam_findings": [],
+                "cloudwatch_findings": [],
+                "cost_waste": [],
+                "tagging_findings": [],
+            },
+        }
+
+        def _security_now(**kwargs):  # noqa: ARG001
+            return _ok(
+                [
+                    {
+                        "severity": "HIGH",
+                        "resource": "new-resource",
+                        "finding": "new finding",
+                    }
+                ]
+            )
+
+        patches = {
+            **_PATCHES,
+            "aws_lighthouse.cli.get_aws_session": _mock_session,
+            "aws_lighthouse.cli.db_manager": db_mock,
+            "aws_lighthouse.cli.run_security_scan": _security_now,
+        }
+        with patch.multiple(
+            "aws_lighthouse.cli", **{k.split(".")[-1]: v for k, v in patches.items()}
+        ):
+            result = runner.invoke(
+                app,
+                ["analyze", "--output", "json", "--json-schema", "v1", "--since-last"],
+            )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        sec_delta = data["delta"]["sections"]["security_findings"]
+        assert len(sec_delta["new"]) == 1
+        assert len(sec_delta["resolved"]) == 1
+        assert sec_delta["new"][0]["resource"] == "new-resource"
+        assert sec_delta["resolved"][0]["resource"] == "old-resource"
 
     def test_v2_json_schema_returns_envelopes_and_overall(self):
         result = self._run(["--json-schema", "v2"])
@@ -711,6 +823,40 @@ class TestAnalyzeJsonOutput:
         assert "security_findings" in data["overall"]["data"]["degraded_sections"]
         assert len(data["overall"]["errors"]) >= 1
 
+    def test_v2_delta_marks_degraded_when_section_errors_exist(self):
+        runner = CliRunner()
+        patches = {**_PATCHES, "aws_lighthouse.cli.get_aws_session": _mock_session}
+
+        def degraded_security_scan(**kwargs):  # noqa: ARG001
+            return _err([], "security scan degraded")
+
+        with patch.multiple(
+            "aws_lighthouse.cli",
+            **{
+                k.split(".")[-1]: (
+                    degraded_security_scan if k.endswith("run_security_scan") else v
+                )
+                for k, v in patches.items()
+            },
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "analyze",
+                    "--output",
+                    "json",
+                    "--json-schema",
+                    "v2",
+                    "--since-last",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["delta"]["ok"] is False
+        assert data["delta"]["data"]["summary"]["degraded"] is True
+        assert data["delta"]["data"]["summary"]["error_count"] >= 1
+
     def test_invalid_json_schema_rejected(self):
         runner = CliRunner()
         with patch("aws_lighthouse.cli.get_aws_session", _mock_session):
@@ -720,6 +866,52 @@ class TestAnalyzeJsonOutput:
 
         assert result.exit_code != 0
         assert "--json-schema must be either 'v1' or 'v2'" in result.output
+
+    def test_invalid_output_rejected(self):
+        runner = CliRunner()
+        with patch("aws_lighthouse.cli.get_aws_session", _mock_session):
+            result = runner.invoke(app, ["analyze", "--output", "xml"])
+        assert result.exit_code != 0
+        assert "--output must be either 'text' or 'json'" in result.output
+
+
+class TestWatchCommand:
+    def test_watch_json_emits_valid_json_line(self):
+        runner = CliRunner()
+        patches = {**_PATCHES, "aws_lighthouse.cli.get_aws_session": _mock_session}
+        with (
+            patch.multiple(
+                "aws_lighthouse.cli",
+                **{k.split(".")[-1]: v for k, v in patches.items()},
+            ),
+            patch("aws_lighthouse.cli.time.sleep", side_effect=KeyboardInterrupt),
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "watch",
+                    "--output",
+                    "json",
+                    "--json-schema",
+                    "v1",
+                    "--interval-hours",
+                    "0.001",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        lines = [line for line in result.output.splitlines() if line.strip()]
+        assert len(lines) == 1
+        payload = json.loads(lines[0])
+        assert payload["account_id"] == "123456789012"
+        assert "delta" in payload
+        assert payload["delta"]["baseline_found"] is False
+
+    def test_watch_rejects_invalid_interval(self):
+        runner = CliRunner()
+        result = runner.invoke(app, ["watch", "--interval-hours", "0"])
+        assert result.exit_code != 0
+        assert "--interval-hours must be greater than zero" in result.output
 
 
 class TestAnalyzeInteractiveMode:
