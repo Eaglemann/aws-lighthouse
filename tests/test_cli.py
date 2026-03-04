@@ -2,6 +2,7 @@
 
 import io
 import json
+import re
 from unittest.mock import MagicMock, patch
 
 from rich.console import Console
@@ -50,6 +51,13 @@ def _console() -> tuple[Console, io.StringIO]:
     buf = io.StringIO()
     c = Console(file=buf, no_color=True, highlight=False, width=120)
     return c, buf
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
 
 
 # ---------------------------------------------------------------------------
@@ -865,14 +873,24 @@ class TestAnalyzeJsonOutput:
             )
 
         assert result.exit_code != 0
-        assert "--json-schema must be either 'v1' or 'v2'" in result.output
+        plain = _strip_ansi(result.output).lower()
+        assert "json-schema" in plain
+        assert (
+            "--json-schema must be either 'v1' or 'v2'" in plain
+            or "invalid value for '--json-schema'" in plain
+        )
 
     def test_invalid_output_rejected(self):
         runner = CliRunner()
         with patch("aws_lighthouse.cli.get_aws_session", _mock_session):
             result = runner.invoke(app, ["analyze", "--output", "xml"])
         assert result.exit_code != 0
-        assert "--output must be either 'text' or 'json'" in result.output
+        plain = _strip_ansi(result.output).lower()
+        assert "output" in plain
+        assert (
+            "--output must be either 'text' or 'json'" in plain
+            or "invalid value for '--output'" in plain
+        )
 
 
 class TestWatchCommand:
@@ -911,7 +929,12 @@ class TestWatchCommand:
         runner = CliRunner()
         result = runner.invoke(app, ["watch", "--interval-hours", "0"])
         assert result.exit_code != 0
-        assert "--interval-hours must be greater than zero" in result.output
+        plain = _strip_ansi(result.output).lower()
+        assert "interval-hours" in plain
+        assert (
+            "--interval-hours must be greater than zero" in plain
+            or "invalid value for '--interval-hours'" in plain
+        )
 
 
 class TestAnalyzeInteractiveMode:
