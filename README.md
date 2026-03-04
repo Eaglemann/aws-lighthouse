@@ -85,6 +85,20 @@ uv run aws-lighthouse analyze [--days N]
 | Flag | Default | Description |
 |---|---|---|
 | `--days`, `-d` | `14` | Cost Explorer look-back window in days |
+| `--output`, `-o` | `text` | Output format: `text` or `json` |
+| `--json-schema` | `v1` | JSON contract for `--output json`: `v1` legacy payloads, `v2` typed envelopes |
+
+Machine-output examples:
+```bash
+# Backward-compatible payloads (default)
+uv run aws-lighthouse analyze --output json
+
+# Explicit v1
+uv run aws-lighthouse analyze --output json --json-schema v1
+
+# Envelope output (ok/data/errors per section + overall)
+uv run aws-lighthouse analyze --output json --json-schema v2
+```
 
 **What it does, step by step:**
 
@@ -252,17 +266,26 @@ All tools are available to the agent in the interactive shell. Read-only tools b
 
 | Tool | Description |
 |---|---|
-| `tool_get_enabled_regions` | List all opted-in AWS regions for this account |
-| `tool_get_ec2_inventory(region)` | EC2 instances and state |
-| `tool_get_rds_inventory(region)` | RDS instances and state |
-| `tool_get_s3_inventory` | S3 buckets (global) |
-| `tool_get_lambda_inventory(region)` | Lambda functions with staleness flag |
-| `tool_get_ri_sp_coverage(days)` | RI and Savings Plan coverage + utilization |
-| `tool_detect_cost_anomalies(threshold_pct)` | Per-service spend spikes vs prior 7d |
-| `tool_check_tagging_compliance(required_tags, region)` | Missing tags on EC2/RDS/S3 |
-| `tool_detect_overpermissive_iam` | IAM wildcard policy findings |
-| `tool_detect_cloudwatch_gaps(region)` | EC2/RDS resources missing alarms |
+| `tool_get_enabled_regions(schema)` | List all opted-in AWS regions for this account |
+| `tool_get_ec2_inventory(region, schema)` | EC2 instances and state |
+| `tool_get_rds_inventory(region, schema)` | RDS instances and state |
+| `tool_get_s3_inventory(schema)` | S3 buckets (global) |
+| `tool_get_lambda_inventory(region, schema)` | Lambda functions with staleness flag |
+| `tool_get_ri_sp_coverage(days, schema)` | RI and Savings Plan coverage + utilization |
+| `tool_detect_cost_anomalies(threshold_pct, schema)` | Per-service spend spikes vs prior 7d |
+| `tool_check_tagging_compliance(required_tags, region, schema)` | Missing tags on EC2/RDS/S3 |
+| `tool_detect_overpermissive_iam(schema)` | IAM wildcard policy findings |
+| `tool_detect_cloudwatch_gaps(region, schema)` | EC2/RDS resources missing alarms |
 | `parse_terraform_context` | Parse local `.tf` files |
+
+For read-only scan tools, `schema` is optional:
+- `schema="v1"` (default): returns legacy payload only.
+- `schema="v2"`: returns full envelope with `ok`, `data`, and `errors`.
+
+Example:
+```text
+tool_get_ec2_inventory(region="us-east-1", schema="v2")
+```
 
 ### Mutative (require explicit approval)
 
