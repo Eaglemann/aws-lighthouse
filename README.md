@@ -59,6 +59,9 @@ uv sync
 # Full multi-region dashboard (auto-detects all enabled regions)
 uv run aws-lighthouse analyze
 
+# Apply an explicit repo-local policy file
+uv run aws-lighthouse analyze --config ./lighthouse-policy.toml
+
 # Adjust cost look-back window
 uv run aws-lighthouse analyze --days 30
 
@@ -95,6 +98,8 @@ uv run aws-lighthouse analyze [--days N]
 | `--output`, `-o` | `text` | Output format: `text` or `json` |
 | `--json-schema` | `v1` | JSON contract for `--output json`: `v1` legacy payloads, `v2` typed envelopes |
 | `--since-last` | `off` | Compute and render deltas against the previous snapshot in the same scope |
+| `--config` | _unset_ | Explicit path to a TOML policy file for scan behavior |
+| `--interactive` | `off` | Enable remediation and CUR deployment prompts after the scan |
 
 Machine-output examples:
 ```bash
@@ -150,8 +155,46 @@ uv run aws-lighthouse watch [--interval-hours N] [--days N]
 | `--region`, `-r` | _all enabled_ | Restrict watch to a single region |
 | `--output`, `-o` | `text` | Output format: `text` or `json` |
 | `--json-schema` | `v1` | JSON contract for `--output json`: `v1` legacy payloads, `v2` typed envelopes |
+| `--config` | _unset_ | Explicit path to a TOML policy file for scan behavior |
 
 For `--output json`, `watch` emits one JSON object per line (JSON Lines), one per cycle.
+
+### Explicit Policy Config (`--config`)
+
+`analyze` and `watch` can load an explicit TOML policy file. If `--config` is omitted, runtime behavior is unchanged.
+
+Example:
+
+```toml
+required_tags = ["Environment", "Owner", "CostCenter"]
+cost_anomaly_threshold_pct = 75
+
+[regions]
+include = ["us-east-1", "us-west-2"]
+
+[scans]
+security = true
+tagging = true
+cloudwatch = false
+```
+
+Supported policy keys in v1:
+- `required_tags`
+- `cost_anomaly_threshold_pct`
+- `[regions].include`
+- `[regions].exclude`
+- `[scans].cost_anomalies`
+- `[scans].ri_sp_coverage`
+- `[scans].security`
+- `[scans].iam`
+- `[scans].cloudwatch`
+- `[scans].cost_waste`
+- `[scans].tagging`
+
+Precedence rules:
+- CLI flags override config where both affect the run.
+- `--region` overrides config region filters.
+- Snapshot baselines for `--since-last` and `watch` are separated when the effective policy changes.
 
 ---
 
@@ -270,7 +313,7 @@ Finds resources with no alarm on key metrics:
 
 ### Tagging Compliance
 
-Checks every EC2 instance, RDS database, and S3 bucket for the required tags (`Environment`, `Owner` by default). Lists every missing tag per resource.
+Checks every EC2 instance, RDS database, Lambda function, and S3 bucket for the required tags (`Environment`, `Owner` by default). Lists every missing tag per resource.
 
 ### Lambda Inventory
 
@@ -309,7 +352,7 @@ All tools are available to the agent in the interactive shell. Read-only tools b
 | `tool_get_lambda_inventory(region, schema)` | Lambda functions with staleness flag |
 | `tool_get_ri_sp_coverage(days, schema)` | RI and Savings Plan coverage + utilization |
 | `tool_detect_cost_anomalies(threshold_pct, schema)` | Per-service spend spikes vs prior 7d |
-| `tool_check_tagging_compliance(required_tags, region, schema)` | Missing tags on EC2/RDS/S3 |
+| `tool_check_tagging_compliance(required_tags, region, schema)` | Missing tags on EC2/RDS/Lambda/S3 |
 | `tool_detect_overpermissive_iam(schema)` | IAM wildcard policy findings |
 | `tool_detect_cloudwatch_gaps(region, schema)` | EC2/RDS resources missing alarms |
 | `parse_terraform_context` | Parse local `.tf` files |
@@ -415,9 +458,10 @@ Sensitive paths are blocked by three mechanisms:
 Every tool invocation is recorded in `~/.aws-lighthouse/lighthouse.db` (`audit_log` table) with:
 - `tool_name` and `args_json` — what the agent requested
 - `decision` — `approved`, `denied`, or `auto_approved` (safe/read-only tools)
+- `execution_status`, `result`, and `error` — the observed execution outcome
 - `timestamp`
 
-**Limitation**: the audit log records the _decision_ and _arguments_, not the _content_ returned by the tool (e.g., file contents, scan results). Sensitive data that an approved tool reads remains only in process memory and is not persisted to disk.
+**Limitation**: result content is stored as returned by the tool. Approved local file reads or tool outputs may therefore be persisted in the audit log.
 
 ### Trust model
 
@@ -479,7 +523,7 @@ aws_lighthouse/
 ├── db.py                   # SQLite cost snapshot store
 ├── logger.py               # Rich console logger wrapper
 ├── templates/              # CloudFormation templates
-│   └── cur_stack.yaml      # Cost & Usage Report setup
+│   └── cur.yaml            # Cost & Usage Report setup
 └── tools/
     ├── bash.py             # File I/O and shell execution (read_file, write_file, execute_bash)
     ├── cfn_deploy.py       # CloudFormation deployment (CUR stack)
@@ -495,7 +539,7 @@ aws_lighthouse/
     ├── ri_sp_coverage.py   # RI and Savings Plan coverage + utilization
     ├── security.py         # s3_block_public_access (agent-facing mutative tool)
     ├── security_scan.py    # Eleven-check security posture scan
-    ├── tagging.py          # Tagging compliance (EC2 / RDS / S3)
+    ├── tagging.py          # Tagging compliance (EC2 / RDS / Lambda / S3)
     └── terraform.py        # Terraform file parser
 ```
 
