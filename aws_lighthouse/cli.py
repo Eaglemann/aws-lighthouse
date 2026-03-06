@@ -1,5 +1,6 @@
 import io
 import json
+import shlex
 import time
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -2029,18 +2030,60 @@ def analyze(
     ),
 ) -> None:
     """Retrieve read-only state (inventory, cost, security) and render a dashboard."""
-    output_mode, schema = _validate_output_options(output, json_schema)
-    policy = _load_scan_policy(config)
-    payloads = _run_analyze_cycle(
+    _run_analyze_command(
         days=days,
         region=region,
-        output_mode=output_mode,
-        interactive=interactive,
+        output=output,
+        json_schema=json_schema,
         since_last=since_last,
-        policy=policy,
+        config=config,
+        interactive=interactive,
     )
-    if output_mode == "json":
-        print(json.dumps(payloads[schema], indent=2, default=str))
+
+
+def _run_analyze_command(
+    *,
+    days: int,
+    region: str | None,
+    output: str,
+    json_schema: str,
+    since_last: bool,
+    config: Path | None,
+    interactive: bool,
+) -> None:
+    """Run the analyze command through the shared validation and execution path."""
+    output_mode, schema = _validate_output_options(output, json_schema)
+    try:
+        policy = _load_scan_policy(config)
+        payloads = _run_analyze_cycle(
+            days=days,
+            region=region,
+            output_mode=output_mode,
+            interactive=interactive,
+            since_last=since_last,
+            policy=policy,
+        )
+        if output_mode == "json":
+            print(json.dumps(payloads[schema], indent=2, default=str))
+    except Exception as exc:
+        log_path = (
+            logger.record_exception("Analyze command failed", exc)
+            if output_mode == "json"
+            else logger.exception("Analyze command failed", exc)
+        )
+        if output_mode == "json":
+            print(
+                json.dumps(
+                    {
+                        "event": "error",
+                        "message": str(exc),
+                        "log_path": log_path,
+                    },
+                    default=str,
+                    separators=(",", ":"),
+                )
+            )
+        raise typer.Exit(code=1) from exc
 
 
 @app.command()
@@ -2111,6 +2154,11 @@ def watch(
                         f"[dim]Next scan in {interval_hours:g}h. Press Ctrl+C to stop.[/dim]"
                     )
             except Exception as e:
+                log_path = (
+                    logger.record_exception(f"Watch cycle {cycle} failed", e)
+                    if output_mode == "json"
+                    else logger.exception(f"Watch cycle {cycle} failed", e)
+                )
                 if output_mode == "json":
                     print(
                         json.dumps(
@@ -2119,13 +2167,12 @@ def watch(
                                 "cycle": cycle,
                                 "scanned_at": datetime.now().isoformat(),
                                 "message": str(e),
+                                "log_path": log_path,
                             },
                             default=str,
                             separators=(",", ":"),
                         )
                     )
-                else:
-                    logger.error(f"Watch cycle {cycle} failed: {e}")
             time.sleep(interval_hours * 3600)
     except KeyboardInterrupt:
         if output_mode != "json":
@@ -2155,7 +2202,10 @@ def _render_shell_help(c: Console) -> None:
     help_table.add_row(
         "/plan", "Build a local remediation plan from open opportunities."
     )
-    help_table.add_row("/analyze", "Ask the agent to run a full multi-region analysis.")
+    help_table.add_row("/logs", "Show recent local aws-lighthouse log entries.")
+    help_table.add_row(
+        "/analyze", "Run the local analyze command directly (supports CLI flags)."
+    )
     help_table.add_row("/clear", "Clear shell conversation memory and start fresh.")
     help_table.add_row("/exit", "Exit the shell.")
     c.print(
@@ -2271,6 +2321,21 @@ def _render_shell_plan(c: Console, *, limit: int = 10) -> None:
     c.print()
 
 
+def _render_shell_logs(c: Console, *, lines: int = 80) -> None:
+    c.print(
+        Panel(
+            logger.tail_log(lines),
+            title=(
+                "[bold cyan]Recent Logs[/bold cyan]  "
+                f"[dim]{logger.get_log_path()}[/dim]"
+            ),
+            border_style="cyan",
+            padding=(0, 1),
+        )
+    )
+    c.print()
+
+
 def _translate_shell_command(user_input: str) -> tuple[str, str | None]:
     normalized = user_input.strip().lower()
     if normalized == "/help":
@@ -2281,16 +2346,100 @@ def _translate_shell_command(user_input: str) -> tuple[str, str | None]:
         return "opps", None
     if normalized == "/plan":
         return "plan", None
+    if normalized == "/logs":
+        return "logs", None
     if normalized == "/clear":
         return "clear", None
     if normalized == "/exit":
         return "exit", None
-    if normalized == "/analyze":
-        return (
-            "agent",
-            "Run a full multi-region AWS analysis and summarize the most urgent findings first.",
-        )
+    if normalized == "/analyze" or normalized.startswith("/analyze "):
+        return "analyze", user_input[1:].strip()
+    if normalized == "analyze" or normalized.startswith("analyze "):
+        return "analyze", user_input.strip()
     return "agent", user_input
+
+
+def _run_shell_analyze(c: Console, command_text: str) -> None:  # noqa: S105
+    """Parse and run analyze inside the shell without using the LLM path."""
+    try:
+        argv = shlex.split(command_text)
+    except ValueError as exc:
+        logger.error(f"Invalid analyze command syntax: {exc}")
+        return
+
+    if not argv or argv[0] != "analyze":
+        logger.error("Internal shell analyze routing error.")
+        return
+
+    args = argv[1:]
+    days = 14
+    region: str | None = None
+    output = "text"
+    json_schema = "v1"
+    since_last = False
+    config: Path | None = None
+    interactive = False
+    value_flags = {
+        "--days": "days",
+        "-d": "days",
+        "--region": "region",
+        "-r": "region",
+        "--output": "output",
+        "-o": "output",
+        "--json-schema": "json_schema",
+        "--config": "config",
+    }
+    boolean_flags = {
+        "--since-last": ("since_last", True),
+        "--no-since-last": ("since_last", False),
+        "--interactive": ("interactive", True),
+        "--no-interactive": ("interactive", False),
+    }
+
+    idx = 0
+    while idx < len(args):
+        arg_token = args[idx]
+        if arg_token in value_flags:
+            idx += 1
+            option_name = value_flags[arg_token]
+            if idx >= len(args):
+                logger.error(f"Missing value for {arg_token}")
+                return
+            option_value = args[idx]
+            if option_name == "days":
+                try:
+                    days = int(option_value)
+                except ValueError:
+                    logger.error(f"Invalid --days value: {option_value}")
+                    return
+            elif option_name == "region":
+                region = option_value
+            elif option_name == "output":
+                output = option_value
+            elif option_name == "json_schema":
+                json_schema = option_value
+            elif option_name == "config":
+                config = Path(option_value)
+        elif arg_token in boolean_flags:
+            bool_option_name, bool_option_value = boolean_flags[arg_token]
+            if bool_option_name == "since_last":
+                since_last = bool_option_value
+            elif bool_option_name == "interactive":
+                interactive = bool_option_value
+        else:
+            logger.error(f"Unknown analyze option: {arg_token}")
+            return
+        idx += 1
+
+    _run_analyze_command(
+        days=days,
+        region=region,
+        output=output,
+        json_schema=json_schema,
+        since_last=since_last,
+        config=config,
+        interactive=interactive,
+    )
 
 
 def _render_ollama_alert(c: Console, runtime_status: Mapping[str, Any]) -> None:
@@ -2316,7 +2465,7 @@ def _render_ollama_alert(c: Console, runtime_status: Mapping[str, Any]) -> None:
                 "[dim]Next steps:[/dim]\n"
                 "Start Ollama and keep it running.\n"
                 f"Run `ollama pull {model}` if the model is missing.\n\n"
-                "[dim]Local shell commands still work:[/dim] /help, /status, /opps, /plan"
+                "[dim]Local shell commands still work:[/dim] /help, /status, /opps, /plan, /logs"
             ),
             title=title,
             border_style=border_style,
@@ -2324,6 +2473,19 @@ def _render_ollama_alert(c: Console, runtime_status: Mapping[str, Any]) -> None:
         )
     )
     c.print()
+
+
+@app.command()
+def logs(
+    lines: int = typer.Option(
+        80,
+        "--lines",
+        min=1,
+        help="Number of recent log lines to show.",
+    ),
+) -> None:
+    """Show recent aws-lighthouse log entries."""
+    _render_shell_logs(logger.console, lines=lines)
 
 
 @app.command()
@@ -2342,8 +2504,8 @@ def shell() -> None:
             Panel(
                 "🔦  [bold cyan]AWS LIGHTHOUSE[/bold cyan]\n"
                 "[dim]FinOps · Security · Infrastructure[/dim]\n"
-                "[dim]Type a request or use /help, /status, /opps, /plan, /analyze.[/dim]\n"
-                "[dim]Examples: 'scan all my regions', 'what changed?', 'show top risks'[/dim]",
+                "[dim]Type a request or use /help, /status, /opps, /plan, /logs, /analyze.[/dim]\n"
+                "[dim]Examples: 'analyze --since-last', 'scan all my regions', 'show top risks'[/dim]",
                 border_style="cyan",
                 padding=(0, 2),
                 expand=False,
@@ -2365,6 +2527,9 @@ def shell() -> None:
             "metadata, not AWS resources.\n"
             "Before calling any tool, output a concise explanation of what you are about to "
             "do and why. This is shown to the user before they approve.\n"
+            "Do not invent a schema_version argument. The only valid schema values are "
+            "'v1' and 'v2', passed as the 'schema' argument when the user explicitly asks "
+            "for v2 output; otherwise rely on tool defaults.\n"
             "When the user asks for an analysis or inventory of their AWS environment, "
             "first call tool_get_enabled_regions to discover all active regions, then run "
             "the relevant inventory and scan tools for each region to give complete coverage."
@@ -2380,7 +2545,7 @@ def shell() -> None:
             with c.status("[cyan]🤖  Initializing agent...[/cyan]", spinner="dots"):
                 graph = create_agent_graph()
         except Exception as e:
-            logger.error(f"Failed to initialize agent: {e}")
+            logger.exception("Failed to initialize agent", e)
     else:
         _render_ollama_alert(c, startup_runtime)
 
@@ -2415,6 +2580,12 @@ def shell() -> None:
             if action == "plan":
                 _render_shell_plan(c)
                 continue
+            if action == "logs":
+                _render_shell_logs(c)
+                continue
+            if action == "analyze":
+                _run_shell_analyze(c, translated_input or "analyze")
+                continue
             if action == "clear":
                 config = _new_shell_config()
                 first_turn = True
@@ -2432,7 +2603,7 @@ def shell() -> None:
                     ):
                         graph = create_agent_graph()
                 except Exception as e:
-                    logger.error(f"Failed to initialize agent: {e}")
+                    logger.exception("Failed to initialize agent", e)
                     continue
 
             prompt_text = translated_input or user_input
@@ -2480,13 +2651,19 @@ def shell() -> None:
                 if not runtime_status["ok"]:
                     _render_ollama_alert(c, runtime_status)
                     continue
-                logger.error(f"Error: {e}")
+                logger.exception("Shell agent turn failed", e)
+                c.print(
+                    f"[dim]Use /logs to inspect the latest traceback in {logger.get_log_path()}[/dim]"
+                )
 
         except KeyboardInterrupt:
             c.print("\n[dim]  👋 Goodbye.[/dim]\n")
             break
         except Exception as e:
-            logger.error(f"Error: {e}")
+            logger.exception("Shell loop failed", e)
+            c.print(
+                f"[dim]Use /logs to inspect the latest traceback in {logger.get_log_path()}[/dim]"
+            )
 
 
 if __name__ == "__main__":
