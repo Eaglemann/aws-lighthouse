@@ -153,6 +153,12 @@ class TestScanScopeKey:
     def test_single_region_scope_includes_days(self):
         assert _scan_scope_key("us-east-1", 30) == "single-region:us-east-1:days=30"
 
+    def test_policy_scope_token_is_appended(self):
+        assert (
+            _scan_scope_key(None, 14, policy_scope_token="abc123")  # noqa: S106
+            == "multi-region:days=14:policy=abc123"
+        )
+
 
 # ---------------------------------------------------------------------------
 # _section_cost_anomalies
@@ -1004,6 +1010,292 @@ class TestAnalyzeJsonOutput:
             or "invalid value for '--output'" in plain
         )
 
+    def test_config_invalid_toml_is_rejected(self, tmp_path):
+        config = tmp_path / "policy.toml"
+        config.write_text("required_tags = [", encoding="utf-8")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["analyze", "--output", "json", "--config", str(config)],
+        )
+
+        assert result.exit_code != 0
+        plain = _strip_ansi(result.output)
+        assert "Invalid --config file" in plain
+        assert "TOML parse error" in plain
+
+    def test_config_validation_error_is_rejected(self, tmp_path):
+        config = tmp_path / "policy.toml"
+        config.write_text('cost_anomaly_threshold_pct = -1\n', encoding="utf-8")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["analyze", "--output", "json", "--config", str(config)],
+        )
+
+        assert result.exit_code != 0
+        plain = _strip_ansi(result.output)
+        assert "Invalid --config file" in plain
+        assert "cost_anomaly_threshold_pct" in plain
+
+    def test_config_required_tags_are_passed_to_tagging(self, tmp_path):
+        config = tmp_path / "policy.toml"
+        config.write_text(
+            'required_tags = ["Environment", "Owner", "CostCenter"]\n',
+            encoding="utf-8",
+        )
+
+        runner = CliRunner()
+        patches = {**_PATCHES, "aws_lighthouse.cli.get_aws_session": _mock_session}
+        with (
+            patch.multiple(
+                "aws_lighthouse.cli",
+                **{k.split(".")[-1]: v for k, v in patches.items()},
+            ),
+            patch("aws_lighthouse.cli.check_tagging_compliance", return_value=_ok([]))
+            as mock_tagging,
+        ):
+            result = runner.invoke(
+                app,
+                ["analyze", "--output", "json", "--config", str(config)],
+            )
+
+        assert result.exit_code == 0, result.output
+        required_tags = mock_tagging.call_args.kwargs["required_tags"]
+        assert required_tags == ["Environment", "Owner", "CostCenter"]
+
+    def test_config_threshold_is_passed_to_cost_anomalies(self, tmp_path):
+        config = tmp_path / "policy.toml"
+        config.write_text("cost_anomaly_threshold_pct = 75\n", encoding="utf-8")
+
+        runner = CliRunner()
+        patches = {**_PATCHES, "aws_lighthouse.cli.get_aws_session": _mock_session}
+        with (
+            patch.multiple(
+                "aws_lighthouse.cli",
+                **{k.split(".")[-1]: v for k, v in patches.items()},
+            ),
+            patch("aws_lighthouse.cli.detect_cost_anomalies", return_value=_ok([]))
+            as mock_anomalies,
+        ):
+            result = runner.invoke(
+                app,
+                ["analyze", "--output", "json", "--config", str(config)],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert mock_anomalies.call_args.kwargs["threshold_pct"] == 75.0
+
+    def test_json_output_with_config_remains_machine_clean(self, tmp_path):
+        config = tmp_path / "policy.toml"
+        config.write_text("cost_anomaly_threshold_pct = 75\n", encoding="utf-8")
+
+        result = self._run(["--config", str(config)])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["account_id"] == "123456789012"
+        assert "[bold" not in result.output
+        assert "\x1b[" not in result.output
+
+    def test_config_can_disable_sections_without_breaking_json_shape(self, tmp_path):
+        config = tmp_path / "policy.toml"
+        config.write_text(
+            """
+[scans]
+security = false
+tagging = false
+""".strip(),
+            encoding="utf-8",
+        )
+
+        runner = CliRunner()
+        patches = {**_PATCHES, "aws_lighthouse.cli.get_aws_session": _mock_session}
+        with (
+            patch.multiple(
+                "aws_lighthouse.cli",
+                **{k.split(".")[-1]: v for k, v in patches.items()},
+            ),
+            patch("aws_lighthouse.cli.run_security_scan") as mock_security,
+            patch("aws_lighthouse.cli.check_tagging_compliance") as mock_tagging,
+        ):
+            result = runner.invoke(
+                app,
+                ["analyze", "--output", "json", "--json-schema", "v1", "--config", str(config)],
+            )
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["security_findings"] == []
+        assert payload["tagging_findings"] == []
+        mock_security.assert_not_called()
+        mock_tagging.assert_not_called()
+
+    def test_config_region_filters_limit_multi_region_runs(self, tmp_path):
+        config = tmp_path / "policy.toml"
+        config.write_text(
+            """
+[regions]
+include = ["us-west-2"]
+""".strip(),
+            encoding="utf-8",
+        )
+
+        runner = CliRunner()
+        db_mock = _make_db_mock()
+        patches = {
+            **_PATCHES,
+            "aws_lighthouse.cli.get_aws_session": _mock_session,
+            "aws_lighthouse.cli.get_enabled_regions": lambda: _ok(
+                ["us-east-1", "us-west-2"]
+            ),
+            "aws_lighthouse.cli.db_manager": db_mock,
+        }
+        with patch.multiple(
+            "aws_lighthouse.cli", **{k.split(".")[-1]: v for k, v in patches.items()}
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "analyze",
+                    "--output",
+                    "json",
+                    "--json-schema",
+                    "v1",
+                    "--since-last",
+                    "--config",
+                    str(config),
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["regions"] == ["us-west-2"]
+        scope_key = db_mock.record_scan_snapshot.call_args.kwargs["scope_key"]
+        assert scope_key.startswith("multi-region:days=14:policy=")
+
+    def test_explicit_region_overrides_config_region_filters_for_scope(self, tmp_path):
+        config = tmp_path / "policy.toml"
+        config.write_text(
+            """
+[regions]
+include = ["us-west-2"]
+""".strip(),
+            encoding="utf-8",
+        )
+
+        runner = CliRunner()
+        db_mock = _make_db_mock()
+        patches = {
+            **_PATCHES,
+            "aws_lighthouse.cli.get_aws_session": _mock_session,
+            "aws_lighthouse.cli.db_manager": db_mock,
+        }
+        with patch.multiple(
+            "aws_lighthouse.cli", **{k.split(".")[-1]: v for k, v in patches.items()}
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "analyze",
+                    "--output",
+                    "json",
+                    "--json-schema",
+                    "v1",
+                    "--since-last",
+                    "--region",
+                    "us-east-1",
+                    "--config",
+                    str(config),
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        db_mock.get_latest_scan_snapshot.assert_called_once_with(
+            "123456789012", "single-region:us-east-1:days=14"
+        )
+
+    def test_default_value_config_reuses_existing_scope_key(self, tmp_path):
+        config = tmp_path / "policy.toml"
+        config.write_text(
+            """
+required_tags = ["Environment", "Owner"]
+cost_anomaly_threshold_pct = 50
+
+[scans]
+cost_anomalies = true
+ri_sp_coverage = true
+security = true
+iam = true
+cloudwatch = true
+cost_waste = true
+tagging = true
+""".strip(),
+            encoding="utf-8",
+        )
+
+        runner = CliRunner()
+        db_mock = _make_db_mock()
+        patches = {
+            **_PATCHES,
+            "aws_lighthouse.cli.get_aws_session": _mock_session,
+            "aws_lighthouse.cli.db_manager": db_mock,
+        }
+        with patch.multiple(
+            "aws_lighthouse.cli", **{k.split(".")[-1]: v for k, v in patches.items()}
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "analyze",
+                    "--output",
+                    "json",
+                    "--json-schema",
+                    "v1",
+                    "--since-last",
+                    "--config",
+                    str(config),
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert (
+            db_mock.record_scan_snapshot.call_args.kwargs["scope_key"]
+            == "multi-region:days=14"
+        )
+
+    def test_config_region_filter_unknown_enabled_region_is_rejected(self, tmp_path):
+        config = tmp_path / "policy.toml"
+        config.write_text(
+            """
+[regions]
+include = ["eu-west-1"]
+""".strip(),
+            encoding="utf-8",
+        )
+
+        runner = CliRunner()
+        patches = {
+            **_PATCHES,
+            "aws_lighthouse.cli.get_aws_session": _mock_session,
+            "aws_lighthouse.cli.get_enabled_regions": lambda: _ok(["us-east-1"]),
+        }
+        with patch.multiple(
+            "aws_lighthouse.cli", **{k.split(".")[-1]: v for k, v in patches.items()}
+        ):
+            result = runner.invoke(
+                app,
+                ["analyze", "--output", "json", "--config", str(config)],
+            )
+
+        assert result.exit_code != 0
+        plain = _strip_ansi(result.output)
+        assert "region filter error" in plain
+        assert "configured regions are not" in plain
+        assert "enabled for this account" in plain
+
 
 class TestWatchCommand:
     @staticmethod
@@ -1175,6 +1467,38 @@ class TestWatchCommand:
             "--interval-hours must be greater than zero" in plain
             or "invalid value for '--interval-hours'" in plain
         )
+
+    def test_watch_loads_and_passes_policy_config(self, tmp_path):
+        config = tmp_path / "policy.toml"
+        config.write_text("cost_anomaly_threshold_pct = 75\n", encoding="utf-8")
+
+        runner = CliRunner()
+        with (
+            patch(
+                "aws_lighthouse.cli._run_analyze_cycle",
+                return_value=self._payload(),
+            ) as mock_cycle,
+            patch("aws_lighthouse.cli.time.sleep", side_effect=KeyboardInterrupt),
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "watch",
+                    "--output",
+                    "json",
+                    "--json-schema",
+                    "v1",
+                    "--interval-hours",
+                    "0.001",
+                    "--config",
+                    str(config),
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        policy = mock_cycle.call_args.kwargs["policy"]
+        assert policy is not None
+        assert policy.cost_anomaly_threshold_pct == 75.0
 
 
 class TestAnalyzeInteractiveMode:

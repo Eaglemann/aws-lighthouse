@@ -3,6 +3,7 @@ import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from pathlib import Path
 from typing import Any, cast
 
 import typer
@@ -20,6 +21,7 @@ from rich.text import Text
 from .auth import get_aws_session
 from .db import db_manager
 from .logger import logger
+from .policy import PolicyConfigError, ScanPolicy, load_policy_config
 from .scan_contract import error_result, merge_list_results
 from .tools.cloudwatch_scan import detect_cloudwatch_gaps
 from .tools.cost import get_monthly_cost_summary
@@ -94,11 +96,17 @@ _DELTA_SECTION_KEYS = (
 )
 
 
-def _scan_scope_key(region: str | None, days: int) -> str:
+def _scan_scope_key(
+    region: str | None, days: int, policy_scope_token: str | None = None
+) -> str:
     """Return persistence scope key for scan snapshots."""
     if region:
-        return f"single-region:{region}:days={days}"
-    return f"multi-region:days={days}"
+        base = f"single-region:{region}:days={days}"
+    else:
+        base = f"multi-region:days={days}"
+    if not policy_scope_token:
+        return base
+    return f"{base}:policy={policy_scope_token}"
 
 
 def _normalize_snapshot_payload(data: dict[str, Any]) -> dict[str, Any]:
@@ -221,6 +229,34 @@ def _build_delta_payload(
         "summary": summary,
         "sections": section_deltas,
     }
+
+
+def _load_scan_policy(config_path: Path | None) -> ScanPolicy | None:
+    if config_path is None:
+        return None
+    try:
+        return load_policy_config(config_path)
+    except PolicyConfigError as exc:
+        raise typer.BadParameter(
+            f"Invalid --config file '{config_path}': {exc}"
+        ) from exc
+
+
+def _render_skipped_panel(c: Console, title: str) -> None:
+    c.print(
+        Panel(
+            "[dim]Skipped by policy config.[/dim]",
+            title=f"{title}  [dim]disabled by policy[/dim]",
+            border_style="dim",
+            padding=(0, 1),
+        )
+    )
+    c.print()
+
+
+def _skipped_result(c: Console, title: str, data: Any) -> ScanResult:
+    _render_skipped_panel(c, title)
+    return error_result(data=data, errors=[])
 
 
 def _render_delta_panel(
@@ -424,10 +460,12 @@ def _section_cost_columns(
     return costs_result
 
 
-def _section_cost_anomalies(c: Console) -> ScanResult:
+def _section_cost_anomalies(
+    c: Console, threshold_pct: float = 50.0
+) -> ScanResult:
     """Detect and render cost anomaly panel."""
     with c.status("[cyan]🚨  Detecting cost anomalies...[/cyan]", spinner="dots"):
-        anomalies_result = detect_cost_anomalies(threshold_pct=50.0)
+        anomalies_result = detect_cost_anomalies(threshold_pct=threshold_pct)
     anomalies = anomalies_result["data"]
 
     if anomalies:
@@ -810,13 +848,18 @@ def _section_tagging(
     c: Console,
     regions: list[str | None],
     multi_region: bool,
+    required_tags: list[str] | None = None,
 ) -> ScanResult:
     """Check tagging compliance across all regions and render panel."""
     tag_results: list[ScanResult] = []
 
     def _tag_region(args: tuple[str | None, bool]) -> ScanResult:
         reg, include_s3 = args
-        _tag = check_tagging_compliance(region=reg, include_s3=include_s3)
+        _tag = check_tagging_compliance(
+            region=reg,
+            include_s3=include_s3,
+            required_tags=required_tags,
+        )
         if multi_region and reg is not None:
             for f in _tag["data"]:
                 if "region" not in f:
@@ -1082,9 +1125,11 @@ def _run_analyze_cycle(
     output_mode: str,
     interactive: bool,
     since_last: bool,
+    policy: ScanPolicy | None = None,
     watch_cycle: int | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Execute one analyze cycle and return both v1 and v2 machine payloads."""
+    effective_policy = policy or ScanPolicy.default()
     json_mode = output_mode == "json"
     c = Console(file=io.StringIO(), no_color=True) if json_mode else logger.console
     original_logger_console = logger.console
@@ -1127,9 +1172,22 @@ def _run_analyze_cycle(
                 "[cyan]🌍  Detecting enabled regions...[/cyan]", spinner="dots"
             ):
                 region_result = get_enabled_regions()
-            regions = list(region_result["data"])
+            raw_regions = list(region_result["data"])
             region_errors.extend(region_result["errors"])
-            if not regions:
+            if effective_policy.regions.active():
+                if region_result["errors"] and not raw_regions:
+                    raise typer.BadParameter(
+                        "Configured --config region filters require successful region discovery."
+                    )
+                try:
+                    raw_regions = effective_policy.resolve_regions(raw_regions)
+                except PolicyConfigError as exc:
+                    raise typer.BadParameter(
+                        f"--config region filter error: {exc}"
+                    ) from exc
+            if raw_regions:
+                regions = list(raw_regions)
+            else:
                 regions = [None]
 
         multi_region = len(regions) > 1
@@ -1165,15 +1223,56 @@ def _run_analyze_cycle(
         costs_result = _section_cost_columns(
             c, inv_table, days, account_id, regions, multi_region
         )
-        anomalies_result = _section_cost_anomalies(c)
-        ri_sp_result = _section_ri_sp_coverage(c, days)
-        sec_result = _section_security(
-            c, s3_result["data"], rds_result["data"], regions, multi_region
+        anomalies_result = (
+            _section_cost_anomalies(
+                c, threshold_pct=effective_policy.cost_anomaly_threshold_pct
+            )
+            if effective_policy.scan_enabled("cost_anomalies")
+            else _skipped_result(c, "[bold dim]🚨 Cost Anomalies[/bold dim]", [])
         )
-        iam_result = _section_iam(c)
-        cw_result = _section_cloudwatch(c, regions, multi_region)
-        cost_waste_result = _section_cost_waste(c, regions, multi_region)
-        tag_result = _section_tagging(c, regions, multi_region)
+        ri_sp_result = (
+            _section_ri_sp_coverage(c, days)
+            if effective_policy.scan_enabled("ri_sp_coverage")
+            else _skipped_result(
+                c, "[bold dim]📊 RI / Savings Plan Coverage[/bold dim]", {}
+            )
+        )
+        sec_result = (
+            _section_security(
+                c, s3_result["data"], rds_result["data"], regions, multi_region
+            )
+            if effective_policy.scan_enabled("security")
+            else _skipped_result(c, "[bold dim]🛡️ Security[/bold dim]", [])
+        )
+        iam_result = (
+            _section_iam(c)
+            if effective_policy.scan_enabled("iam")
+            else _skipped_result(
+                c, "[bold dim]🔑 IAM Over-Permissive Policies[/bold dim]", []
+            )
+        )
+        cw_result = (
+            _section_cloudwatch(c, regions, multi_region)
+            if effective_policy.scan_enabled("cloudwatch")
+            else _skipped_result(
+                c, "[bold dim]📡 CloudWatch Alarm Gaps[/bold dim]", []
+            )
+        )
+        cost_waste_result = (
+            _section_cost_waste(c, regions, multi_region)
+            if effective_policy.scan_enabled("cost_waste")
+            else _skipped_result(c, "[bold dim]🗑️ Cost Waste[/bold dim]", [])
+        )
+        tag_result = (
+            _section_tagging(
+                c,
+                regions,
+                multi_region,
+                required_tags=list(effective_policy.required_tags),
+            )
+            if effective_policy.scan_enabled("tagging")
+            else _skipped_result(c, "[bold dim]🏷️ Tagging Compliance[/bold dim]", [])
+        )
         sec_findings: list[SecurityFinding] = sec_result["data"]
         cost_findings: list[CostFinding] = cost_waste_result["data"]
 
@@ -1223,7 +1322,11 @@ def _run_analyze_cycle(
         }
 
         delta_data: dict[str, Any] | None = None
-        scope_key = _scan_scope_key(region, days)
+        scope_key = _scan_scope_key(
+            region,
+            days,
+            policy_scope_token=effective_policy.scope_token(explicit_region=region),
+        )
         if since_last:
             baseline_snapshot = db_manager.get_latest_scan_snapshot(
                 account_id, scope_key
@@ -1244,7 +1347,8 @@ def _run_analyze_cycle(
         )
 
         if not json_mode:
-            _section_lambda_detail(c, lambda_result["data"])
+            if lambda_result["data"]:
+                _section_lambda_detail(c, lambda_result["data"])
             if since_last and delta_data is not None:
                 _render_delta_panel(c, delta_data, all_errors)
             if interactive:
@@ -1284,6 +1388,11 @@ def analyze(
         "--since-last/--no-since-last",
         help="Compare current scan against the previous snapshot in the same scope.",
     ),
+    config: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        help="Path to a TOML policy file for analyze/watch behavior.",
+    ),
     interactive: bool = typer.Option(
         False,
         "--interactive/--no-interactive",
@@ -1292,12 +1401,14 @@ def analyze(
 ) -> None:
     """Retrieve read-only state (inventory, cost, security) and render a dashboard."""
     output_mode, schema = _validate_output_options(output, json_schema)
+    policy = _load_scan_policy(config)
     payloads = _run_analyze_cycle(
         days=days,
         region=region,
         output_mode=output_mode,
         interactive=interactive,
         since_last=since_last,
+        policy=policy,
     )
     if output_mode == "json":
         print(json.dumps(payloads[schema], indent=2, default=str))
@@ -1330,11 +1441,17 @@ def watch(
         "--json-schema",
         help="JSON schema version for --output json: v1 (legacy payloads) or v2 (typed envelopes).",
     ),
+    config: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        help="Path to a TOML policy file for analyze/watch behavior.",
+    ),
 ) -> None:
     """Continuously run non-interactive analyze cycles and emit deltas."""
     if interval_hours <= 0:
         raise typer.BadParameter("--interval-hours must be greater than zero")
     output_mode, schema = _validate_output_options(output, json_schema)
+    policy = _load_scan_policy(config)
     cycle = 0
     try:
         while True:
@@ -1346,6 +1463,7 @@ def watch(
                     output_mode=output_mode,
                     interactive=False,
                     since_last=True,
+                    policy=policy,
                     watch_cycle=cycle,
                 )
                 if output_mode == "json":
