@@ -75,6 +75,14 @@ _PLAN_RECOMMENDATIONS: dict[OpportunitySourceKind, list[str]] = {
 }
 
 
+def is_global_security_finding(finding: dict[str, Any]) -> bool:
+    return _is_global_security_finding(finding)
+
+
+def is_global_tagging_finding(finding: dict[str, Any]) -> bool:
+    return str(finding.get("resource_type", "")) == "S3"
+
+
 def _normalize_json(value: Any) -> Any:
     if isinstance(value, dict):
         return {
