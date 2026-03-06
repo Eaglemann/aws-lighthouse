@@ -10,6 +10,7 @@ from ..auth import get_aws_client, get_client
 from ..logger import logger
 from ..scan_contract import (
     error_result,
+    is_expected_unavailable_scan_error,
     merge_list_results,
     ok_result,
     scan_error_from_exception,
@@ -520,17 +521,19 @@ def _check_guardduty_enabled(gd, region: str | None = None) -> ScanResult:
                     ]
                 )
     except (ClientError, BotoCoreError) as e:
-        logger.error(f"Failed to check GuardDuty: {e}")
+        error = scan_error_from_exception(
+            service="guardduty",
+            operation="ListDetectors",
+            exc=e,
+            region=region,
+        )
+        logger.error(
+            f"Failed to check GuardDuty: {e}",
+            display=not is_expected_unavailable_scan_error(error),
+        )
         return error_result(
             data=[],
-            errors=[
-                scan_error_from_exception(
-                    service="guardduty",
-                    operation="ListDetectors",
-                    exc=e,
-                    region=region,
-                )
-            ],
+            errors=[error],
         )
     return ok_result([])
 
