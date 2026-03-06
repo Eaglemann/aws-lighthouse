@@ -8,11 +8,13 @@ from unittest.mock import MagicMock, patch
 from langchain_core.messages import AIMessage, ToolMessage
 
 from aws_lighthouse.agent import (
+    OLLAMA_MODEL_NAME,
     SAFE_TOOLS,
     _classify_tool_result,
     _record_tool_execution_results,
     _route_after_approval,
     approval_node,
+    check_ollama_runtime,
     should_require_approval,
     tool_detect_cost_anomalies,
     tool_get_ec2_inventory,
@@ -275,6 +277,51 @@ def test_record_tool_execution_results_updates_audit_log():
         execution_status="failed",
         error="Timeout",
     )
+
+
+def test_check_ollama_runtime_reports_ready_when_model_is_present():
+    response = MagicMock()
+    response.__enter__.return_value = response
+    response.read.return_value = (
+        f'{{"models":[{{"name":"{OLLAMA_MODEL_NAME}"}}]}}'.encode()
+    )
+    response.status = 200
+
+    with patch.dict("os.environ", {"OLLAMA_HOST": "http://localhost:11434"}):
+        with patch("aws_lighthouse.agent.urlopen", return_value=response):
+            status = check_ollama_runtime()
+
+    assert status["ok"] is True
+    assert status["reason"] == "ok"
+    assert status["model"] == OLLAMA_MODEL_NAME
+
+
+def test_check_ollama_runtime_reports_missing_model_when_not_installed():
+    response = MagicMock()
+    response.__enter__.return_value = response
+    response.read.return_value = b'{"models":[{"name":"llama3.2:latest"}]}'
+    response.status = 200
+
+    with patch.dict("os.environ", {"OLLAMA_HOST": "http://localhost:11434"}):
+        with patch("aws_lighthouse.agent.urlopen", return_value=response):
+            status = check_ollama_runtime()
+
+    assert status["ok"] is False
+    assert status["reason"] == "model_missing"
+    assert status["model"] == OLLAMA_MODEL_NAME
+
+
+def test_check_ollama_runtime_reports_unavailable_when_runtime_is_down():
+    with patch.dict("os.environ", {"OLLAMA_HOST": "http://localhost:11434"}):
+        with patch(
+            "aws_lighthouse.agent.urlopen",
+            side_effect=OSError("Connection refused"),
+        ):
+            status = check_ollama_runtime()
+
+    assert status["ok"] is False
+    assert status["reason"] == "unavailable"
+    assert "Connection refused" in status["detail"]
 
 
 def test_read_only_tool_schema_v1_returns_legacy_payload():
