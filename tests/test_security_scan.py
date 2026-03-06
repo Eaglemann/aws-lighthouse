@@ -638,6 +638,19 @@ def test_guardduty_api_error_returns_empty():
     assert _data(_check_guardduty_enabled(gd)) == []
 
 
+def test_guardduty_subscription_required_logs_without_display():
+    gd = MagicMock()
+    gd.list_detectors.side_effect = make_client_error("SubscriptionRequiredException")
+    with patch(f"{MOD}.logger.error") as mock_error:
+        result = _check_guardduty_enabled(gd, region="us-east-1")
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "SubscriptionRequiredException"
+    assert result["errors"][0]["region"] == "us-east-1"
+    mock_error.assert_called_once()
+    assert mock_error.call_args.kwargs["display"] is False
+
+
 # ── run_security_scan wiring ──────────────────────────────────────────────────
 
 
