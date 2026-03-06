@@ -5,12 +5,14 @@ import json
 import re
 from unittest.mock import MagicMock, patch
 
+import pytest
 from rich.console import Console
 from typer.testing import CliRunner
 
 from aws_lighthouse.cli import (
     _count,
     _dollar,
+    _parse_remediation_selection,
     _pct_style,
     _scan_scope_key,
     _section_cost_anomalies,
@@ -19,7 +21,10 @@ from aws_lighthouse.cli import (
     _section_lambda_detail,
     _section_remediation,
     _section_security,
+    _section_tagging,
+    _translate_shell_command,
     app,
+    shell,
 )
 
 
@@ -388,6 +393,16 @@ class TestSectionLambdaDetail:
 
 
 class TestSectionRemediation:
+    def test_parse_selection_accepts_all(self):
+        assert _parse_remediation_selection("all", 3) == [0, 1, 2]
+
+    def test_parse_selection_accepts_top(self):
+        assert _parse_remediation_selection("top", 3) == [0]
+
+    def test_parse_selection_rejects_invalid_values(self):
+        with pytest.raises(ValueError, match="Invalid selection"):
+            _parse_remediation_selection("1,banana,5", 3)
+
     def test_regional_remediation_passes_region_to_action(self):
         c, _ = _console()
         sec_findings = [
@@ -437,6 +452,30 @@ class TestSectionRemediation:
         mock_action.assert_not_called()
         mock_error.assert_called_once()
         assert "Missing region for remediation" in mock_error.call_args[0][0]
+
+    def test_preview_confirmation_blocks_remediation_execution(self):
+        c, _ = _console()
+        sec_findings = [
+            {
+                "severity": "HIGH",
+                "resource": "vol-preview",
+                "finding": "Unattached EBS volume",
+                "remediation_type": "delete_ebs_volume",
+                "remediation_label": "Delete EBS Volume",
+                "region": "eu-west-1",
+            }
+        ]
+        with (
+            patch("aws_lighthouse.cli.Prompt.ask", return_value="all"),
+            patch("aws_lighthouse.cli.typer.confirm", return_value=False),
+            patch(
+                "aws_lighthouse.tools.remediation_actions.delete_ebs_volume",
+                return_value=True,
+            ) as mock_action,
+        ):
+            _section_remediation(c, sec_findings, [])
+
+        mock_action.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -541,6 +580,27 @@ class TestSectionSecurity:
         assert calls[0] is True
         assert all(v is False for v in calls[1:])
 
+    def test_multi_region_global_finding_renders_global_scope(self):
+        c, buf = _console()
+        finding = {
+            "severity": "HIGH",
+            "resource": "root",
+            "finding": "Root account has no MFA enabled",
+        }
+
+        with patch(
+            "aws_lighthouse.cli.run_security_scan",
+            side_effect=lambda **kwargs: (
+                _ok([finding]) if kwargs.get("include_global") else _ok([])
+            ),
+        ):
+            _section_security(c, [], [], ["us-east-1", "eu-west-1"], multi_region=True)
+
+        output = buf.getvalue()
+        assert "global" in output
+        assert "us-east-1" not in output
+        assert "eu-west-1" not in output
+
     def test_renders_degraded_panel_when_scan_logs_errors(self):
         c, buf = _console()
 
@@ -556,6 +616,30 @@ class TestSectionSecurity:
         assert "incomplete" in output.lower()
 
 
+class TestSectionTagging:
+    def test_multi_region_global_s3_finding_renders_global_scope(self):
+        c, buf = _console()
+        finding = {
+            "resource_type": "S3",
+            "resource_id": "bucket-1",
+            "resource_name": "bucket-1",
+            "missing_tags": ["Owner"],
+        }
+
+        with patch(
+            "aws_lighthouse.cli.check_tagging_compliance",
+            side_effect=lambda **kwargs: (
+                _ok([finding]) if kwargs.get("include_s3") else _ok([])
+            ),
+        ):
+            _section_tagging(c, ["us-east-1", "eu-west-1"], multi_region=True)
+
+        output = buf.getvalue()
+        assert "global" in output
+        assert "us-east-1" not in output
+        assert "eu-west-1" not in output
+
+
 # ---------------------------------------------------------------------------
 # analyze --output json
 # ---------------------------------------------------------------------------
@@ -565,7 +649,30 @@ def _make_db_mock():
     m = MagicMock()
     m.get_latest_cost_snapshot.return_value = None
     m.get_latest_scan_snapshot.return_value = None
+    m.get_latest_scan_activity.return_value = None
+    m.summarize_opportunities.return_value = {
+        "total": 0,
+        "by_source": {},
+        "by_severity": {},
+        "by_status": {},
+    }
+    m.list_opportunities.return_value = []
     return m
+
+
+def _opportunity(**overrides):
+    opportunity = {
+        "fingerprint": "opp-1",
+        "source_kind": "security",
+        "summary": "Root account has no MFA enabled",
+        "severity": "HIGH",
+        "resource_id": "root",
+        "resource_name": "root",
+        "region": None,
+        "status": "open",
+    }
+    opportunity.update(overrides)
+    return opportunity
 
 
 _PATCHES = {
@@ -1516,6 +1623,81 @@ class TestWatchCommand:
         assert policy is not None
         assert policy.cost_anomaly_threshold_pct == 75.0
 
+    def test_watch_text_defaults_to_compact_view(self):
+        runner = CliRunner()
+        with (
+            patch(
+                "aws_lighthouse.cli._run_analyze_cycle",
+                return_value=self._payload(),
+            ) as mock_cycle,
+            patch("aws_lighthouse.cli.time.sleep", side_effect=KeyboardInterrupt),
+        ):
+            result = runner.invoke(app, ["watch", "--interval-hours", "0.001"])
+
+        assert result.exit_code == 0, result.output
+        assert mock_cycle.call_args.kwargs["watch_view"] == "compact"
+
+    def test_watch_text_passes_full_view(self):
+        runner = CliRunner()
+        with (
+            patch(
+                "aws_lighthouse.cli._run_analyze_cycle",
+                return_value=self._payload(),
+            ) as mock_cycle,
+            patch("aws_lighthouse.cli.time.sleep", side_effect=KeyboardInterrupt),
+        ):
+            result = runner.invoke(
+                app, ["watch", "--interval-hours", "0.001", "--view", "full"]
+            )
+
+        assert result.exit_code == 0, result.output
+        assert mock_cycle.call_args.kwargs["watch_view"] == "full"
+
+    def test_watch_rejects_invalid_view(self):
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["watch", "--interval-hours", "0.001", "--view", "wide"],
+        )
+
+        assert result.exit_code != 0
+        plain = _strip_ansi(result.output)
+        assert "--view must be either 'compact' or 'full'" in plain
+
+    def test_watch_compact_renders_digest_without_full_panels(self):
+        runner = CliRunner()
+        patches = {**_PATCHES, "aws_lighthouse.cli.get_aws_session": _mock_session}
+        with (
+            patch.multiple(
+                "aws_lighthouse.cli",
+                **{k.split(".")[-1]: v for k, v in patches.items()},
+            ),
+            patch("aws_lighthouse.cli.time.sleep", side_effect=KeyboardInterrupt),
+        ):
+            result = runner.invoke(app, ["watch", "--interval-hours", "0.001"])
+
+        assert result.exit_code == 0, result.output
+        assert "Watch Digest" in result.output
+        assert "Tagging Compliance" not in result.output
+
+    def test_watch_full_renders_detailed_panels(self):
+        runner = CliRunner()
+        patches = {**_PATCHES, "aws_lighthouse.cli.get_aws_session": _mock_session}
+        with (
+            patch.multiple(
+                "aws_lighthouse.cli",
+                **{k.split(".")[-1]: v for k, v in patches.items()},
+            ),
+            patch("aws_lighthouse.cli.time.sleep", side_effect=KeyboardInterrupt),
+        ):
+            result = runner.invoke(
+                app,
+                ["watch", "--interval-hours", "0.001", "--view", "full"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "Tagging Compliance" in result.output
+
 
 class TestAnalyzeInteractiveMode:
     def _run_text(self, args=None, extra_patches=None):
@@ -1574,6 +1756,51 @@ class TestAnalyzeInteractiveMode:
             in result.output
         )
 
+    def test_text_output_includes_executive_summary_and_top_opportunities(self):
+        db_mock = _make_db_mock()
+        db_mock.summarize_opportunities.return_value = {
+            "total": 1,
+            "by_source": {"security": 1},
+            "by_severity": {"HIGH": 1},
+            "by_status": {"open": 1},
+        }
+        db_mock.list_opportunities.return_value = [_opportunity()]
+
+        result = self._run_text(
+            extra_patches={"aws_lighthouse.cli.db_manager": db_mock}
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Executive Summary" in result.output
+        assert "Top Opportunities" in result.output
+        assert "Root account has no MFA enabled" in result.output
+
+    def test_summary_separates_degraded_and_skipped_sections(self, tmp_path):
+        config = tmp_path / "policy.toml"
+        config.write_text(
+            """
+[scans]
+tagging = false
+""".strip(),
+            encoding="utf-8",
+        )
+
+        result = self._run_text(
+            args=["--config", str(config)],
+            extra_patches={
+                "aws_lighthouse.cli.run_security_scan": lambda **kwargs: _err(
+                    [], "security degraded"
+                )
+            },
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Section Health" in result.output
+        assert "Degraded" in result.output
+        assert "Security" in result.output
+        assert "Skipped" in result.output
+        assert "Tagging" in result.output
+
     def test_json_output_does_not_emit_opportunity_summary_text(self):
         runner = CliRunner()
         patches = {**_PATCHES, "aws_lighthouse.cli.get_aws_session": _mock_session}
@@ -1584,3 +1811,57 @@ class TestAnalyzeInteractiveMode:
 
         assert result.exit_code == 0, result.output
         assert "Opportunities synced:" not in result.output
+
+
+class TestShellCommands:
+    def test_translate_shell_command_maps_slash_commands(self):
+        assert _translate_shell_command("/help") == ("help", None)
+        assert _translate_shell_command("/status") == ("status", None)
+        assert _translate_shell_command("/opps") == ("opps", None)
+        assert _translate_shell_command("/plan") == ("plan", None)
+        assert _translate_shell_command("/clear") == ("clear", None)
+        assert _translate_shell_command("/exit") == ("exit", None)
+
+    def test_translate_shell_command_rewrites_analyze(self):
+        action, content = _translate_shell_command("/analyze")
+        assert action == "agent"
+        assert content is not None
+        assert "multi-region AWS analysis" in content
+
+    def test_local_shell_commands_do_not_invoke_agent_stream(self):
+        graph = MagicMock()
+        db_mock = _make_db_mock()
+        db_mock.get_latest_scan_activity.return_value = {
+            "recorded_at": "2026-03-06T12:00:00+00:00",
+            "account_id": "123456789012",
+            "scope_key": "multi-region:days=14",
+        }
+        db_mock.summarize_opportunities.return_value = {
+            "total": 2,
+            "by_source": {"security": 1, "tagging": 1},
+            "by_severity": {"HIGH": 1, "UNSPECIFIED": 1},
+            "by_status": {"open": 2},
+        }
+        db_mock.list_opportunities.return_value = [
+            _opportunity(),
+            _opportunity(
+                fingerprint="opp-2",
+                source_kind="tagging",
+                summary="Bucket is missing Owner",
+                severity=None,
+                resource_id="bucket-1",
+                resource_name="bucket-1",
+            ),
+        ]
+
+        with (
+            patch("aws_lighthouse.agent.create_agent_graph", return_value=graph),
+            patch(
+                "aws_lighthouse.cli.Prompt.ask",
+                side_effect=["/status", "/opps", "/plan", "/exit"],
+            ),
+            patch("aws_lighthouse.cli.db_manager", db_mock),
+        ):
+            shell()
+
+        graph.stream.assert_not_called()
