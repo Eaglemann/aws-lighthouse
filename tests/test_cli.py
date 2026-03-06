@@ -1027,7 +1027,7 @@ class TestAnalyzeJsonOutput:
 
     def test_config_validation_error_is_rejected(self, tmp_path):
         config = tmp_path / "policy.toml"
-        config.write_text('cost_anomaly_threshold_pct = -1\n', encoding="utf-8")
+        config.write_text("cost_anomaly_threshold_pct = -1\n", encoding="utf-8")
 
         runner = CliRunner()
         result = runner.invoke(
@@ -1054,8 +1054,9 @@ class TestAnalyzeJsonOutput:
                 "aws_lighthouse.cli",
                 **{k.split(".")[-1]: v for k, v in patches.items()},
             ),
-            patch("aws_lighthouse.cli.check_tagging_compliance", return_value=_ok([]))
-            as mock_tagging,
+            patch(
+                "aws_lighthouse.cli.check_tagging_compliance", return_value=_ok([])
+            ) as mock_tagging,
         ):
             result = runner.invoke(
                 app,
@@ -1077,8 +1078,9 @@ class TestAnalyzeJsonOutput:
                 "aws_lighthouse.cli",
                 **{k.split(".")[-1]: v for k, v in patches.items()},
             ),
-            patch("aws_lighthouse.cli.detect_cost_anomalies", return_value=_ok([]))
-            as mock_anomalies,
+            patch(
+                "aws_lighthouse.cli.detect_cost_anomalies", return_value=_ok([])
+            ) as mock_anomalies,
         ):
             result = runner.invoke(
                 app,
@@ -1123,7 +1125,15 @@ tagging = false
         ):
             result = runner.invoke(
                 app,
-                ["analyze", "--output", "json", "--json-schema", "v1", "--config", str(config)],
+                [
+                    "analyze",
+                    "--output",
+                    "json",
+                    "--json-schema",
+                    "v1",
+                    "--config",
+                    str(config),
+                ],
             )
 
         assert result.exit_code == 0, result.output
