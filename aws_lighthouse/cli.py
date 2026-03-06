@@ -2293,12 +2293,45 @@ def _translate_shell_command(user_input: str) -> tuple[str, str | None]:
     return "agent", user_input
 
 
+def _render_ollama_alert(c: Console, runtime_status: Mapping[str, Any]) -> None:
+    reason = str(runtime_status["reason"])
+    host = str(runtime_status["host"])
+    model = str(runtime_status["model"])
+    detail = str(runtime_status["detail"])
+    if reason == "model_missing":
+        title = "[bold yellow]Ollama Model Missing[/bold yellow]"
+        border_style = "yellow"
+        summary = "[yellow]Ollama is reachable, but the required model is not installed.[/yellow]"
+    else:
+        title = "[bold red]Ollama Unavailable[/bold red]"
+        border_style = "red"
+        summary = "[red]The local Ollama runtime is unavailable, so agent actions cannot run.[/red]"
+    c.print(
+        Panel(
+            (
+                f"{summary}\n\n"
+                f"[dim]Host:[/dim] {host}\n"
+                f"[dim]Model:[/dim] {model}\n"
+                f"[dim]Detail:[/dim] {detail}\n\n"
+                "[dim]Next steps:[/dim]\n"
+                "Start Ollama and keep it running.\n"
+                f"Run `ollama pull {model}` if the model is missing.\n\n"
+                "[dim]Local shell commands still work:[/dim] /help, /status, /opps, /plan"
+            ),
+            title=title,
+            border_style=border_style,
+            padding=(0, 1),
+        )
+    )
+    c.print()
+
+
 @app.command()
 def shell() -> None:
     """Start the interactive AI agent shell."""
     from langchain_core.messages import HumanMessage, SystemMessage
 
-    from .agent import create_agent_graph
+    from .agent import check_ollama_runtime, create_agent_graph
 
     c = logger.console
 
@@ -2319,36 +2352,40 @@ def shell() -> None:
     )
     c.print()
 
-    # ── Init agent ───────────────────────────────────────────────────────────
-    try:
-        with c.status("[cyan]🤖  Initializing agent...[/cyan]", spinner="dots"):
-            graph = create_agent_graph()
-
-        system_prompt = SystemMessage(
-            content=(
-                "You are AWS Lighthouse, a secure Cloud Infrastructure Agent running locally "
-                "on the user's machine with their full AWS credentials loaded.\n"
-                "You MUST execute live AWS operations yourself using tools — never ask the user "
-                "to run commands manually.\n"
-                "For questions about what changed, what is new, what should be fixed first, "
-                "top risks, or requests for a remediation plan, consult the local opportunities "
-                "database before running fresh AWS scans.\n"
-                "Use local opportunity tools freely for triage because they only mutate local "
-                "metadata, not AWS resources.\n"
-                "Before calling any tool, output a concise explanation of what you are about to "
-                "do and why. This is shown to the user before they approve.\n"
-                "When the user asks for an analysis or inventory of their AWS environment, "
-                "first call tool_get_enabled_regions to discover all active regions, then run "
-                "the relevant inventory and scan tools for each region to give complete coverage."
-            )
+    system_prompt = SystemMessage(
+        content=(
+            "You are AWS Lighthouse, a secure Cloud Infrastructure Agent running locally "
+            "on the user's machine with their full AWS credentials loaded.\n"
+            "You MUST execute live AWS operations yourself using tools — never ask the user "
+            "to run commands manually.\n"
+            "For questions about what changed, what is new, what should be fixed first, "
+            "top risks, or requests for a remediation plan, consult the local opportunities "
+            "database before running fresh AWS scans.\n"
+            "Use local opportunity tools freely for triage because they only mutate local "
+            "metadata, not AWS resources.\n"
+            "Before calling any tool, output a concise explanation of what you are about to "
+            "do and why. This is shown to the user before they approve.\n"
+            "When the user asks for an analysis or inventory of their AWS environment, "
+            "first call tool_get_enabled_regions to discover all active regions, then run "
+            "the relevant inventory and scan tools for each region to give complete coverage."
         )
-        config = _new_shell_config()
-        first_turn = True
-        c.print(Rule("[dim cyan]  ready  [/dim cyan]", style="dim cyan"))
-        _render_shell_help(c)
-    except Exception as e:
-        logger.error(f"Failed to initialize agent: {e}")
-        return
+    )
+    config = _new_shell_config()
+    first_turn = True
+    graph: Any | None = None
+
+    startup_runtime = check_ollama_runtime()
+    if startup_runtime["ok"]:
+        try:
+            with c.status("[cyan]🤖  Initializing agent...[/cyan]", spinner="dots"):
+                graph = create_agent_graph()
+        except Exception as e:
+            logger.error(f"Failed to initialize agent: {e}")
+    else:
+        _render_ollama_alert(c, startup_runtime)
+
+    c.print(Rule("[dim cyan]  ready  [/dim cyan]", style="dim cyan"))
+    _render_shell_help(c)
 
     # ── REPL loop ────────────────────────────────────────────────────────────
     while True:
@@ -2384,6 +2421,20 @@ def shell() -> None:
                 c.print("\n[dim]  Conversation memory cleared.[/dim]")
                 continue
 
+            runtime_status = check_ollama_runtime()
+            if not runtime_status["ok"]:
+                _render_ollama_alert(c, runtime_status)
+                continue
+            if graph is None:
+                try:
+                    with c.status(
+                        "[cyan]🤖  Initializing agent...[/cyan]", spinner="dots"
+                    ):
+                        graph = create_agent_graph()
+                except Exception as e:
+                    logger.error(f"Failed to initialize agent: {e}")
+                    continue
+
             prompt_text = translated_input or user_input
             messages = (
                 [system_prompt, HumanMessage(content=prompt_text)]
@@ -2393,36 +2444,43 @@ def shell() -> None:
             first_turn = False
 
             # Stream agent events
-            c.print("\n[dim]  phase: reasoning[/dim]")
-            for event in graph.stream({"messages": messages}, config=config):
-                if "agent" in event:
-                    msg = event["agent"]["messages"][-1]
-                    if msg.content:
-                        c.print()
+            try:
+                c.print("\n[dim]  phase: reasoning[/dim]")
+                for event in graph.stream({"messages": messages}, config=config):
+                    if "agent" in event:
+                        msg = event["agent"]["messages"][-1]
+                        if msg.content:
+                            c.print()
+                            c.print(
+                                Panel(
+                                    Markdown(msg.content),
+                                    title="[bold cyan]Reasoning[/bold cyan]",
+                                    border_style="cyan",
+                                    padding=(0, 2),
+                                )
+                            )
+                            if msg.tool_calls:
+                                c.print("\n[dim]  phase: awaiting approval[/dim]")
+
+                    elif "tools" in event:
+                        msg = event["tools"]["messages"][-1]
+                        content_preview = str(msg.content)[:120].replace("\n", " ")
+                        c.print("\n[dim]  phase: running[/dim]")
                         c.print(
                             Panel(
-                                Markdown(msg.content),
-                                title="[bold cyan]Reasoning[/bold cyan]",
-                                border_style="cyan",
+                                f"[dim]{content_preview}{'...' if len(str(msg.content)) > 120 else ''}[/dim]",
+                                title=f"[dim]Result — {msg.name if hasattr(msg, 'name') and msg.name else 'tool'}[/dim]",
+                                border_style="dim",
                                 padding=(0, 2),
                             )
                         )
-                        if msg.tool_calls:
-                            c.print("\n[dim]  phase: awaiting approval[/dim]")
-
-                elif "tools" in event:
-                    msg = event["tools"]["messages"][-1]
-                    content_preview = str(msg.content)[:120].replace("\n", " ")
-                    c.print("\n[dim]  phase: running[/dim]")
-                    c.print(
-                        Panel(
-                            f"[dim]{content_preview}{'...' if len(str(msg.content)) > 120 else ''}[/dim]",
-                            title=f"[dim]Result — {msg.name if hasattr(msg, 'name') and msg.name else 'tool'}[/dim]",
-                            border_style="dim",
-                            padding=(0, 2),
-                        )
-                    )
-                    c.print("\n[dim]  phase: reasoning[/dim]")
+                        c.print("\n[dim]  phase: reasoning[/dim]")
+            except Exception as e:
+                runtime_status = check_ollama_runtime()
+                if not runtime_status["ok"]:
+                    _render_ollama_alert(c, runtime_status)
+                    continue
+                logger.error(f"Error: {e}")
 
         except KeyboardInterrupt:
             c.print("\n[dim]  👋 Goodbye.[/dim]\n")
