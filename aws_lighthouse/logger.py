@@ -67,13 +67,20 @@ class LighthouseLogger:
         """Prints a success indicator."""
         self.console.print(f"[green]✓[/green] [bold green]{message}[/bold green]")
 
-    def error(self, message: str) -> None:
-        """Prints a red error indicator."""
-        self.console.print(f"[red]✗[/red] [bold red]{message}[/bold red]")
-        self.console.print(f"[dim]Log file: {self.get_log_path()}[/dim]")
-        if self._error_capture_stack:
-            self._error_capture_stack[-1].append(message)
-        self._write_log_entry("ERROR", message)
+    def error(
+        self,
+        message: str,
+        *,
+        detail: str | None = None,
+        display: bool = True,
+    ) -> None:
+        """Record an error and optionally render it to the terminal."""
+        if display:
+            self.console.print(f"[red]✗[/red] [bold red]{message}[/bold red]")
+            self.console.print(f"[dim]Log file: {self.get_log_path()}[/dim]")
+            if self._error_capture_stack:
+                self._error_capture_stack[-1].append(message)
+        self._write_log_entry("ERROR", message, detail)
 
     def record_exception(self, message: str, exc: BaseException) -> str:
         """Persist an exception traceback to the log file without printing it."""
