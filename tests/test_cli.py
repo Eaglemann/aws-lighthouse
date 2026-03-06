@@ -675,6 +675,36 @@ def _opportunity(**overrides):
     return opportunity
 
 
+def _ollama_ok(detail="ready"):
+    return {
+        "ok": True,
+        "reason": "ok",
+        "host": "http://localhost:11434",
+        "model": "gpt-oss:120b-cloud",
+        "detail": detail,
+    }
+
+
+def _ollama_unavailable(detail="Connection refused"):
+    return {
+        "ok": False,
+        "reason": "unavailable",
+        "host": "http://localhost:11434",
+        "model": "gpt-oss:120b-cloud",
+        "detail": detail,
+    }
+
+
+def _ollama_model_missing(detail="Installed models: llama3.2:latest"):
+    return {
+        "ok": False,
+        "reason": "model_missing",
+        "host": "http://localhost:11434",
+        "model": "gpt-oss:120b-cloud",
+        "detail": detail,
+    }
+
+
 _PATCHES = {
     "aws_lighthouse.cli.get_aws_session": None,  # replaced below per test
     "aws_lighthouse.cli.get_enabled_regions": lambda: _ok(["us-east-1"]),
@@ -1828,6 +1858,36 @@ class TestShellCommands:
         assert content is not None
         assert "multi-region AWS analysis" in content
 
+    def test_shell_startup_alerts_when_ollama_is_unreachable(self, capsys):
+        with (
+            patch(
+                "aws_lighthouse.agent.check_ollama_runtime",
+                return_value=_ollama_unavailable(),
+            ),
+            patch("aws_lighthouse.agent.create_agent_graph") as mock_create,
+            patch("aws_lighthouse.cli.Prompt.ask", side_effect=["/exit"]),
+        ):
+            shell()
+
+        output = capsys.readouterr().out
+        assert "Ollama Unavailable" in output
+        mock_create.assert_not_called()
+
+    def test_shell_startup_alerts_when_ollama_model_is_missing(self, capsys):
+        with (
+            patch(
+                "aws_lighthouse.agent.check_ollama_runtime",
+                return_value=_ollama_model_missing(),
+            ),
+            patch("aws_lighthouse.agent.create_agent_graph") as mock_create,
+            patch("aws_lighthouse.cli.Prompt.ask", side_effect=["/exit"]),
+        ):
+            shell()
+
+        output = capsys.readouterr().out
+        assert "Ollama Model Missing" in output
+        mock_create.assert_not_called()
+
     def test_local_shell_commands_do_not_invoke_agent_stream(self):
         graph = MagicMock()
         db_mock = _make_db_mock()
@@ -1855,7 +1915,13 @@ class TestShellCommands:
         ]
 
         with (
-            patch("aws_lighthouse.agent.create_agent_graph", return_value=graph),
+            patch(
+                "aws_lighthouse.agent.check_ollama_runtime",
+                return_value=_ollama_unavailable(),
+            ),
+            patch(
+                "aws_lighthouse.agent.create_agent_graph", return_value=graph
+            ) as mock_create,
             patch(
                 "aws_lighthouse.cli.Prompt.ask",
                 side_effect=["/status", "/opps", "/plan", "/exit"],
@@ -1864,4 +1930,71 @@ class TestShellCommands:
         ):
             shell()
 
+        mock_create.assert_not_called()
         graph.stream.assert_not_called()
+
+    def test_agent_calls_alert_each_time_when_ollama_is_unhealthy(self, capsys):
+        with (
+            patch(
+                "aws_lighthouse.agent.check_ollama_runtime",
+                return_value=_ollama_unavailable(),
+            ),
+            patch("aws_lighthouse.agent.create_agent_graph") as mock_create,
+            patch(
+                "aws_lighthouse.cli.Prompt.ask",
+                side_effect=["scan all my regions", "/analyze", "/exit"],
+            ),
+        ):
+            shell()
+
+        output = capsys.readouterr().out
+        assert output.count("Ollama Unavailable") >= 3
+        mock_create.assert_not_called()
+
+    def test_shell_recovers_when_ollama_returns(self):
+        graph = MagicMock()
+        graph.stream.return_value = []
+
+        with (
+            patch(
+                "aws_lighthouse.agent.check_ollama_runtime",
+                side_effect=[_ollama_unavailable(), _ollama_ok()],
+            ),
+            patch(
+                "aws_lighthouse.agent.create_agent_graph", return_value=graph
+            ) as mock_create,
+            patch(
+                "aws_lighthouse.cli.Prompt.ask",
+                side_effect=["scan all my regions", "/exit"],
+            ),
+        ):
+            shell()
+
+        mock_create.assert_called_once()
+        graph.stream.assert_called_once()
+
+    def test_runtime_loss_during_stream_shows_ollama_alert(self, capsys):
+        graph = MagicMock()
+        graph.stream.side_effect = RuntimeError("connection refused")
+
+        with (
+            patch(
+                "aws_lighthouse.agent.check_ollama_runtime",
+                side_effect=[
+                    _ollama_ok(),
+                    _ollama_ok(),
+                    _ollama_unavailable(),
+                ],
+            ),
+            patch("aws_lighthouse.agent.create_agent_graph", return_value=graph),
+            patch(
+                "aws_lighthouse.cli.Prompt.ask",
+                side_effect=["scan all my regions", "/exit"],
+            ),
+            patch("aws_lighthouse.cli.logger.error") as mock_error,
+        ):
+            shell()
+
+        output = capsys.readouterr().out
+        assert "Ollama Unavailable" in output
+        mock_error.assert_not_called()
