@@ -7,6 +7,7 @@ import pytest
 
 import aws_lighthouse.db as db_module
 from aws_lighthouse.db import DatabaseManager
+from aws_lighthouse.opportunities import sync_opportunities_from_scan
 
 # ---------------------------------------------------------------------------
 # Fixture: fresh DatabaseManager pointing at a temp directory
@@ -40,6 +41,18 @@ def _indexes(tmp_path) -> set:
                 "SELECT name FROM sqlite_master WHERE type='index'"
             ).fetchall()
         }
+
+
+def _sync_opportunities(db: DatabaseManager, *, sections: dict) -> dict:
+    return sync_opportunities_from_scan(
+        db=db,
+        account_id="123456789012",
+        scanned_at="2026-03-06T10:00:00+00:00",
+        scan_scope="multi-region:days=14",
+        section_payloads=sections,
+        scanned_regions=["us-east-1"],
+        enabled_source_kinds=["security", "tagging"],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +234,126 @@ class TestGetLatestCostSnapshot:
         result = db.get_latest_cost_snapshot("acct")
         assert result is not None
         assert result["total_usd"] == 200.0
+
+
+class TestGetLatestScanActivity:
+    def test_returns_none_when_no_scan_snapshots_exist(self, db):
+        assert db.get_latest_scan_activity() is None
+
+    def test_returns_most_recent_scan_metadata(self, db):
+        db.record_scan_snapshot(
+            account_id="acct-a",
+            scope_key="multi-region:days=14",
+            data={"security_findings": []},
+        )
+        db.record_scan_snapshot(
+            account_id="acct-b",
+            scope_key="single-region:us-east-1:days=14",
+            data={"security_findings": []},
+        )
+
+        latest = db.get_latest_scan_activity()
+
+        assert latest is not None
+        assert latest["account_id"] == "acct-b"
+        assert latest["scope_key"] == "single-region:us-east-1:days=14"
+
+    def test_filters_latest_scan_metadata_by_account(self, db):
+        db.record_scan_snapshot(
+            account_id="acct-a",
+            scope_key="multi-region:days=14",
+            data={"security_findings": []},
+        )
+        db.record_scan_snapshot(
+            account_id="acct-b",
+            scope_key="single-region:us-east-1:days=14",
+            data={"security_findings": []},
+        )
+
+        latest = db.get_latest_scan_activity("acct-a")
+
+        assert latest is not None
+        assert latest["account_id"] == "acct-a"
+        assert latest["scope_key"] == "multi-region:days=14"
+
+
+class TestSummarizeOpportunities:
+    def test_returns_zero_summary_when_empty(self, db):
+        assert db.summarize_opportunities(account_id="123456789012") == {
+            "total": 0,
+            "by_source": {},
+            "by_severity": {},
+            "by_status": {},
+        }
+
+    def test_groups_by_source_severity_and_status(self, db):
+        _sync_opportunities(
+            db,
+            sections={
+                "cost_anomalies": [],
+                "cost_waste": [],
+                "security_findings": [
+                    {
+                        "severity": "HIGH",
+                        "resource": "sg-123",
+                        "finding": "Open SSH from the internet",
+                    }
+                ],
+                "iam_findings": [],
+                "cloudwatch_findings": [],
+                "tagging_findings": [
+                    {
+                        "resource_type": "S3",
+                        "resource_id": "bucket-1",
+                        "resource_name": "bucket-1",
+                        "missing_tags": ["Owner"],
+                    }
+                ],
+            },
+        )
+
+        summary = db.summarize_opportunities(account_id="123456789012")
+
+        assert summary["total"] == 2
+        assert summary["by_source"] == {"security": 1, "tagging": 1}
+        assert summary["by_severity"] == {"HIGH": 1, "UNSPECIFIED": 1}
+        assert summary["by_status"] == {"open": 2}
+
+    def test_status_filter_limits_summary(self, db):
+        _sync_opportunities(
+            db,
+            sections={
+                "cost_anomalies": [],
+                "cost_waste": [],
+                "security_findings": [
+                    {
+                        "severity": "HIGH",
+                        "resource": "sg-123",
+                        "finding": "Open SSH from the internet",
+                    }
+                ],
+                "iam_findings": [],
+                "cloudwatch_findings": [],
+                "tagging_findings": [],
+            },
+        )
+        opportunity = db.list_opportunities(account_id="123456789012", limit=5)[0]
+        db.update_opportunity_state(
+            fingerprint=opportunity["fingerprint"],
+            account_id="123456789012",
+            status="resolved",
+        )
+
+        summary = db.summarize_opportunities(
+            account_id="123456789012", statuses=["open"]
+        )
+
+        assert summary == {
+            "total": 0,
+            "by_source": {},
+            "by_severity": {},
+            "by_status": {},
+        }
 
 
 # ---------------------------------------------------------------------------
