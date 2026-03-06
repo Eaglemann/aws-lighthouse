@@ -17,6 +17,18 @@ _RETRYABLE_ERROR_CODES = {
     "TooManyRequestsException",
 }
 
+_EXPECTED_UNAVAILABLE_REASONS = {
+    ("ce", "GetSavingsPlansCoverage", "DataUnavailableException"): (
+        "Savings Plans data unavailable for this account/period"
+    ),
+    ("ce", "GetSavingsPlansUtilization", "DataUnavailableException"): (
+        "Savings Plans data unavailable for this account/period"
+    ),
+    ("guardduty", "ListDetectors", "SubscriptionRequiredException"): (
+        "subscription required"
+    ),
+}
+
 
 def _is_retryable(exc: Exception) -> bool:
     if isinstance(exc, ClientError):
@@ -49,6 +61,24 @@ def scan_error_from_exception(
     if region:
         error["region"] = region
     return error
+
+
+def scan_error_kind(error: ScanError) -> str:
+    """Classify a scan error for rendering and log policy decisions."""
+    key = (error["service"], error["operation"], error["code"])
+    if key in _EXPECTED_UNAVAILABLE_REASONS:
+        return "expected_unavailable"
+    return "unexpected_failure"
+
+
+def is_expected_unavailable_scan_error(error: ScanError) -> bool:
+    return scan_error_kind(error) == "expected_unavailable"
+
+
+def scan_error_reason(error: ScanError) -> str:
+    """Return a concise user-facing reason for a structured scan error."""
+    key = (error["service"], error["operation"], error["code"])
+    return _EXPECTED_UNAVAILABLE_REASONS.get(key, error["message"])
 
 
 def ok_result(data: Any) -> ScanResult:
