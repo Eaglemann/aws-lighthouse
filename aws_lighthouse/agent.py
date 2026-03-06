@@ -24,6 +24,22 @@ from .types import OpportunitySourceKind, OpportunityStatus, ScanResult, Severit
 OLLAMA_DEFAULT_HOST = "http://localhost:11434"
 OLLAMA_MODEL_NAME = "gpt-oss:120b-cloud"
 OllamaRuntimeReason = Literal["ok", "unavailable", "invalid_response", "model_missing"]
+_SCHEMA_GUARDED_TOOLS: frozenset[str] = frozenset(
+    {
+        "tool_get_enabled_regions",
+        "tool_get_ec2_inventory",
+        "tool_get_rds_inventory",
+        "tool_get_s3_inventory",
+        "tool_get_lambda_inventory",
+        "tool_get_ri_sp_coverage",
+        "tool_detect_cost_anomalies",
+        "tool_run_cost_scan",
+        "tool_check_tagging_compliance",
+        "tool_detect_overpermissive_iam",
+        "tool_detect_cloudwatch_gaps",
+        "tool_run_security_scan",
+    }
+)
 
 
 class OllamaRuntimeStatus(TypedDict):
@@ -672,8 +688,93 @@ def _record_tool_execution_results(state: AgentState, output: dict) -> None:
         )
 
 
+def _normalize_schema_like_args(
+    tool_name: str, args: dict[str, Any]
+) -> tuple[dict[str, Any], str | None]:
+    """Normalize schema-like args for read-only tools and report any repair note."""
+    if tool_name not in _SCHEMA_GUARDED_TOOLS:
+        return args, None
+
+    normalized = dict(args)
+    repair_notes: list[str] = []
+
+    if "schema_version" in normalized:
+        schema_value = normalized.pop("schema_version")
+        repair_notes.append("mapped schema_version to schema")
+        if "schema" not in normalized:
+            normalized["schema"] = schema_value
+
+    if "schema" in normalized:
+        schema_value = str(normalized["schema"]).lower()
+        if schema_value not in {"v1", "v2"}:
+            normalized["schema"] = "v1"
+            repair_notes.append("replaced invalid schema with v1")
+        else:
+            normalized["schema"] = schema_value
+
+    if repair_notes:
+        return normalized, "; ".join(repair_notes)
+    return normalized, None
+
+
+def _normalize_safe_tool_calls(state: AgentState) -> dict | None:
+    """Repair safe tool calls in-place before ToolNode executes them."""
+    last_message = state["messages"][-1]
+    if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
+        return None
+
+    repaired = False
+    synthetic_errors: list[ToolMessage] = []
+    updated_tool_calls: list[dict[str, Any]] = []
+    for tool_call in last_message.tool_calls:
+        tool_name = str(tool_call["name"])
+        original_args = cast(dict[str, Any], tool_call["args"])
+        try:
+            normalized_args, repair_note = _normalize_schema_like_args(
+                tool_name, original_args
+            )
+        except Exception as exc:
+            synthetic_errors.append(
+                ToolMessage(
+                    content=(
+                        "Error: Tool arguments could not be normalized for "
+                        f"{tool_name}: {exc}"
+                    ),
+                    tool_call_id=tool_call["id"],
+                )
+            )
+            continue
+
+        if repair_note:
+            logger.error(
+                "Normalized tool arguments for "
+                f"{tool_name}: {repair_note}; original={original_args}; "
+                f"normalized={normalized_args}"
+            )
+            repaired = True
+            updated_tool_calls.append({**tool_call, "args": normalized_args})
+        else:
+            updated_tool_calls.append(dict(tool_call))
+
+    if synthetic_errors:
+        return {"messages": synthetic_errors}
+    if repaired:
+        copied_message = AIMessage(
+            content=last_message.content,
+            tool_calls=updated_tool_calls,
+        )
+        messages = list(state["messages"])
+        messages[-1] = copied_message
+        state["messages"] = messages
+    return None
+
+
 def tools_node(state: AgentState) -> dict:
     """Execute tools then persist execution outcomes in the audit log."""
+    normalization_result = _normalize_safe_tool_calls(state)
+    if normalization_result is not None:
+        _record_tool_execution_results(state, normalization_result)
+        return normalization_result
     output = cast(dict[str, Any], _tool_node.invoke(state))
     _record_tool_execution_results(state, output)
     return output
