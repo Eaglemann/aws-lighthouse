@@ -103,6 +103,7 @@ def check_tagging_compliance(
     try:
         # Bulk-fetch all Lambda tags in one paginated call (O(1) calls vs N)
         tags_by_arn: dict[str, set[str]] = {}
+        bulk_lambda_tag_fetch_failed = False
         try:
             tagging_client = _cl("resourcegroupstaggingapi")
             tag_paginator = tagging_client.get_paginator("get_resources")
@@ -113,8 +114,9 @@ def check_tagging_compliance(
                     }
         except (ClientError, BotoCoreError) as e:
             logger.error(
-                f"Bulk Lambda tag fetch failed, tagging check will use empty sets: {e}"
+                f"Bulk Lambda tag fetch failed, falling back to per-function tag lookup: {e}"
             )
+            bulk_lambda_tag_fetch_failed = True
             errors.append(
                 scan_error_from_exception(
                     service="resourcegroupstaggingapi",
@@ -129,7 +131,25 @@ def check_tagging_compliance(
         for page in paginator.paginate():
             for fn in page.get("Functions", []):
                 name = fn["FunctionName"]
-                existing = tags_by_arn.get(fn["FunctionArn"], set())
+                if bulk_lambda_tag_fetch_failed:
+                    try:
+                        tag_map = lmb.list_tags(Resource=fn["FunctionArn"]).get(
+                            "Tags", {}
+                        )
+                    except (ClientError, BotoCoreError) as e:
+                        logger.error(f"Failed to look up Lambda tags for {name}: {e}")
+                        errors.append(
+                            scan_error_from_exception(
+                                service="lambda",
+                                operation="ListTags",
+                                exc=e,
+                                region=region,
+                            )
+                        )
+                        continue
+                    existing = set(tag_map.keys())
+                else:
+                    existing = tags_by_arn.get(fn["FunctionArn"], set())
                 missing = [tag for tag in required_tags if tag not in existing]
                 if missing:
                     findings.append(

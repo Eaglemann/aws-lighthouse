@@ -34,10 +34,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/your-org/aws-lighthouse"
-Repository = "https://github.com/your-org/aws-lighthouse"
-Issues = "https://github.com/your-org/aws-lighthouse/issues"
-Changelog = "https://github.com/your-org/aws-lighthouse/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/Eaglemann/aws-lighthouse"
+Repository = "https://github.com/Eaglemann/aws-lighthouse"
+Issues = "https://github.com/Eaglemann/aws-lighthouse/issues"
+Changelog = "https://github.com/Eaglemann/aws-lighthouse/blob/main/CHANGELOG.md"
 
 [project.scripts]
 aws-lighthouse = "aws_lighthouse.cli:app"
@@ -91,4 +91,3 @@ module = [
     "aws_lighthouse.agent",
 ]
 disallow_untyped_defs = false
-

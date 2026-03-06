@@ -39,7 +39,25 @@ class DatabaseManager:
     """Manages the local SQLite database for aws-lighthouse state and trends."""
 
     def __init__(self) -> None:
+        self._health_issues: dict[str, str] = {}
         self._ensure_db()
+
+    def _record_health_issue(self, operation: str, exc: BaseException) -> None:
+        self._health_issues[operation] = f"{type(exc).__name__}: {exc}"
+
+    def _clear_health_issue(self, operation: str) -> None:
+        self._health_issues.pop(operation, None)
+
+    def get_health_status(self) -> dict[str, Any]:
+        issues = [
+            {"operation": operation, "detail": detail}
+            for operation, detail in sorted(self._health_issues.items())
+        ]
+        return {
+            "ok": not issues,
+            "issue_count": len(issues),
+            "issues": issues,
+        }
 
     def _ensure_db(self) -> None:
         """Creates the database directory and initializes tables if they don't exist."""
@@ -161,7 +179,9 @@ class DatabaseManager:
                 self._ensure_audit_log_columns(cursor)
                 conn.commit()
             DB_PATH.chmod(0o600)  # owner read/write only — contains cost history
+            self._clear_health_issue("initialize")
         except (sqlite3.Error, OSError) as e:
+            self._record_health_issue("initialize", e)
             logger.error(f"Failed to initialize SQLite database: {str(e)}")
 
     def _ensure_audit_log_columns(self, cursor: sqlite3.Cursor) -> None:
@@ -251,7 +271,9 @@ class DatabaseManager:
                 )
                 self._prune_old_cost_snapshots(cursor=cursor, account_id=account_id)
                 conn.commit()
+            self._clear_health_issue("record_cost_snapshot")
         except sqlite3.Error as e:
+            self._record_health_issue("record_cost_snapshot", e)
             logger.error(f"Failed to record cost snapshot: {str(e)}")
 
     def _prune_old_cost_snapshots(
@@ -283,6 +305,7 @@ class DatabaseManager:
                 )
                 row = cursor.fetchone()
                 if row:
+                    self._clear_health_issue("get_latest_cost_snapshot")
                     return {
                         "recorded_at": row[0],
                         "period_start": row[1],
@@ -290,8 +313,10 @@ class DatabaseManager:
                         "total_usd": row[3],
                         "breakdown": json.loads(row[4]),
                     }
+                self._clear_health_issue("get_latest_cost_snapshot")
                 return None
         except sqlite3.Error as e:
+            self._record_health_issue("get_latest_cost_snapshot", e)
             logger.error(f"Failed to retrieve latest cost snapshot: {str(e)}")
             return None
 
@@ -316,7 +341,9 @@ class DatabaseManager:
                     cursor=cursor, account_id=account_id, scope_key=scope_key
                 )
                 conn.commit()
+            self._clear_health_issue("record_scan_snapshot")
         except sqlite3.Error as e:
+            self._record_health_issue("record_scan_snapshot", e)
             logger.error(f"Failed to record scan snapshot: {str(e)}")
 
     def _prune_old_scan_snapshots(
@@ -364,9 +391,12 @@ class DatabaseManager:
                 )
                 row = cursor.fetchone()
                 if row:
+                    self._clear_health_issue("get_latest_scan_snapshot")
                     return {"recorded_at": row[0], "data": json.loads(row[1])}
+                self._clear_health_issue("get_latest_scan_snapshot")
                 return None
         except sqlite3.Error as e:
+            self._record_health_issue("get_latest_scan_snapshot", e)
             logger.error(f"Failed to retrieve latest scan snapshot: {str(e)}")
             return None
 
@@ -389,9 +419,12 @@ class DatabaseManager:
                 )
                 row = cursor.fetchone()
                 if row:
+                    self._clear_health_issue("get_previous_scan_snapshot")
                     return {"recorded_at": row[0], "data": json.loads(row[1])}
+                self._clear_health_issue("get_previous_scan_snapshot")
                 return None
         except sqlite3.Error as e:
+            self._record_health_issue("get_previous_scan_snapshot", e)
             logger.error(f"Failed to retrieve previous scan snapshot: {str(e)}")
             return None
 
@@ -424,13 +457,16 @@ class DatabaseManager:
                     )
                 row = cursor.fetchone()
                 if row:
+                    self._clear_health_issue("get_latest_scan_activity")
                     return {
                         "recorded_at": row[0],
                         "account_id": row[1],
                         "scope_key": row[2],
                     }
+                self._clear_health_issue("get_latest_scan_activity")
                 return None
         except sqlite3.Error as e:
+            self._record_health_issue("get_latest_scan_activity", e)
             logger.error(f"Failed to retrieve latest scan activity: {str(e)}")
             return None
 
@@ -468,7 +504,9 @@ class DatabaseManager:
                     ),
                 )
                 conn.commit()
+            self._clear_health_issue("record_audit_log")
         except sqlite3.Error as e:
+            self._record_health_issue("record_audit_log", e)
             logger.error(f"Failed to record audit log entry: {str(e)}")
 
     def update_audit_log_result(
@@ -495,7 +533,9 @@ class DatabaseManager:
                     (result, execution_status, error, tool_call_id),
                 )
                 conn.commit()
+            self._clear_health_issue("update_audit_log_result")
         except sqlite3.Error as e:
+            self._record_health_issue("update_audit_log_result", e)
             logger.error(f"Failed to update audit log result: {str(e)}")
 
     def sync_opportunities(
@@ -746,6 +786,7 @@ class DatabaseManager:
                     (account_id, *_ACTIVE_OPPORTUNITY_STATUSES),
                 ).fetchone()[0]
                 conn.commit()
+                self._clear_health_issue("sync_opportunities")
                 return {
                     "created": created,
                     "reopened": reopened,
@@ -753,6 +794,7 @@ class DatabaseManager:
                     "still_open": int(still_open),
                 }
         except sqlite3.Error as e:
+            self._record_health_issue("sync_opportunities", e)
             logger.error(f"Failed to sync opportunities: {str(e)}")
             return {"created": 0, "reopened": 0, "resolved": 0, "still_open": 0}
 
@@ -824,8 +866,10 @@ class DatabaseManager:
                     LIMIT ?
                     """  # noqa: S608 - where clauses are built from fixed SQL fragments
                 rows = conn.execute(query, params).fetchall()
+                self._clear_health_issue("list_opportunities")
                 return [self._row_to_opportunity(row) for row in rows]
         except sqlite3.Error as e:
+            self._record_health_issue("list_opportunities", e)
             logger.error(f"Failed to list opportunities: {str(e)}")
             return []
 
@@ -880,6 +924,7 @@ class DatabaseManager:
                 by_status = {
                     row[0]: int(row[1]) for row in conn.execute(status_query, params)
                 }
+                self._clear_health_issue("summarize_opportunities")
                 return {
                     "total": total,
                     "by_source": dict(sorted(by_source.items())),
@@ -887,6 +932,7 @@ class DatabaseManager:
                     "by_status": dict(sorted(by_status.items())),
                 }
         except sqlite3.Error as e:
+            self._record_health_issue("summarize_opportunities", e)
             logger.error(f"Failed to summarize opportunities: {str(e)}")
             return {"total": 0, "by_source": {}, "by_severity": {}, "by_status": {}}
 
@@ -906,6 +952,7 @@ class DatabaseManager:
                         """,
                         (account_id, fingerprint),
                     ).fetchone()
+                    self._clear_health_issue("get_opportunity")
                     return self._row_to_opportunity(row) if row else None
 
                 rows = conn.execute(
@@ -919,13 +966,16 @@ class DatabaseManager:
                     (fingerprint,),
                 ).fetchall()
                 if not rows:
+                    self._clear_health_issue("get_opportunity")
                     return None
                 if len(rows) > 1:
                     raise ValueError(
                         "fingerprint is ambiguous across multiple accounts; supply account_id"
                     )
+                self._clear_health_issue("get_opportunity")
                 return self._row_to_opportunity(rows[0])
         except sqlite3.Error as e:
+            self._record_health_issue("get_opportunity", e)
             logger.error(f"Failed to get opportunity: {str(e)}")
             return None
 
@@ -962,8 +1012,10 @@ class DatabaseManager:
                         """,
                         (fingerprint, max(limit, 1)),
                     ).fetchall()
+                self._clear_health_issue("get_opportunity_events")
                 return [self._row_to_opportunity_event(row) for row in rows]
         except sqlite3.Error as e:
+            self._record_health_issue("get_opportunity_events", e)
             logger.error(f"Failed to get opportunity events: {str(e)}")
             return []
 
@@ -1121,7 +1173,9 @@ class DatabaseManager:
                         data=data,
                     )
                 conn.commit()
+            self._clear_health_issue("update_opportunity_state")
         except sqlite3.Error as e:
+            self._record_health_issue("update_opportunity_state", e)
             logger.error(f"Failed to update opportunity state: {str(e)}")
             return None
 

@@ -46,7 +46,7 @@ ollama pull gpt-oss:120b-cloud
 ## Installation
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/Eaglemann/aws-lighthouse.git
 cd aws-lighthouse
 uv sync
 ```

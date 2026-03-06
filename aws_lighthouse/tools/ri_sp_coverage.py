@@ -5,7 +5,12 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from ..auth import get_client
 from ..logger import logger
-from ..scan_contract import error_result, ok_result, scan_error_from_exception
+from ..scan_contract import (
+    error_result,
+    is_expected_unavailable_scan_error,
+    ok_result,
+    scan_error_from_exception,
+)
 from ..types import ScanError, ScanResult
 
 
@@ -75,16 +80,18 @@ def _fetch_sp_coverage(ce, period: dict[str, str]) -> ScanResult:
             }
         )
     except (ClientError, BotoCoreError) as e:
-        logger.error(f"Failed to fetch SP coverage: {e}")
+        error = scan_error_from_exception(
+            service="ce",
+            operation="GetSavingsPlansCoverage",
+            exc=e,
+        )
+        logger.error(
+            f"Failed to fetch SP coverage: {e}",
+            display=not is_expected_unavailable_scan_error(error),
+        )
         return error_result(
             data={"sp_coverage_pct": None, "sp_on_demand_cost": None},
-            errors=[
-                scan_error_from_exception(
-                    service="ce",
-                    operation="GetSavingsPlansCoverage",
-                    exc=e,
-                )
-            ],
+            errors=[error],
         )
 
 
@@ -101,16 +108,18 @@ def _fetch_sp_utilization(ce, period: dict[str, str]) -> ScanResult:
             }
         )
     except (ClientError, BotoCoreError) as e:
-        logger.error(f"Failed to fetch SP utilization: {e}")
+        error = scan_error_from_exception(
+            service="ce",
+            operation="GetSavingsPlansUtilization",
+            exc=e,
+        )
+        logger.error(
+            f"Failed to fetch SP utilization: {e}",
+            display=not is_expected_unavailable_scan_error(error),
+        )
         return error_result(
             data={"sp_utilization_pct": None, "sp_unused_commitment": None},
-            errors=[
-                scan_error_from_exception(
-                    service="ce",
-                    operation="GetSavingsPlansUtilization",
-                    exc=e,
-                )
-            ],
+            errors=[error],
         )
 
 

@@ -166,6 +166,20 @@ def check_ollama_runtime(timeout_seconds: float = 2.0) -> OllamaRuntimeStatus:
     }
 
 
+def _default_opportunity_account_id(account_id: str | None = None) -> str | None:
+    if account_id:
+        return account_id
+    latest_scan = db_manager.get_latest_scan_activity()
+    if latest_scan is None:
+        return None
+    latest_account_id = latest_scan.get("account_id")
+    return (
+        latest_account_id
+        if isinstance(latest_account_id, str) and latest_account_id
+        else None
+    )
+
+
 # 1. State Definition
 class AgentState(TypedDict):
     """The complete state of the LangGraph execution loop."""
@@ -507,7 +521,7 @@ def tool_list_opportunities(
         _parse_csv_filter(severities) or None,
     )
     opportunities = db_manager.list_opportunities(
-        account_id=account_id or None,
+        account_id=_default_opportunity_account_id(account_id or None),
         statuses=parsed_statuses,
         source_kinds=parsed_source_kinds,
         severities=parsed_severities,
@@ -528,7 +542,7 @@ def tool_get_opportunity_details(
     try:
         opportunity = db_manager.get_opportunity(
             fingerprint=fingerprint,
-            account_id=account_id or None,
+            account_id=_default_opportunity_account_id(account_id or None),
         )
     except ValueError as exc:
         return json.dumps({"error": str(exc)})
@@ -562,7 +576,7 @@ def tool_update_opportunity(
     try:
         opportunity = db_manager.update_opportunity_state(
             fingerprint=fingerprint,
-            account_id=account_id or None,
+            account_id=_default_opportunity_account_id(account_id or None),
             status=status,
             owner=owner,
             snooze_until=snooze_until,
@@ -602,7 +616,7 @@ def tool_plan_opportunities(
         _parse_csv_filter(severities) or None,
     )
     opportunities = db_manager.list_opportunities(
-        account_id=account_id or None,
+        account_id=_default_opportunity_account_id(account_id or None),
         statuses=parsed_statuses,
         source_kinds=parsed_source_kinds,
         severities=parsed_severities,

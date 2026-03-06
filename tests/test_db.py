@@ -125,6 +125,28 @@ class TestEnsureDb:
         assert "opportunities" in tables
         assert "opportunity_events" in tables
 
+    def test_init_failure_is_recorded_in_health_status(self, tmp_path, monkeypatch):
+        nested = tmp_path / "broken"
+        monkeypatch.setattr(db_module, "DB_DIR", nested)
+        monkeypatch.setattr(db_module, "DB_PATH", nested / "test.db")
+        monkeypatch.setattr(
+            db_module.sqlite3,
+            "connect",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                sqlite3.OperationalError("db down")
+            ),
+        )
+
+        db = DatabaseManager()
+
+        assert db.get_health_status()["ok"] is False
+        assert db.get_health_status()["issues"] == [
+            {
+                "operation": "initialize",
+                "detail": "OperationalError: db down",
+            }
+        ]
+
 
 # ---------------------------------------------------------------------------
 # record_cost_snapshot
@@ -157,6 +179,25 @@ class TestRecordCostSnapshot:
         """An unreachable DB path must log an error, not propagate an exception."""
         monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "nonexistent" / "x.db")
         db.record_cost_snapshot("acct", "2024-01-01", "2024-01-31", 0.0, {})
+
+    def test_health_status_clears_after_recovery(self, db, tmp_path, monkeypatch):
+        healthy_path = tmp_path / "test.db"
+        monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "nonexistent" / "x.db")
+
+        db.record_cost_snapshot("acct", "2024-01-01", "2024-01-31", 0.0, {})
+
+        assert db.get_health_status()["ok"] is False
+        assert db.get_health_status()["issues"] == [
+            {
+                "operation": "record_cost_snapshot",
+                "detail": "OperationalError: unable to open database file",
+            }
+        ]
+
+        monkeypatch.setattr(db_module, "DB_PATH", healthy_path)
+        db.record_cost_snapshot("acct", "2024-02-01", "2024-02-28", 1.0, {})
+
+        assert db.get_health_status() == {"ok": True, "issue_count": 0, "issues": []}
 
 
 # ---------------------------------------------------------------------------

@@ -47,6 +47,25 @@ def _err(data, message="simulated error"):
     }
 
 
+def _scan_error(
+    *,
+    service: str,
+    operation: str,
+    code: str,
+    message: str,
+    region: str | None = None,
+):
+    error = {
+        "code": code,
+        "message": message,
+        "service": service,
+        "operation": operation,
+    }
+    if region is not None:
+        error["region"] = region
+    return error
+
+
 # ---------------------------------------------------------------------------
 # Helper: capture Rich output in a string buffer
 # ---------------------------------------------------------------------------
@@ -651,6 +670,7 @@ def _make_db_mock():
     m.get_latest_cost_snapshot.return_value = None
     m.get_latest_scan_snapshot.return_value = None
     m.get_latest_scan_activity.return_value = None
+    m.get_health_status.return_value = {"ok": True, "issue_count": 0, "issues": []}
     m.summarize_opportunities.return_value = {
         "total": 0,
         "by_source": {},
@@ -1833,6 +1853,33 @@ class TestAnalyzeInteractiveMode:
         assert "Top Opportunities" in result.output
         assert "Root account has no MFA enabled" in result.output
 
+    def test_text_output_surfaces_local_state_degradation(self):
+        db_mock = _make_db_mock()
+        db_mock.get_health_status.return_value = {
+            "ok": False,
+            "issue_count": 2,
+            "issues": [
+                {
+                    "operation": "record_scan_snapshot",
+                    "detail": "OperationalError: unable to open database file",
+                },
+                {
+                    "operation": "record_audit_log",
+                    "detail": "OperationalError: database is locked",
+                },
+            ],
+        }
+
+        result = self._run_text(
+            extra_patches={"aws_lighthouse.cli.db_manager": db_mock}
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Local State Degraded" in result.output
+        assert "Scan snapshot writes" in result.output
+        assert "Audit log writes" in result.output
+        assert "unable to open database file" in result.output
+
     def test_summary_separates_degraded_and_skipped_sections(self, tmp_path):
         config = tmp_path / "policy.toml"
         config.write_text(
@@ -1858,6 +1905,115 @@ tagging = false
         assert "Security" in result.output
         assert "Skipped" in result.output
         assert "Tagging" in result.output
+
+    def test_expected_unavailable_errors_render_aggregated_degraded_services(self):
+        ri_sp_result = {
+            "ok": False,
+            "data": {
+                "period": "2026-02-20 → 2026-03-06",
+                "ri_coverage_pct": 0.0,
+                "ri_on_demand_cost": 0.0,
+                "ri_utilization_pct": 0.0,
+                "ri_unused_cost": 0.0,
+                "sp_coverage_pct": None,
+                "sp_on_demand_cost": None,
+                "sp_utilization_pct": None,
+                "sp_unused_commitment": None,
+            },
+            "errors": [
+                _scan_error(
+                    service="ce",
+                    operation="GetSavingsPlansCoverage",
+                    code="DataUnavailableException",
+                    message="Savings Plans data is unavailable",
+                ),
+                _scan_error(
+                    service="ce",
+                    operation="GetSavingsPlansUtilization",
+                    code="DataUnavailableException",
+                    message="Savings Plans data is unavailable",
+                ),
+            ],
+        }
+        security_result = {
+            "ok": False,
+            "data": [],
+            "errors": [
+                _scan_error(
+                    service="guardduty",
+                    operation="ListDetectors",
+                    code="SubscriptionRequiredException",
+                    message="subscription required",
+                    region="us-east-1",
+                ),
+                _scan_error(
+                    service="guardduty",
+                    operation="ListDetectors",
+                    code="SubscriptionRequiredException",
+                    message="subscription required",
+                    region="us-west-2",
+                ),
+            ],
+        }
+
+        result = self._run_text(
+            extra_patches={
+                "aws_lighthouse.cli.get_ri_sp_coverage": lambda days=14: ri_sp_result,
+                "aws_lighthouse.cli.run_security_scan": lambda **kwargs: (
+                    security_result
+                ),
+            }
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Degraded Services" in result.output
+        assert "Savings Plans data unavailable for this account/period" in result.output
+        assert "GuardDuty" in result.output
+        assert "2 regions" in result.output
+        assert "us-east-1" in result.output
+        assert "us-west-2" in result.output
+        assert (
+            "GuardDuty checks unavailable in 2 regions (subscription required)."
+            in result.output
+        )
+        assert "Failed to fetch SP coverage" not in result.output
+        assert "Failed to check GuardDuty" not in result.output
+
+    def test_json_output_preserves_expected_unavailable_errors(self):
+        runner = CliRunner()
+        patches = {**_PATCHES, "aws_lighthouse.cli.get_aws_session": _mock_session}
+        with patch.multiple(
+            "aws_lighthouse.cli",
+            **{
+                k.split(".")[-1]: (
+                    (
+                        lambda days=14: {
+                            "ok": False,
+                            "data": {},
+                            "errors": [
+                                _scan_error(
+                                    service="ce",
+                                    operation="GetSavingsPlansCoverage",
+                                    code="DataUnavailableException",
+                                    message="Savings Plans data is unavailable",
+                                )
+                            ],
+                        }
+                    )
+                    if k.endswith("get_ri_sp_coverage")
+                    else v
+                )
+                for k, v in patches.items()
+            },
+        ):
+            result = runner.invoke(
+                app, ["analyze", "--output", "json", "--json-schema", "v2"]
+            )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["ri_sp_coverage"]["errors"][0]["code"] == "DataUnavailableException"
+        assert data["overall"]["ok"] is False
 
     def test_json_output_does_not_emit_opportunity_summary_text(self):
         runner = CliRunner()
@@ -1974,6 +2130,20 @@ class TestShellCommands:
 
         mock_create.assert_not_called()
         graph.stream.assert_not_called()
+        db_mock.summarize_opportunities.assert_called_once_with(
+            account_id="123456789012",
+            statuses=["open", "triaged", "in_progress", "snoozed"],
+        )
+        db_mock.list_opportunities.assert_any_call(
+            account_id="123456789012",
+            statuses=["open", "triaged", "in_progress", "snoozed"],
+            limit=5,
+        )
+        db_mock.list_opportunities.assert_any_call(
+            account_id="123456789012",
+            statuses=["open", "triaged", "in_progress", "snoozed"],
+            limit=10,
+        )
 
     def test_agent_calls_alert_each_time_when_ollama_is_unhealthy(self, capsys):
         with (

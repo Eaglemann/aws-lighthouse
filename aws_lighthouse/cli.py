@@ -12,7 +12,7 @@ import typer
 from rich import box
 from rich.align import Align
 from rich.columns import Columns
-from rich.console import Console
+from rich.console import Console, Group
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt
@@ -31,7 +31,12 @@ from .opportunities import (
     sync_opportunities_from_scan,
 )
 from .policy import PolicyConfigError, ScanPolicy, load_policy_config
-from .scan_contract import error_result, merge_list_results
+from .scan_contract import (
+    error_result,
+    is_expected_unavailable_scan_error,
+    merge_list_results,
+    scan_error_reason,
+)
 from .tools.cloudwatch_scan import detect_cloudwatch_gaps
 from .tools.cost import get_monthly_cost_summary
 from .tools.cost_anomaly import detect_cost_anomalies
@@ -110,6 +115,24 @@ _DELTA_SECTION_KEYS = (
     "cost_waste",
     "tagging_findings",
 )
+
+_DB_HEALTH_LABELS = {
+    "initialize": "SQLite initialization",
+    "record_cost_snapshot": "Cost snapshot writes",
+    "get_latest_cost_snapshot": "Cost snapshot reads",
+    "record_scan_snapshot": "Scan snapshot writes",
+    "get_latest_scan_snapshot": "Scan snapshot reads",
+    "get_previous_scan_snapshot": "Previous snapshot reads",
+    "get_latest_scan_activity": "Latest scan activity reads",
+    "record_audit_log": "Audit log writes",
+    "update_audit_log_result": "Audit log result updates",
+    "sync_opportunities": "Opportunity sync",
+    "list_opportunities": "Opportunity list reads",
+    "summarize_opportunities": "Opportunity summary reads",
+    "get_opportunity": "Opportunity detail reads",
+    "get_opportunity_events": "Opportunity history reads",
+    "update_opportunity_state": "Opportunity state updates",
+}
 
 
 def _scan_scope_key(
@@ -355,9 +378,185 @@ _SUMMARY_SECTION_LABELS = {
     "tagging_findings": "Tagging",
 }
 
+_ERROR_SERVICE_LABELS = {
+    "ce": "Cost Explorer",
+    "guardduty": "GuardDuty",
+}
+
 
 def _display_scope_label(region: str | None) -> str:
     return region or "global"
+
+
+def _error_service_label(service: str) -> str:
+    return _ERROR_SERVICE_LABELS.get(service, service)
+
+
+def _group_expected_unavailable_errors(
+    errors: Sequence[ScanError],
+) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for error in errors:
+        if not is_expected_unavailable_scan_error(error):
+            continue
+        reason = scan_error_reason(error)
+        key = (error["service"], reason)
+        entry = grouped.setdefault(
+            key,
+            {
+                "service": error["service"],
+                "reason": reason,
+                "regions": set(),
+            },
+        )
+        region = error.get("region")
+        if region:
+            cast(set[str], entry["regions"]).add(region)
+    return sorted(
+        grouped.values(),
+        key=lambda entry: (str(entry["service"]), str(entry["reason"])),
+    )
+
+
+def _format_degraded_scope(regions: set[str]) -> str:
+    if not regions:
+        return "global"
+    ordered = sorted(regions)
+    if len(ordered) == 1:
+        return ordered[0]
+    sample = ", ".join(ordered[:3])
+    if len(ordered) > 3:
+        sample = f"{sample}, +{len(ordered) - 3} more"
+    return f"{len(ordered)} regions ({sample})"
+
+
+def _collect_degraded_service_rows(
+    section_results: Mapping[str, ScanResult],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for section_name, section_result in section_results.items():
+        for entry in _group_expected_unavailable_errors(section_result["errors"]):
+            rows.append(
+                {
+                    "section_name": section_name,
+                    "service": entry["service"],
+                    "reason": entry["reason"],
+                    "scope": _format_degraded_scope(cast(set[str], entry["regions"])),
+                }
+            )
+    section_order = {name: index for index, name in enumerate(_SUMMARY_SECTION_LABELS)}
+    return sorted(
+        rows,
+        key=lambda row: (
+            section_order.get(str(row["section_name"]), 999),
+            str(row["service"]),
+            str(row["reason"]),
+        ),
+    )
+
+
+def _render_degraded_services_panel(
+    c: Console, section_results: Mapping[str, ScanResult]
+) -> None:
+    rows = _collect_degraded_service_rows(section_results)
+    if not rows:
+        return
+    table = Table(
+        box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False
+    )
+    table.add_column("Section", style="dim", no_wrap=True)
+    table.add_column("Service", style="dim", no_wrap=True)
+    table.add_column("Scope", style="dim")
+    table.add_column("Reason")
+    for row in rows:
+        table.add_row(
+            _SUMMARY_SECTION_LABELS.get(
+                str(row["section_name"]), str(row["section_name"])
+            ),
+            _error_service_label(str(row["service"])),
+            str(row["scope"]),
+            str(row["reason"]),
+        )
+    c.print(
+        Panel(
+            table,
+            title="[bold yellow]Degraded Services[/bold yellow]",
+            border_style="yellow",
+            padding=(0, 1),
+        )
+    )
+    c.print()
+
+
+def _render_db_health_panel(c: Console, health_status: Mapping[str, Any]) -> None:
+    issues = cast(list[dict[str, str]], health_status.get("issues", []))
+    if not issues:
+        return
+    table = Table(
+        box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False
+    )
+    table.add_column("Local State", style="dim", no_wrap=True)
+    table.add_column("Impact")
+    for issue in issues:
+        operation = issue.get("operation", "")
+        table.add_row(
+            _DB_HEALTH_LABELS.get(operation, operation.replace("_", " ").title()),
+            issue.get("detail", ""),
+        )
+    c.print(
+        Panel(
+            Group(
+                Text.from_markup(
+                    "[yellow]Snapshots, audit history, or opportunities may be incomplete until local SQLite access recovers.[/yellow]"
+                ),
+                table,
+            ),
+            title="[bold yellow]Local State Degraded[/bold yellow]",
+            border_style="yellow",
+            padding=(0, 1),
+        )
+    )
+    c.print()
+
+
+def _format_expected_unavailable_note(
+    service: str,
+    reason: str,
+    regions: set[str],
+) -> str:
+    if service == "guardduty":
+        if not regions:
+            return f"GuardDuty checks unavailable ({reason})."
+        if len(regions) == 1:
+            return f"GuardDuty checks unavailable in {sorted(regions)[0]} ({reason})."
+        return f"GuardDuty checks unavailable in {len(regions)} regions ({reason})."
+    if reason.endswith("."):
+        return reason
+    return f"{reason[0].upper()}{reason[1:]}."
+
+
+def _section_degraded_notes(errors: Sequence[ScanError]) -> list[str]:
+    notes = [
+        _format_expected_unavailable_note(
+            str(entry["service"]),
+            str(entry["reason"]),
+            cast(set[str], entry["regions"]),
+        )
+        for entry in _group_expected_unavailable_errors(errors)
+    ]
+    unexpected_errors = [
+        error for error in errors if not is_expected_unavailable_scan_error(error)
+    ]
+    if unexpected_errors:
+        notes.append("Additional API errors occurred. Findings may be incomplete.")
+    return notes
+
+
+def _render_degraded_notes(notes: Sequence[str]) -> Group | None:
+    if not notes:
+        return None
+    lines = [Text.from_markup(f"[yellow]⚠  {note}[/yellow]") for note in notes]
+    return Group(*lines)
 
 
 def _format_counts_for_summary(counts: dict[str, int], *, empty: str) -> str:
@@ -701,6 +900,7 @@ def _render_ri_sp_coverage_panel(c: Console, ri_sp_result: ScanResult) -> None:
     sp_cov = ri_sp.get("sp_coverage_pct")
     sp_util = ri_sp.get("sp_utilization_pct")
     has_any = any(value and value > 0 for value in [ri_cov, ri_util, sp_cov, sp_util])
+    notes = _section_degraded_notes(ri_sp_result["errors"])
 
     table = Table(
         box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False
@@ -730,11 +930,15 @@ def _render_ri_sp_coverage_panel(c: Console, ri_sp_result: ScanResult) -> None:
         if has_any
         else "[bold dim]📊 RI / Savings Plan Coverage[/bold dim]  [dim]no commitments detected[/dim]"
     )
+    panel_body: Any = table
+    note_block = _render_degraded_notes(notes)
+    if note_block is not None:
+        panel_body = Group(table, note_block)
     c.print(
         Panel(
-            table,
+            panel_body,
             title=f"{title}  [dim]{ri_sp.get('period', '')}[/dim]",
-            border_style=border,
+            border_style="yellow" if ri_sp_result["errors"] else border,
             padding=(0, 1),
         )
     )
@@ -748,6 +952,7 @@ def _render_security_panel(
     multi_region: bool,
 ) -> None:
     sec_findings = cast(list[SecurityFinding], sec_result["data"])
+    notes = _section_degraded_notes(sec_result["errors"])
     if sec_findings:
         sec_table = Table(
             box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False
@@ -768,9 +973,13 @@ def _render_security_panel(
                 row.append(_display_scope_label(region))
             row += [finding["resource"], finding["finding"]]
             sec_table.add_row(*row)
+        panel_body: Any = sec_table
+        note_block = _render_degraded_notes(notes)
+        if note_block is not None:
+            panel_body = Group(sec_table, note_block)
         c.print(
             Panel(
-                sec_table,
+                panel_body,
                 title=(
                     f"[bold red]🛡️  Security[/bold red]  [dim]{len(sec_findings)} finding{'s' if len(sec_findings) != 1 else ''}[/dim]"
                     + ("  [yellow]degraded[/yellow]" if sec_result["errors"] else "")
@@ -780,9 +989,20 @@ def _render_security_panel(
             )
         )
     elif sec_result["errors"]:
+        note_block = _render_degraded_notes(notes)
+        panel_body = (
+            Group(
+                Text.from_markup(
+                    "[yellow]⚠  Security scan is degraded due to API errors. Findings may be incomplete.[/yellow]"
+                ),
+                note_block,
+            )
+            if note_block is not None
+            else "[yellow]⚠  Security scan is degraded due to API errors. Findings may be incomplete.[/yellow]"
+        )
         c.print(
             Panel(
-                "[yellow]⚠  Security scan is degraded due to API errors. Findings may be incomplete.[/yellow]",
+                panel_body,
                 title="[bold yellow]⚠ Security (Degraded)[/bold yellow]",
                 border_style="yellow",
                 padding=(0, 1),
@@ -1898,6 +2118,7 @@ def _run_analyze_cycle(
                 statuses=list(_ACTIVE_OPPORTUNITY_STATUSES),
                 limit=5 if watch_view == "full" else 3,
             )
+            db_health_status = db_manager.get_health_status()
 
             _render_executive_summary(
                 c,
@@ -1911,6 +2132,8 @@ def _run_analyze_cycle(
                 opportunity_sync_summary=opportunity_summary,
                 delta_data=delta_data,
             )
+            _render_db_health_panel(c, db_health_status)
+            _render_degraded_services_panel(c, section_results)
             _render_top_opportunities_panel(c, top_opportunities)
 
             if watch_cycle is not None and watch_view == "compact":
@@ -2219,10 +2442,22 @@ def _render_shell_help(c: Console) -> None:
     c.print()
 
 
+def _shell_opportunity_account_id(
+    latest_scan: dict[str, Any] | None = None,
+) -> str | None:
+    latest_scan = latest_scan or db_manager.get_latest_scan_activity()
+    if latest_scan is None:
+        return None
+    account_id = latest_scan.get("account_id")
+    return account_id if isinstance(account_id, str) and account_id else None
+
+
 def _render_shell_status(c: Console) -> None:
     latest_scan = db_manager.get_latest_scan_activity()
+    account_id = _shell_opportunity_account_id(latest_scan)
+    health_status = db_manager.get_health_status()
     summary = db_manager.summarize_opportunities(
-        statuses=list(_ACTIVE_OPPORTUNITY_STATUSES)
+        account_id=account_id, statuses=list(_ACTIVE_OPPORTUNITY_STATUSES)
     )
     status_table = Table(
         box=box.SIMPLE_HEAD, show_header=False, padding=(0, 1), show_edge=False
@@ -2240,6 +2475,23 @@ def _render_shell_status(c: Console) -> None:
     status_table.add_row(
         "Scope",
         latest_scan["scope_key"] if latest_scan else "Unknown",
+    )
+    issues = cast(list[dict[str, str]], health_status.get("issues", []))
+    status_table.add_row(
+        "Local State",
+        (
+            "[green]Healthy[/green]"
+            if not issues
+            else "[yellow]Degraded[/yellow] · "
+            + ", ".join(
+                _DB_HEALTH_LABELS.get(
+                    issue.get("operation", ""),
+                    issue.get("operation", "").replace("_", " ").title(),
+                )
+                for issue in issues[:3]
+            )
+            + ("..." if len(issues) > 3 else "")
+        ),
     )
     status_table.add_row(
         "Open Opportunities",
@@ -2267,6 +2519,7 @@ def _render_shell_status(c: Console) -> None:
 
 def _render_shell_opportunities(c: Console, *, limit: int = 5) -> None:
     opportunities = db_manager.list_opportunities(
+        account_id=_shell_opportunity_account_id(),
         statuses=list(_ACTIVE_OPPORTUNITY_STATUSES),
         limit=limit,
     )
@@ -2275,6 +2528,7 @@ def _render_shell_opportunities(c: Console, *, limit: int = 5) -> None:
 
 def _render_shell_plan(c: Console, *, limit: int = 10) -> None:
     opportunities = db_manager.list_opportunities(
+        account_id=_shell_opportunity_account_id(),
         statuses=list(_ACTIVE_OPPORTUNITY_STATUSES),
         limit=limit,
     )

@@ -47,6 +47,7 @@ def _make_lambda(functions):
     """functions: list of {"FunctionName": .., "FunctionArn": ..}"""
     lmb = MagicMock()
     lmb.get_paginator.return_value.paginate.return_value = [{"Functions": functions}]
+    lmb.list_tags.return_value = {"Tags": {}}
     return lmb
 
 
@@ -237,18 +238,37 @@ def test_lambda_partially_tagged_reports_only_missing():
     assert lmb_findings[0]["missing_tags"] == ["Owner"]
 
 
-def test_lambda_bulk_tag_fetch_error_treats_as_no_tags():
+def test_lambda_bulk_tag_fetch_error_falls_back_to_per_function_tags():
     tagging = MagicMock()
     tagging.get_paginator.side_effect = BotoCoreError()
+    lmb = _make_lambda([_FN])
+    lmb.list_tags.return_value = {"Tags": {"Owner": "team"}}
     result = _run(
-        lmb=_make_lambda([_FN]),
+        lmb=lmb,
         tagging=tagging,
         required_tags=["Owner"],
     )
     findings = _data(result)
     assert result["ok"] is False
-    lmb_findings = [f for f in findings if f["resource_type"] == "Lambda"]
-    assert len(lmb_findings) == 1  # missing tag flagged because existing = set()
+    assert not any(f["resource_type"] == "Lambda" for f in findings)
+    lmb.list_tags.assert_called_once_with(Resource=_FN_ARN)
+
+
+def test_lambda_tag_lookup_failures_do_not_invent_missing_tag_findings():
+    tagging = MagicMock()
+    tagging.get_paginator.side_effect = BotoCoreError()
+    lmb = _make_lambda([_FN])
+    lmb.list_tags.side_effect = BotoCoreError()
+
+    result = _run(
+        lmb=lmb,
+        tagging=tagging,
+        required_tags=["Owner"],
+    )
+
+    findings = _data(result)
+    assert result["ok"] is False
+    assert not any(f["resource_type"] == "Lambda" for f in findings)
 
 
 def test_lambda_bulk_tags_two_pages_collects_all():

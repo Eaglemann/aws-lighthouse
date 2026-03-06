@@ -436,37 +436,56 @@ def test_local_opportunity_tools_are_safe():
 
 
 def test_list_opportunities_returns_db_rows_as_json():
-    with patch(
-        "aws_lighthouse.agent.db_manager.list_opportunities",
-        return_value=[
-            {
+    with (
+        patch(
+            "aws_lighthouse.agent.db_manager.get_latest_scan_activity",
+            return_value={
+                "recorded_at": "2026-03-06T11:00:00+00:00",
                 "account_id": "123456789012",
-                "fingerprint": "abc123",
-                "source_kind": "security",
-                "title": "Security finding: sg-1",
-                "summary": "Open SSH",
-                "severity": "HIGH",
-                "resource_type": None,
-                "resource_id": "sg-1",
-                "resource_name": "sg-1",
-                "region": "us-east-1",
-                "raw_payload": {"resource": "sg-1"},
-                "first_seen_at": "2026-03-06T10:00:00+00:00",
-                "last_seen_at": "2026-03-06T10:00:00+00:00",
-                "seen_count": 1,
-                "status": "open",
-                "owner": None,
-                "snooze_until": None,
-                "notes": "",
-                "resolution_reason": None,
-                "resolution_note": None,
-                "resolved_at": None,
-                "last_scan_scope": "multi-region:days=14",
-            }
-        ],
+                "scope_key": "multi-region:days=14",
+            },
+        ),
+        patch(
+            "aws_lighthouse.agent.db_manager.list_opportunities",
+            return_value=[
+                {
+                    "account_id": "123456789012",
+                    "fingerprint": "abc123",
+                    "source_kind": "security",
+                    "title": "Security finding: sg-1",
+                    "summary": "Open SSH",
+                    "severity": "HIGH",
+                    "resource_type": None,
+                    "resource_id": "sg-1",
+                    "resource_name": "sg-1",
+                    "region": "us-east-1",
+                    "raw_payload": {"resource": "sg-1"},
+                    "first_seen_at": "2026-03-06T10:00:00+00:00",
+                    "last_seen_at": "2026-03-06T10:00:00+00:00",
+                    "seen_count": 1,
+                    "status": "open",
+                    "owner": None,
+                    "snooze_until": None,
+                    "notes": "",
+                    "resolution_reason": None,
+                    "resolution_note": None,
+                    "resolved_at": None,
+                    "last_scan_scope": "multi-region:days=14",
+                }
+            ],
+        ) as mock_list,
     ):
         payload = tool_list_opportunities.invoke({})
 
+    mock_list.assert_called_once_with(
+        account_id="123456789012",
+        statuses=["open", "triaged", "in_progress", "snoozed"],
+        source_kinds=None,
+        severities=None,
+        region=None,
+        owner=None,
+        limit=25,
+    )
     assert "abc123" in payload
     assert "security" in payload
 
@@ -498,8 +517,17 @@ def test_get_opportunity_details_combines_state_and_history():
     }
     with (
         patch(
-            "aws_lighthouse.agent.db_manager.get_opportunity", return_value=opportunity
+            "aws_lighthouse.agent.db_manager.get_latest_scan_activity",
+            return_value={
+                "recorded_at": "2026-03-06T11:00:00+00:00",
+                "account_id": "123456789012",
+                "scope_key": "multi-region:days=14",
+            },
         ),
+        patch(
+            "aws_lighthouse.agent.db_manager.get_opportunity",
+            return_value=opportunity,
+        ) as mock_get,
         patch(
             "aws_lighthouse.agent.db_manager.get_opportunity_events",
             return_value=[
@@ -515,6 +543,10 @@ def test_get_opportunity_details_combines_state_and_history():
     ):
         payload = tool_get_opportunity_details.invoke({"fingerprint": "abc123"})
 
+    mock_get.assert_called_once_with(
+        fingerprint="abc123",
+        account_id="123456789012",
+    )
     assert "created" in payload
     assert "abc123" in payload
 
@@ -544,10 +576,20 @@ def test_update_opportunity_routes_to_db_manager():
         "resolved_at": None,
         "last_scan_scope": "multi-region:days=14",
     }
-    with patch(
-        "aws_lighthouse.agent.db_manager.update_opportunity_state",
-        return_value=updated,
-    ) as mock_update:
+    with (
+        patch(
+            "aws_lighthouse.agent.db_manager.get_latest_scan_activity",
+            return_value={
+                "recorded_at": "2026-03-06T11:00:00+00:00",
+                "account_id": "123456789012",
+                "scope_key": "multi-region:days=14",
+            },
+        ),
+        patch(
+            "aws_lighthouse.agent.db_manager.update_opportunity_state",
+            return_value=updated,
+        ) as mock_update,
+    ):
         payload = tool_update_opportunity.invoke(
             {
                 "fingerprint": "abc123",
@@ -558,42 +600,68 @@ def test_update_opportunity_routes_to_db_manager():
             }
         )
 
-    mock_update.assert_called_once()
+    mock_update.assert_called_once_with(
+        fingerprint="abc123",
+        account_id="123456789012",
+        status="snoozed",
+        owner="platform",
+        snooze_until="2026-03-13T00:00:00+00:00",
+        note="Waiting on owner",
+    )
     assert "snoozed" in payload
     assert "platform" in payload
 
 
 def test_plan_opportunities_groups_results():
-    with patch(
-        "aws_lighthouse.agent.db_manager.list_opportunities",
-        return_value=[
-            {
+    with (
+        patch(
+            "aws_lighthouse.agent.db_manager.get_latest_scan_activity",
+            return_value={
+                "recorded_at": "2026-03-06T11:00:00+00:00",
                 "account_id": "123456789012",
-                "fingerprint": "abc123",
-                "source_kind": "security",
-                "title": "Security finding: sg-1",
-                "summary": "Open SSH",
-                "severity": "HIGH",
-                "resource_type": None,
-                "resource_id": "sg-1",
-                "resource_name": "sg-1",
-                "region": "us-east-1",
-                "raw_payload": {"resource": "sg-1"},
-                "first_seen_at": "2026-03-06T10:00:00+00:00",
-                "last_seen_at": "2026-03-06T10:00:00+00:00",
-                "seen_count": 1,
-                "status": "open",
-                "owner": None,
-                "snooze_until": None,
-                "notes": "",
-                "resolution_reason": None,
-                "resolution_note": None,
-                "resolved_at": None,
-                "last_scan_scope": "multi-region:days=14",
-            }
-        ],
+                "scope_key": "multi-region:days=14",
+            },
+        ),
+        patch(
+            "aws_lighthouse.agent.db_manager.list_opportunities",
+            return_value=[
+                {
+                    "account_id": "123456789012",
+                    "fingerprint": "abc123",
+                    "source_kind": "security",
+                    "title": "Security finding: sg-1",
+                    "summary": "Open SSH",
+                    "severity": "HIGH",
+                    "resource_type": None,
+                    "resource_id": "sg-1",
+                    "resource_name": "sg-1",
+                    "region": "us-east-1",
+                    "raw_payload": {"resource": "sg-1"},
+                    "first_seen_at": "2026-03-06T10:00:00+00:00",
+                    "last_seen_at": "2026-03-06T10:00:00+00:00",
+                    "seen_count": 1,
+                    "status": "open",
+                    "owner": None,
+                    "snooze_until": None,
+                    "notes": "",
+                    "resolution_reason": None,
+                    "resolution_note": None,
+                    "resolved_at": None,
+                    "last_scan_scope": "multi-region:days=14",
+                }
+            ],
+        ) as mock_list,
     ):
         payload = tool_plan_opportunities.invoke({})
 
+    mock_list.assert_called_once_with(
+        account_id="123456789012",
+        statuses=["open", "triaged", "in_progress", "snoozed"],
+        source_kinds=None,
+        severities=None,
+        region=None,
+        owner=None,
+        limit=25,
+    )
     assert "groups" in payload
     assert "security" in payload
