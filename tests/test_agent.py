@@ -11,6 +11,7 @@ from aws_lighthouse.agent import (
     OLLAMA_MODEL_NAME,
     SAFE_TOOLS,
     _classify_tool_result,
+    _normalize_schema_like_args,
     _record_tool_execution_results,
     _route_after_approval,
     approval_node,
@@ -22,6 +23,7 @@ from aws_lighthouse.agent import (
     tool_list_opportunities,
     tool_plan_opportunities,
     tool_update_opportunity,
+    tools_node,
 )
 
 # ---------------------------------------------------------------------------
@@ -371,6 +373,56 @@ def test_schema_defaults_to_v1_for_read_only_tools():
     ):
         payload = tool_detect_cost_anomalies.invoke({})
     assert payload == '[{"service": "EC2"}]'
+
+
+def test_normalize_schema_like_args_maps_schema_version_to_schema():
+    normalized, note = _normalize_schema_like_args(
+        "tool_get_enabled_regions", {"schema_version": "v2"}
+    )
+
+    assert normalized == {"schema": "v2"}
+    assert note is not None
+    assert "mapped schema_version to schema" in note
+
+
+def test_normalize_schema_like_args_replaces_invalid_schema_with_v1():
+    normalized, note = _normalize_schema_like_args(
+        "tool_get_enabled_regions", {"schema_version": "2024-07-01"}
+    )
+
+    assert normalized == {"schema": "v1"}
+    assert note is not None
+    assert "replaced invalid schema with v1" in note
+
+
+def test_tools_node_repairs_schema_like_args_before_execution():
+    msg = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "tool_get_enabled_regions",
+                "id": "call-1",
+                "args": {"schema_version": "2024-07-01"},
+            }
+        ],
+    )
+    state = {"messages": [msg]}
+    output = {"messages": [ToolMessage(content='["us-east-1"]', tool_call_id="call-1")]}
+
+    with (
+        patch("aws_lighthouse.agent.logger.error") as mock_error,
+        patch(
+            "aws_lighthouse.agent._tool_node.invoke", return_value=output
+        ) as mock_invoke,
+        patch("aws_lighthouse.agent.db_manager.update_audit_log_result"),
+    ):
+        result = tools_node(state)
+
+    assert result == output
+    invoked_state = mock_invoke.call_args.args[0]
+    tool_call = invoked_state["messages"][-1].tool_calls[0]
+    assert tool_call["args"] == {"schema": "v1"}
+    mock_error.assert_called_once()
 
 
 def test_local_opportunity_tools_are_safe():

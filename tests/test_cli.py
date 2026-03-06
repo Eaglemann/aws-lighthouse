@@ -60,6 +60,7 @@ def _console() -> tuple[Console, io.StringIO]:
 
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_TEST_LOG_PATH = "/Users/tester/.aws-lighthouse/logs/aws-lighthouse.log"
 
 
 def _strip_ansi(text: str) -> str:
@@ -1066,6 +1067,28 @@ class TestAnalyzeJsonOutput:
         data = json.loads(result.output)
         assert data["account_id"] == "123456789012"
 
+    def test_analyze_json_error_includes_log_path_and_stays_parseable(self):
+        runner = CliRunner()
+        with (
+            patch(
+                "aws_lighthouse.cli._run_analyze_cycle",
+                side_effect=RuntimeError("boom"),
+            ),
+            patch(
+                "aws_lighthouse.cli.logger.record_exception",
+                return_value=_TEST_LOG_PATH,
+            ) as mock_record,
+        ):
+            result = runner.invoke(app, ["analyze", "--output", "json"])
+
+        assert result.exit_code == 1
+        payload = json.loads(result.output)
+        assert payload["event"] == "error"
+        assert payload["message"] == "boom"
+        assert payload["log_path"] == _TEST_LOG_PATH
+        mock_record.assert_called_once()
+        assert "[bold" not in result.output
+
     def test_v2_overall_marks_degraded_when_any_section_errors(self):
         runner = CliRunner()
         patches = {**_PATCHES, "aws_lighthouse.cli.get_aws_session": _mock_session}
@@ -1529,7 +1552,10 @@ class TestWatchCommand:
                 "aws_lighthouse.cli._run_analyze_cycle",
                 side_effect=[RuntimeError("boom"), self._payload()],
             ) as mock_cycle,
-            patch("aws_lighthouse.cli.logger.error") as mock_error,
+            patch(
+                "aws_lighthouse.cli.logger.exception",
+                return_value=_TEST_LOG_PATH,
+            ) as mock_exception,
             patch(
                 "aws_lighthouse.cli.time.sleep", side_effect=[None, KeyboardInterrupt]
             ),
@@ -1538,8 +1564,8 @@ class TestWatchCommand:
 
         assert result.exit_code == 0, result.output
         assert mock_cycle.call_count == 2
-        mock_error.assert_called_once()
-        assert "Watch cycle 1 failed: boom" in mock_error.call_args[0][0]
+        mock_exception.assert_called_once()
+        assert "Watch cycle 1 failed" in mock_exception.call_args[0][0]
 
     def test_watch_json_emits_error_line_then_success_line(self):
         runner = CliRunner()
@@ -1573,6 +1599,7 @@ class TestWatchCommand:
         assert first["event"] == "error"
         assert first["cycle"] == 1
         assert first["message"] == "boom"
+        assert "log_path" in first
         assert second["account_id"] == "123456789012"
 
     def test_watch_json_v2_mixed_stream_lines_are_parseable(self):
@@ -1607,6 +1634,7 @@ class TestWatchCommand:
         assert first["event"] == "error"
         assert first["cycle"] == 1
         assert first["message"] == "boom"
+        assert "log_path" in first
         assert second["account_id"] == "123456789012"
         assert second["overall"]["ok"] is True
 
@@ -1849,14 +1877,20 @@ class TestShellCommands:
         assert _translate_shell_command("/status") == ("status", None)
         assert _translate_shell_command("/opps") == ("opps", None)
         assert _translate_shell_command("/plan") == ("plan", None)
+        assert _translate_shell_command("/logs") == ("logs", None)
         assert _translate_shell_command("/clear") == ("clear", None)
         assert _translate_shell_command("/exit") == ("exit", None)
 
     def test_translate_shell_command_rewrites_analyze(self):
         action, content = _translate_shell_command("/analyze")
-        assert action == "agent"
+        assert action == "analyze"
         assert content is not None
-        assert "multi-region AWS analysis" in content
+        assert content == "analyze"
+
+    def test_translate_shell_command_keeps_analyze_flags(self):
+        action, content = _translate_shell_command("analyze --days 30 --since-last")
+        assert action == "analyze"
+        assert content == "analyze --days 30 --since-last"
 
     def test_shell_startup_alerts_when_ollama_is_unreachable(self, capsys):
         with (
@@ -1924,9 +1958,17 @@ class TestShellCommands:
             ) as mock_create,
             patch(
                 "aws_lighthouse.cli.Prompt.ask",
-                side_effect=["/status", "/opps", "/plan", "/exit"],
+                side_effect=["/status", "/opps", "/plan", "/logs", "/exit"],
             ),
             patch("aws_lighthouse.cli.db_manager", db_mock),
+            patch(
+                "aws_lighthouse.cli.logger.tail_log",
+                return_value="latest traceback",
+            ),
+            patch(
+                "aws_lighthouse.cli.logger.get_log_path",
+                return_value=_TEST_LOG_PATH,
+            ),
         ):
             shell()
 
@@ -1942,14 +1984,86 @@ class TestShellCommands:
             patch("aws_lighthouse.agent.create_agent_graph") as mock_create,
             patch(
                 "aws_lighthouse.cli.Prompt.ask",
-                side_effect=["scan all my regions", "/analyze", "/exit"],
+                side_effect=["scan all my regions", "/exit"],
             ),
         ):
             shell()
 
         output = capsys.readouterr().out
-        assert output.count("Ollama Unavailable") >= 3
+        assert output.count("Ollama Unavailable") >= 2
         mock_create.assert_not_called()
+
+    def test_shell_analyze_bypasses_agent_even_when_ollama_is_unavailable(self):
+        with (
+            patch(
+                "aws_lighthouse.agent.check_ollama_runtime",
+                return_value=_ollama_unavailable(),
+            ),
+            patch("aws_lighthouse.agent.create_agent_graph") as mock_create,
+            patch("aws_lighthouse.cli._run_analyze_command") as mock_run_analyze,
+            patch(
+                "aws_lighthouse.cli.Prompt.ask",
+                side_effect=["analyze --days 30 --since-last", "/exit"],
+            ),
+        ):
+            shell()
+
+        mock_create.assert_not_called()
+        mock_run_analyze.assert_called_once_with(
+            days=30,
+            region=None,
+            output="text",
+            json_schema="v1",
+            since_last=True,
+            config=None,
+            interactive=False,
+        )
+
+    def test_shell_slash_analyze_bypasses_agent(self):
+        graph = MagicMock()
+        with (
+            patch(
+                "aws_lighthouse.agent.check_ollama_runtime",
+                return_value=_ollama_ok(),
+            ),
+            patch(
+                "aws_lighthouse.agent.create_agent_graph", return_value=graph
+            ) as mock_create,
+            patch("aws_lighthouse.cli._run_analyze_command") as mock_run_analyze,
+            patch(
+                "aws_lighthouse.cli.Prompt.ask",
+                side_effect=["/analyze --region us-east-1 --output json", "/exit"],
+            ),
+        ):
+            shell()
+
+        mock_create.assert_called_once()
+        graph.stream.assert_not_called()
+        mock_run_analyze.assert_called_once_with(
+            days=14,
+            region="us-east-1",
+            output="json",
+            json_schema="v1",
+            since_last=False,
+            config=None,
+            interactive=False,
+        )
+
+    def test_shell_analyze_invalid_flags_keep_shell_running(self, capsys):
+        with (
+            patch(
+                "aws_lighthouse.agent.check_ollama_runtime",
+                return_value=_ollama_unavailable(),
+            ),
+            patch(
+                "aws_lighthouse.cli.Prompt.ask",
+                side_effect=["analyze --bogus", "/exit"],
+            ),
+        ):
+            shell()
+
+        output = capsys.readouterr().out
+        assert "Unknown analyze option: --bogus" in output
 
     def test_shell_recovers_when_ollama_returns(self):
         graph = MagicMock()
@@ -1998,3 +2112,32 @@ class TestShellCommands:
         output = capsys.readouterr().out
         assert "Ollama Unavailable" in output
         mock_error.assert_not_called()
+
+    def test_shell_generic_agent_error_points_to_logs(self, capsys):
+        graph = MagicMock()
+        graph.stream.side_effect = RuntimeError("boom")
+
+        with (
+            patch(
+                "aws_lighthouse.agent.check_ollama_runtime",
+                side_effect=[_ollama_ok(), _ollama_ok(), _ollama_ok()],
+            ),
+            patch("aws_lighthouse.agent.create_agent_graph", return_value=graph),
+            patch(
+                "aws_lighthouse.cli.Prompt.ask",
+                side_effect=["scan all my regions", "/exit"],
+            ),
+            patch(
+                "aws_lighthouse.cli.logger.exception",
+                return_value=_TEST_LOG_PATH,
+            ) as mock_exception,
+            patch(
+                "aws_lighthouse.cli.logger.get_log_path",
+                return_value=_TEST_LOG_PATH,
+            ),
+        ):
+            shell()
+
+        output = capsys.readouterr().out
+        assert "Use /logs to inspect the latest traceback" in output
+        mock_exception.assert_called_once()
