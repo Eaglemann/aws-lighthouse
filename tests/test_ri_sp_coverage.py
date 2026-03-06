@@ -1,7 +1,7 @@
 import threading
 from unittest.mock import MagicMock, patch
 
-from botocore.exceptions import BotoCoreError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from aws_lighthouse.tools.ri_sp_coverage import (
     _fetch_ri_coverage,
@@ -12,6 +12,10 @@ from aws_lighthouse.tools.ri_sp_coverage import (
 )
 
 MOD = "aws_lighthouse.tools.ri_sp_coverage"
+
+
+def make_client_error(code: str, message: str = "msg") -> ClientError:
+    return ClientError({"Error": {"Code": code, "Message": message}}, "Op")
 
 
 def _data(result):
@@ -174,6 +178,34 @@ def test_fetch_sp_utilization_returns_correct_keys():
     out = _fetch_sp_utilization(ce, {})
     assert out["ok"] is True
     assert out["data"] == {"sp_utilization_pct": 90.0, "sp_unused_commitment": 10.0}
+
+
+def test_fetch_sp_coverage_expected_unavailable_logs_without_display():
+    ce = MagicMock()
+    ce.get_savings_plans_coverage.side_effect = make_client_error(
+        "DataUnavailableException"
+    )
+    with patch(f"{MOD}.logger.error") as mock_error:
+        out = _fetch_sp_coverage(ce, {})
+
+    assert out["ok"] is False
+    assert out["errors"][0]["code"] == "DataUnavailableException"
+    mock_error.assert_called_once()
+    assert mock_error.call_args.kwargs["display"] is False
+
+
+def test_fetch_sp_utilization_expected_unavailable_logs_without_display():
+    ce = MagicMock()
+    ce.get_savings_plans_utilization.side_effect = make_client_error(
+        "DataUnavailableException"
+    )
+    with patch(f"{MOD}.logger.error") as mock_error:
+        out = _fetch_sp_utilization(ce, {})
+
+    assert out["ok"] is False
+    assert out["errors"][0]["code"] == "DataUnavailableException"
+    mock_error.assert_called_once()
+    assert mock_error.call_args.kwargs["display"] is False
 
 
 # ── Parallelism smoke test ────────────────────────────────────────────────────
