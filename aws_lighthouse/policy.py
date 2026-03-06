@@ -50,9 +50,7 @@ class RegionFilters(BaseModel):
         overlap = sorted(set(self.include) & set(self.exclude))
         if overlap:
             joined = ", ".join(overlap)
-            raise ValueError(
-                f"regions.include and regions.exclude overlap: {joined}"
-            )
+            raise ValueError(f"regions.include and regions.exclude overlap: {joined}")
         return self
 
     def active(self) -> bool:

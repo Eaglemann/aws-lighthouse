@@ -460,9 +460,7 @@ def _section_cost_columns(
     return costs_result
 
 
-def _section_cost_anomalies(
-    c: Console, threshold_pct: float = 50.0
-) -> ScanResult:
+def _section_cost_anomalies(c: Console, threshold_pct: float = 50.0) -> ScanResult:
     """Detect and render cost anomaly panel."""
     with c.status("[cyan]🚨  Detecting cost anomalies...[/cyan]", spinner="dots"):
         anomalies_result = detect_cost_anomalies(threshold_pct=threshold_pct)
@@ -1254,9 +1252,7 @@ def _run_analyze_cycle(
         cw_result = (
             _section_cloudwatch(c, regions, multi_region)
             if effective_policy.scan_enabled("cloudwatch")
-            else _skipped_result(
-                c, "[bold dim]📡 CloudWatch Alarm Gaps[/bold dim]", []
-            )
+            else _skipped_result(c, "[bold dim]📡 CloudWatch Alarm Gaps[/bold dim]", [])
         )
         cost_waste_result = (
             _section_cost_waste(c, regions, multi_region)
