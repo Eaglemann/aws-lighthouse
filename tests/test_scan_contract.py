@@ -2,9 +2,12 @@ from botocore.exceptions import ClientError, EndpointConnectionError
 
 from aws_lighthouse.scan_contract import (
     error_result,
+    is_expected_unavailable_scan_error,
     merge_list_results,
     ok_result,
     scan_error_from_exception,
+    scan_error_kind,
+    scan_error_reason,
     to_v1_payload,
     to_v2_payload,
 )
@@ -100,3 +103,46 @@ def test_scan_error_from_botocore_error_marks_retryable():
     assert error["code"] == "EndpointConnectionError"
     assert "Could not connect to the endpoint URL" in error["message"]
     assert error["retryable"] is True
+
+
+def test_savings_plans_data_unavailable_is_classified_as_expected_unavailable():
+    error = {
+        "code": "DataUnavailableException",
+        "message": "raw message",
+        "service": "ce",
+        "operation": "GetSavingsPlansCoverage",
+    }
+
+    assert scan_error_kind(error) == "expected_unavailable"
+    assert is_expected_unavailable_scan_error(error) is True
+    assert (
+        scan_error_reason(error)
+        == "Savings Plans data unavailable for this account/period"
+    )
+
+
+def test_guardduty_subscription_required_is_classified_as_expected_unavailable():
+    error = {
+        "code": "SubscriptionRequiredException",
+        "message": "raw message",
+        "service": "guardduty",
+        "operation": "ListDetectors",
+        "region": "us-east-1",
+    }
+
+    assert scan_error_kind(error) == "expected_unavailable"
+    assert is_expected_unavailable_scan_error(error) is True
+    assert scan_error_reason(error) == "subscription required"
+
+
+def test_unrelated_scan_errors_remain_unexpected_failures():
+    error = {
+        "code": "AccessDeniedException",
+        "message": "denied",
+        "service": "ce",
+        "operation": "GetSavingsPlansCoverage",
+    }
+
+    assert scan_error_kind(error) == "unexpected_failure"
+    assert is_expected_unavailable_scan_error(error) is False
+    assert scan_error_reason(error) == "denied"
