@@ -1,6 +1,6 @@
 [project]
 name = "aws-lighthouse"
-version = "0.2.0"
+version = "0.2.1"
 description = "Terminal-first FinOps, Security, and Cloud Infrastructure Agent for AWS"
 readme = "README.md"
 license = { text = "MIT" }
