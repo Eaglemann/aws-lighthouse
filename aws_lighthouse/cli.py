@@ -21,6 +21,7 @@ from rich.text import Text
 from .auth import get_aws_session
 from .db import db_manager
 from .logger import logger
+from .opportunities import SECTION_TO_SOURCE_KIND, sync_opportunities_from_scan
 from .policy import PolicyConfigError, ScanPolicy, load_policy_config
 from .scan_contract import error_result, merge_list_results
 from .tools.cloudwatch_scan import detect_cloudwatch_gaps
@@ -38,7 +39,13 @@ from .tools.multi_region import get_enabled_regions
 from .tools.ri_sp_coverage import get_ri_sp_coverage
 from .tools.security_scan import run_security_scan
 from .tools.tagging import check_tagging_compliance
-from .types import CostFinding, ScanError, ScanResult, SecurityFinding
+from .types import (
+    CostFinding,
+    OpportunitySourceKind,
+    ScanError,
+    ScanResult,
+    SecurityFinding,
+)
 
 app = typer.Typer(
     help="AWS Lighthouse: Terminal-first FinOps, Security, and Scaffolding Agent.",
@@ -257,6 +264,17 @@ def _render_skipped_panel(c: Console, title: str) -> None:
 def _skipped_result(c: Console, title: str, data: Any) -> ScanResult:
     _render_skipped_panel(c, title)
     return error_result(data=data, errors=[])
+
+
+def _render_opportunity_sync_summary(c: Console, summary: dict[str, int]) -> None:
+    c.print(
+        "[dim]Opportunities synced:"
+        f" {summary['created']} new,"
+        f" {summary['reopened']} reopened,"
+        f" {summary['resolved']} resolved,"
+        f" {summary['still_open']} still open.[/dim]"
+    )
+    c.print()
 
 
 def _render_delta_panel(
@@ -1323,6 +1341,36 @@ def _run_analyze_cycle(
             days,
             policy_scope_token=effective_policy.scope_token(explicit_region=region),
         )
+        enabled_opportunity_sources: list[OpportunitySourceKind] = [
+            source_kind
+            for section_name, source_kind in SECTION_TO_SOURCE_KIND.items()
+            if (
+                (
+                    section_name == "cost_anomalies"
+                    and effective_policy.scan_enabled("cost_anomalies")
+                )
+                or (
+                    section_name == "cost_waste"
+                    and effective_policy.scan_enabled("cost_waste")
+                )
+                or (
+                    section_name == "security_findings"
+                    and effective_policy.scan_enabled("security")
+                )
+                or (
+                    section_name == "iam_findings"
+                    and effective_policy.scan_enabled("iam")
+                )
+                or (
+                    section_name == "cloudwatch_findings"
+                    and effective_policy.scan_enabled("cloudwatch")
+                )
+                or (
+                    section_name == "tagging_findings"
+                    and effective_policy.scan_enabled("tagging")
+                )
+            )
+        ]
         if since_last:
             baseline_snapshot = db_manager.get_latest_scan_snapshot(
                 account_id, scope_key
@@ -1341,12 +1389,22 @@ def _run_analyze_cycle(
             scope_key=scope_key,
             data=_normalize_snapshot_payload(section_payloads),
         )
+        opportunity_summary = sync_opportunities_from_scan(
+            db=db_manager,
+            account_id=account_id,
+            scanned_at=scanned_at,
+            scan_scope=scope_key,
+            section_payloads=section_payloads,
+            scanned_regions=regions,
+            enabled_source_kinds=enabled_opportunity_sources,
+        )
 
         if not json_mode:
             if lambda_result["data"]:
                 _section_lambda_detail(c, lambda_result["data"])
             if since_last and delta_data is not None:
                 _render_delta_panel(c, delta_data, all_errors)
+            _render_opportunity_sync_summary(c, opportunity_summary)
             if interactive:
                 _section_remediation(c, sec_findings, cost_findings)
                 _section_cur_upsell(c, cur_bucket_exists, account_id)
@@ -1531,6 +1589,11 @@ def shell() -> None:
                 "on the user's machine with their full AWS credentials loaded.\n"
                 "You MUST execute live AWS operations yourself using tools — never ask the user "
                 "to run commands manually.\n"
+                "For questions about what changed, what is new, what should be fixed first, "
+                "top risks, or requests for a remediation plan, consult the local opportunities "
+                "database before running fresh AWS scans.\n"
+                "Use local opportunity tools freely for triage because they only mutate local "
+                "metadata, not AWS resources.\n"
                 "Before calling any tool, output a concise explanation of what you are about to "
                 "do and why. This is shown to the user before they approve.\n"
                 "When the user asks for an analysis or inventory of their AWS environment, "

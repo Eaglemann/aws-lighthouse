@@ -13,9 +13,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .db import db_manager
 from .logger import logger
+from .opportunities import build_opportunity_plan, default_list_statuses
 from .scan_contract import error_result, ok_result, to_v1_payload, to_v2_payload
 from .tools.bash import execute_bash, read_file, write_file
-from .types import ScanResult
+from .types import OpportunitySourceKind, OpportunityStatus, ScanResult, Severity
 
 
 # 1. State Definition
@@ -93,6 +94,10 @@ def _format_scan_payload(result: ScanResult, schema_version: str) -> str:
     )
 
 
+def _parse_csv_filter(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
 class _SchemaArgs(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
@@ -117,6 +122,37 @@ class _ThresholdSchemaArgs(_SchemaArgs):
 
 class _SecurityScanArgs(_RegionSchemaArgs):
     include_global: bool = True
+
+
+class _OpportunityListArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: str = ""
+    statuses: str = ",".join(default_list_statuses())
+    source_kinds: str = ""
+    severities: str = ""
+    region: str = ""
+    owner: str = ""
+    limit: int = 25
+
+
+class _OpportunityDetailsArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    fingerprint: str
+    account_id: str = ""
+    history_limit: int = 20
+
+
+class _OpportunityUpdateArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    fingerprint: str
+    account_id: str = ""
+    status: OpportunityStatus | None = None
+    owner: str | None = None
+    snooze_until: str | None = None
+    note: str | None = None
 
 
 @tool(args_schema=_SchemaArgs)
@@ -296,6 +332,140 @@ def tool_run_cost_scan(
     return _format_scan_payload(result, schema_version)
 
 
+@tool(args_schema=_OpportunityListArgs)
+def tool_list_opportunities(
+    account_id: str = "",
+    statuses: str = ",".join(default_list_statuses()),
+    source_kinds: str = "",
+    severities: str = "",
+    region: str = "",
+    owner: str = "",
+    limit: int = 25,
+) -> str:
+    """
+    List locally persisted opportunities created by prior analyze/watch runs.
+    Use this first for questions like "what changed", "what should I fix",
+    "what's new", "top risks", or "show unresolved issues".
+    """
+    parsed_statuses = cast(
+        list[OpportunityStatus] | None,
+        _parse_csv_filter(statuses) or None,
+    )
+    parsed_source_kinds = cast(
+        list[OpportunitySourceKind] | None,
+        _parse_csv_filter(source_kinds) or None,
+    )
+    parsed_severities = cast(
+        list[Severity] | None,
+        _parse_csv_filter(severities) or None,
+    )
+    opportunities = db_manager.list_opportunities(
+        account_id=account_id or None,
+        statuses=parsed_statuses,
+        source_kinds=parsed_source_kinds,
+        severities=parsed_severities,
+        region=region or None,
+        owner=owner or None,
+        limit=limit,
+    )
+    return json.dumps(opportunities, default=str)
+
+
+@tool(args_schema=_OpportunityDetailsArgs)
+def tool_get_opportunity_details(
+    fingerprint: str,
+    account_id: str = "",
+    history_limit: int = 20,
+) -> str:
+    """Fetch one local opportunity with its lifecycle history."""
+    try:
+        opportunity = db_manager.get_opportunity(
+            fingerprint=fingerprint,
+            account_id=account_id or None,
+        )
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)})
+    if opportunity is None:
+        return json.dumps({"error": "opportunity not found"})
+
+    events = db_manager.get_opportunity_events(
+        fingerprint=fingerprint,
+        account_id=opportunity["account_id"],
+        limit=history_limit,
+    )
+    return json.dumps(
+        {"opportunity": opportunity, "events": events},
+        default=str,
+    )
+
+
+@tool(args_schema=_OpportunityUpdateArgs)
+def tool_update_opportunity(
+    fingerprint: str,
+    account_id: str = "",
+    status: OpportunityStatus | None = None,
+    owner: str | None = None,
+    snooze_until: str | None = None,
+    note: str | None = None,
+) -> str:
+    """
+    Update local-only opportunity metadata such as status, owner, snooze, or notes.
+    This never mutates AWS resources and is safe for agent-driven triage.
+    """
+    try:
+        opportunity = db_manager.update_opportunity_state(
+            fingerprint=fingerprint,
+            account_id=account_id or None,
+            status=status,
+            owner=owner,
+            snooze_until=snooze_until,
+            note=note,
+        )
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)})
+    if opportunity is None:
+        return json.dumps({"error": "opportunity not found"})
+    return json.dumps(opportunity, default=str)
+
+
+@tool(args_schema=_OpportunityListArgs)
+def tool_plan_opportunities(
+    account_id: str = "",
+    statuses: str = ",".join(default_list_statuses()),
+    source_kinds: str = "",
+    severities: str = "",
+    region: str = "",
+    owner: str = "",
+    limit: int = 25,
+) -> str:
+    """
+    Build a grouped remediation and triage plan over locally persisted opportunities.
+    Use this when the user asks for a plan rather than immediate execution.
+    """
+    parsed_statuses = cast(
+        list[OpportunityStatus] | None,
+        _parse_csv_filter(statuses) or None,
+    )
+    parsed_source_kinds = cast(
+        list[OpportunitySourceKind] | None,
+        _parse_csv_filter(source_kinds) or None,
+    )
+    parsed_severities = cast(
+        list[Severity] | None,
+        _parse_csv_filter(severities) or None,
+    )
+    opportunities = db_manager.list_opportunities(
+        account_id=account_id or None,
+        statuses=parsed_statuses,
+        source_kinds=parsed_source_kinds,
+        severities=parsed_severities,
+        region=region or None,
+        owner=owner or None,
+        limit=max(limit, 1),
+    )
+    return json.dumps(build_opportunity_plan(opportunities, limit=limit), default=str)
+
+
 tools = [
     tool_read_file,
     tool_write_file,
@@ -316,6 +486,10 @@ tools = [
     tool_detect_overpermissive_iam,
     tool_detect_cloudwatch_gaps,
     tool_run_security_scan,
+    tool_list_opportunities,
+    tool_get_opportunity_details,
+    tool_update_opportunity,
+    tool_plan_opportunities,
 ]
 
 from langgraph.prebuilt import ToolNode
@@ -464,6 +638,10 @@ SAFE_TOOLS = {
     "tool_detect_overpermissive_iam",
     "tool_detect_cloudwatch_gaps",
     "tool_run_security_scan",
+    "tool_list_opportunities",
+    "tool_get_opportunity_details",
+    "tool_update_opportunity",
+    "tool_plan_opportunities",
 }
 
 

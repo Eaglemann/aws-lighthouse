@@ -1,14 +1,38 @@
 import json
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from .logger import logger
+from .types import (
+    Opportunity,
+    OpportunityEvent,
+    OpportunityEventType,
+    OpportunitySourceKind,
+    OpportunityStatus,
+    Severity,
+)
 
 DB_DIR = Path.home() / ".aws-lighthouse"
 DB_PATH = DB_DIR / "lighthouse.db"
 _MAX_COST_SNAPSHOTS_PER_ACCOUNT = 1000
 _MAX_SCAN_SNAPSHOTS_PER_SCOPE = 500
+_ACTIVE_OPPORTUNITY_STATUSES: tuple[OpportunityStatus, ...] = (
+    "open",
+    "triaged",
+    "in_progress",
+    "snoozed",
+)
+_ALL_OPPORTUNITY_STATUSES: set[OpportunityStatus] = {
+    "open",
+    "triaged",
+    "in_progress",
+    "snoozed",
+    "resolved",
+    "ignored",
+}
+_UNSET = object()
 
 
 class DatabaseManager:
@@ -84,6 +108,56 @@ class DatabaseManager:
                         error TEXT
                     )
                 """)
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS opportunities (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        account_id TEXT NOT NULL,
+                        fingerprint TEXT NOT NULL,
+                        source_kind TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        summary TEXT NOT NULL,
+                        severity TEXT,
+                        resource_type TEXT,
+                        resource_id TEXT NOT NULL,
+                        resource_name TEXT,
+                        region TEXT,
+                        payload_json TEXT NOT NULL,
+                        first_seen_at TEXT NOT NULL,
+                        last_seen_at TEXT NOT NULL,
+                        seen_count INTEGER NOT NULL DEFAULT 1,
+                        status TEXT NOT NULL DEFAULT 'open',
+                        owner TEXT,
+                        snooze_until TEXT,
+                        notes TEXT NOT NULL DEFAULT '',
+                        resolution_reason TEXT,
+                        resolution_note TEXT,
+                        resolved_at TEXT,
+                        last_scan_scope TEXT,
+                        UNIQUE(account_id, fingerprint)
+                    )
+                """)
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_opportunities_account_status_seen
+                    ON opportunities(account_id, status, last_seen_at DESC, id DESC)
+                """)
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_opportunities_account_source_region
+                    ON opportunities(account_id, source_kind, region, status)
+                """)
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS opportunity_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        account_id TEXT NOT NULL,
+                        fingerprint TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        data_json TEXT NOT NULL
+                    )
+                """)
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_opportunity_events_account_fp_id
+                    ON opportunity_events(account_id, fingerprint, id DESC)
+                """)
                 self._ensure_audit_log_columns(cursor)
                 conn.commit()
             DB_PATH.chmod(0o600)  # owner read/write only — contains cost history
@@ -101,6 +175,63 @@ class DatabaseManager:
             cursor.execute("ALTER TABLE audit_log ADD COLUMN execution_status TEXT")
         if "error" not in cols:
             cursor.execute("ALTER TABLE audit_log ADD COLUMN error TEXT")
+
+    def _append_opportunity_event(
+        self,
+        cursor: sqlite3.Cursor,
+        *,
+        account_id: str,
+        fingerprint: str,
+        event_type: OpportunityEventType,
+        data: dict[str, Any],
+    ) -> None:
+        cursor.execute(
+            """
+            INSERT INTO opportunity_events (account_id, fingerprint, event_type, data_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                account_id,
+                fingerprint,
+                event_type,
+                json.dumps(data, sort_keys=True, default=str),
+            ),
+        )
+
+    def _row_to_opportunity(self, row: sqlite3.Row) -> Opportunity:
+        return {
+            "account_id": row["account_id"],
+            "fingerprint": row["fingerprint"],
+            "source_kind": row["source_kind"],
+            "title": row["title"],
+            "summary": row["summary"],
+            "severity": row["severity"],
+            "resource_type": row["resource_type"],
+            "resource_id": row["resource_id"],
+            "resource_name": row["resource_name"],
+            "region": row["region"],
+            "raw_payload": json.loads(row["payload_json"]),
+            "first_seen_at": row["first_seen_at"],
+            "last_seen_at": row["last_seen_at"],
+            "seen_count": row["seen_count"],
+            "status": row["status"],
+            "owner": row["owner"],
+            "snooze_until": row["snooze_until"],
+            "notes": row["notes"] or "",
+            "resolution_reason": row["resolution_reason"],
+            "resolution_note": row["resolution_note"],
+            "resolved_at": row["resolved_at"],
+            "last_scan_scope": row["last_scan_scope"],
+        }
+
+    def _row_to_opportunity_event(self, row: sqlite3.Row) -> OpportunityEvent:
+        return {
+            "account_id": row["account_id"],
+            "fingerprint": row["fingerprint"],
+            "event_type": row["event_type"],
+            "timestamp": row["timestamp"],
+            "data": json.loads(row["data_json"]),
+        }
 
     def record_cost_snapshot(
         self,
@@ -327,6 +458,576 @@ class DatabaseManager:
                 conn.commit()
         except sqlite3.Error as e:
             logger.error(f"Failed to update audit log result: {str(e)}")
+
+    def sync_opportunities(
+        self,
+        *,
+        account_id: str,
+        scanned_at: str,
+        opportunities: list[Opportunity],
+        coverage: dict[OpportunitySourceKind, set[str | None]],
+    ) -> dict[str, int]:
+        """Upsert current findings, reopen recurring ones, and auto-resolve absences."""
+        deduped = {
+            opportunity["fingerprint"]: opportunity for opportunity in opportunities
+        }
+        seen_by_scope: dict[tuple[str, str | None], set[str]] = {}
+        for opportunity in deduped.values():
+            key = (opportunity["source_kind"], opportunity["region"])
+            seen_by_scope.setdefault(key, set()).add(opportunity["fingerprint"])
+
+        created = 0
+        reopened = 0
+        resolved = 0
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+
+                for opportunity in deduped.values():
+                    existing_row = cursor.execute(
+                        """
+                        SELECT *
+                        FROM opportunities
+                        WHERE account_id = ? AND fingerprint = ?
+                        """,
+                        (account_id, opportunity["fingerprint"]),
+                    ).fetchone()
+                    if existing_row is None:
+                        cursor.execute(
+                            """
+                            INSERT INTO opportunities (
+                                account_id,
+                                fingerprint,
+                                source_kind,
+                                title,
+                                summary,
+                                severity,
+                                resource_type,
+                                resource_id,
+                                resource_name,
+                                region,
+                                payload_json,
+                                first_seen_at,
+                                last_seen_at,
+                                seen_count,
+                                status,
+                                owner,
+                                snooze_until,
+                                notes,
+                                resolution_reason,
+                                resolution_note,
+                                resolved_at,
+                                last_scan_scope
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                opportunity["account_id"],
+                                opportunity["fingerprint"],
+                                opportunity["source_kind"],
+                                opportunity["title"],
+                                opportunity["summary"],
+                                opportunity["severity"],
+                                opportunity["resource_type"],
+                                opportunity["resource_id"],
+                                opportunity["resource_name"],
+                                opportunity["region"],
+                                json.dumps(
+                                    opportunity["raw_payload"],
+                                    sort_keys=True,
+                                    default=str,
+                                ),
+                                opportunity["first_seen_at"],
+                                opportunity["last_seen_at"],
+                                opportunity["seen_count"],
+                                opportunity["status"],
+                                opportunity["owner"],
+                                opportunity["snooze_until"],
+                                opportunity["notes"],
+                                opportunity["resolution_reason"],
+                                opportunity["resolution_note"],
+                                opportunity["resolved_at"],
+                                opportunity["last_scan_scope"],
+                            ),
+                        )
+                        self._append_opportunity_event(
+                            cursor,
+                            account_id=account_id,
+                            fingerprint=opportunity["fingerprint"],
+                            event_type="created",
+                            data={
+                                "source_kind": opportunity["source_kind"],
+                                "status": "open",
+                                "region": opportunity["region"],
+                            },
+                        )
+                        created += 1
+                        continue
+
+                    existing = self._row_to_opportunity(existing_row)
+                    next_status = existing["status"]
+                    next_snooze_until = existing["snooze_until"]
+                    next_resolved_at = existing["resolved_at"]
+                    next_resolution_reason = existing["resolution_reason"]
+                    next_resolution_note = existing["resolution_note"]
+                    if existing["status"] in {"resolved", "ignored"}:
+                        next_status = "open"
+                        next_snooze_until = None
+                        next_resolved_at = None
+                        next_resolution_reason = None
+                        next_resolution_note = None
+                        reopened += 1
+                        self._append_opportunity_event(
+                            cursor,
+                            account_id=account_id,
+                            fingerprint=opportunity["fingerprint"],
+                            event_type="reopened",
+                            data={"previous_status": existing["status"]},
+                        )
+
+                    cursor.execute(
+                        """
+                        UPDATE opportunities
+                        SET title = ?,
+                            summary = ?,
+                            severity = ?,
+                            resource_type = ?,
+                            resource_id = ?,
+                            resource_name = ?,
+                            region = ?,
+                            payload_json = ?,
+                            last_seen_at = ?,
+                            seen_count = ?,
+                            status = ?,
+                            snooze_until = ?,
+                            resolution_reason = ?,
+                            resolution_note = ?,
+                            resolved_at = ?,
+                            last_scan_scope = ?
+                        WHERE account_id = ? AND fingerprint = ?
+                        """,
+                        (
+                            opportunity["title"],
+                            opportunity["summary"],
+                            opportunity["severity"],
+                            opportunity["resource_type"],
+                            opportunity["resource_id"],
+                            opportunity["resource_name"],
+                            opportunity["region"],
+                            json.dumps(
+                                opportunity["raw_payload"], sort_keys=True, default=str
+                            ),
+                            scanned_at,
+                            existing["seen_count"] + 1,
+                            next_status,
+                            next_snooze_until,
+                            next_resolution_reason,
+                            next_resolution_note,
+                            next_resolved_at,
+                            opportunity["last_scan_scope"],
+                            account_id,
+                            opportunity["fingerprint"],
+                        ),
+                    )
+
+                for source_kind, covered_regions in coverage.items():
+                    region_values = sorted(
+                        region for region in covered_regions if region is not None
+                    )
+                    where_clauses = [
+                        "account_id = ?",
+                        "source_kind = ?",
+                        "status != 'resolved'",
+                    ]
+                    params: list[Any] = [account_id, source_kind]
+                    if None in covered_regions and region_values:
+                        placeholders = ", ".join("?" for _ in region_values)
+                        where_clauses.append(
+                            f"(region IS NULL OR region IN ({placeholders}))"
+                        )
+                        params.extend(region_values)
+                    elif None in covered_regions:
+                        where_clauses.append("region IS NULL")
+                    elif region_values:
+                        placeholders = ", ".join("?" for _ in region_values)
+                        where_clauses.append(f"region IN ({placeholders})")
+                        params.extend(region_values)
+
+                    query = f"""
+                        SELECT fingerprint, status, region
+                        FROM opportunities
+                        WHERE {" AND ".join(where_clauses)}
+                        """  # noqa: S608 - where clauses are built from fixed SQL fragments
+                    rows = cursor.execute(query, params).fetchall()
+                    for row in rows:
+                        region = row["region"]
+                        if row["fingerprint"] in seen_by_scope.get(
+                            (source_kind, region), set()
+                        ):
+                            continue
+                        cursor.execute(
+                            """
+                            UPDATE opportunities
+                            SET status = 'resolved',
+                                resolved_at = ?,
+                                resolution_reason = ?,
+                                resolution_note = ?,
+                                snooze_until = NULL
+                            WHERE account_id = ? AND fingerprint = ?
+                            """,
+                            (
+                                scanned_at,
+                                "not_seen_in_scan",
+                                "Automatically resolved because the finding was absent from the latest covered scan.",
+                                account_id,
+                                row["fingerprint"],
+                            ),
+                        )
+                        self._append_opportunity_event(
+                            cursor,
+                            account_id=account_id,
+                            fingerprint=row["fingerprint"],
+                            event_type="resolved",
+                            data={
+                                "previous_status": row["status"],
+                                "reason": "not_seen_in_scan",
+                                "region": region,
+                            },
+                        )
+                        resolved += 1
+
+                still_open = cursor.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM opportunities
+                    WHERE account_id = ?
+                      AND status IN (?, ?, ?, ?)
+                    """,
+                    (account_id, *_ACTIVE_OPPORTUNITY_STATUSES),
+                ).fetchone()[0]
+                conn.commit()
+                return {
+                    "created": created,
+                    "reopened": reopened,
+                    "resolved": resolved,
+                    "still_open": int(still_open),
+                }
+        except sqlite3.Error as e:
+            logger.error(f"Failed to sync opportunities: {str(e)}")
+            return {"created": 0, "reopened": 0, "resolved": 0, "still_open": 0}
+
+    def list_opportunities(
+        self,
+        *,
+        account_id: str | None = None,
+        statuses: list[OpportunityStatus] | None = None,
+        source_kinds: list[OpportunitySourceKind] | None = None,
+        severities: list[Severity] | None = None,
+        region: str | None = None,
+        owner: str | None = None,
+        limit: int = 25,
+    ) -> list[Opportunity]:
+        """Return filtered opportunities ordered by severity, status, and recency."""
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.row_factory = sqlite3.Row
+                where_clauses = ["1 = 1"]
+                params: list[Any] = []
+                if account_id:
+                    where_clauses.append("account_id = ?")
+                    params.append(account_id)
+                if statuses:
+                    placeholders = ", ".join("?" for _ in statuses)
+                    where_clauses.append(f"status IN ({placeholders})")
+                    params.extend(statuses)
+                if source_kinds:
+                    placeholders = ", ".join("?" for _ in source_kinds)
+                    where_clauses.append(f"source_kind IN ({placeholders})")
+                    params.extend(source_kinds)
+                if severities:
+                    placeholders = ", ".join("?" for _ in severities)
+                    where_clauses.append(f"severity IN ({placeholders})")
+                    params.extend(severities)
+                if region is None:
+                    pass
+                elif region == "":
+                    where_clauses.append("region IS NULL")
+                else:
+                    where_clauses.append("region = ?")
+                    params.append(region)
+                if owner:
+                    where_clauses.append("owner = ?")
+                    params.append(owner)
+                params.append(max(limit, 1))
+                query = f"""
+                    SELECT *
+                    FROM opportunities
+                    WHERE {" AND ".join(where_clauses)}
+                    ORDER BY
+                        CASE severity
+                            WHEN 'HIGH' THEN 0
+                            WHEN 'MEDIUM' THEN 1
+                            WHEN 'LOW' THEN 2
+                            ELSE 3
+                        END,
+                        CASE status
+                            WHEN 'open' THEN 0
+                            WHEN 'triaged' THEN 1
+                            WHEN 'in_progress' THEN 2
+                            WHEN 'snoozed' THEN 3
+                            WHEN 'ignored' THEN 4
+                            WHEN 'resolved' THEN 5
+                            ELSE 6
+                        END,
+                        last_seen_at DESC,
+                        id DESC
+                    LIMIT ?
+                    """  # noqa: S608 - where clauses are built from fixed SQL fragments
+                rows = conn.execute(query, params).fetchall()
+                return [self._row_to_opportunity(row) for row in rows]
+        except sqlite3.Error as e:
+            logger.error(f"Failed to list opportunities: {str(e)}")
+            return []
+
+    def get_opportunity(
+        self, fingerprint: str, account_id: str | None = None
+    ) -> Opportunity | None:
+        """Return one opportunity, rejecting ambiguous account-less lookups."""
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.row_factory = sqlite3.Row
+                if account_id:
+                    row = conn.execute(
+                        """
+                        SELECT *
+                        FROM opportunities
+                        WHERE account_id = ? AND fingerprint = ?
+                        """,
+                        (account_id, fingerprint),
+                    ).fetchone()
+                    return self._row_to_opportunity(row) if row else None
+
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM opportunities
+                    WHERE fingerprint = ?
+                    ORDER BY last_seen_at DESC, id DESC
+                    LIMIT 2
+                    """,
+                    (fingerprint,),
+                ).fetchall()
+                if not rows:
+                    return None
+                if len(rows) > 1:
+                    raise ValueError(
+                        "fingerprint is ambiguous across multiple accounts; supply account_id"
+                    )
+                return self._row_to_opportunity(rows[0])
+        except sqlite3.Error as e:
+            logger.error(f"Failed to get opportunity: {str(e)}")
+            return None
+
+    def get_opportunity_events(
+        self,
+        *,
+        fingerprint: str,
+        account_id: str | None = None,
+        limit: int = 50,
+    ) -> list[OpportunityEvent]:
+        """Return lifecycle events for an opportunity."""
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.row_factory = sqlite3.Row
+                if account_id:
+                    rows = conn.execute(
+                        """
+                        SELECT account_id, fingerprint, event_type, timestamp, data_json
+                        FROM opportunity_events
+                        WHERE account_id = ? AND fingerprint = ?
+                        ORDER BY id DESC
+                        LIMIT ?
+                        """,
+                        (account_id, fingerprint, max(limit, 1)),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT account_id, fingerprint, event_type, timestamp, data_json
+                        FROM opportunity_events
+                        WHERE fingerprint = ?
+                        ORDER BY id DESC
+                        LIMIT ?
+                        """,
+                        (fingerprint, max(limit, 1)),
+                    ).fetchall()
+                return [self._row_to_opportunity_event(row) for row in rows]
+        except sqlite3.Error as e:
+            logger.error(f"Failed to get opportunity events: {str(e)}")
+            return []
+
+    def update_opportunity_state(
+        self,
+        *,
+        fingerprint: str,
+        account_id: str | None = None,
+        status: OpportunityStatus | None = None,
+        owner: str | None | object = _UNSET,
+        snooze_until: str | None | object = _UNSET,
+        note: str | None | object = _UNSET,
+    ) -> Opportunity | None:
+        """Update local-only opportunity state such as status, owner, snooze, and notes."""
+        if status is not None and status not in _ALL_OPPORTUNITY_STATUSES:
+            raise ValueError(f"invalid opportunity status: {status}")
+
+        existing = self.get_opportunity(fingerprint=fingerprint, account_id=account_id)
+        if existing is None:
+            return None
+
+        now = datetime.now(UTC).isoformat()
+        next_status = existing["status"]
+        next_owner = existing["owner"]
+        next_snooze_until = existing["snooze_until"]
+        next_notes = existing["notes"]
+        next_resolved_at = existing["resolved_at"]
+        next_resolution_reason = existing["resolution_reason"]
+        next_resolution_note = existing["resolution_note"]
+
+        events: list[tuple[OpportunityEventType, dict[str, Any]]] = []
+        if owner is not _UNSET:
+            normalized_owner = owner.strip() if isinstance(owner, str) else None
+            normalized_owner = normalized_owner or None
+            if normalized_owner != existing["owner"]:
+                next_owner = normalized_owner
+                events.append(
+                    (
+                        "owner_updated",
+                        {
+                            "previous_owner": existing["owner"],
+                            "owner": normalized_owner,
+                        },
+                    )
+                )
+
+        if snooze_until is not _UNSET:
+            normalized_snooze = (
+                snooze_until.strip() if isinstance(snooze_until, str) else None
+            )
+            normalized_snooze = normalized_snooze or None
+            if normalized_snooze != existing["snooze_until"]:
+                next_snooze_until = normalized_snooze
+                if normalized_snooze is not None and status is None:
+                    next_status = "snoozed"
+                elif (
+                    normalized_snooze is None
+                    and existing["status"] == "snoozed"
+                    and status is None
+                ):
+                    next_status = "open"
+                events.append(
+                    (
+                        "snoozed",
+                        {
+                            "previous_snooze_until": existing["snooze_until"],
+                            "snooze_until": normalized_snooze,
+                        },
+                    )
+                )
+
+        if note is not _UNSET:
+            note_text = note.strip() if isinstance(note, str) else ""
+            if note_text:
+                prefix = "\n" if next_notes else ""
+                next_notes = f"{next_notes}{prefix}[{now}] {note_text}"
+                events.append(("note_added", {"note": note_text}))
+
+        if status is not None and status != existing["status"]:
+            previous_status = existing["status"]
+            next_status = status
+            if status == "resolved":
+                next_resolved_at = now
+                next_resolution_reason = "manual_resolved"
+                next_resolution_note = next_resolution_note
+                next_snooze_until = None
+                events.append(
+                    (
+                        "resolved",
+                        {
+                            "previous_status": previous_status,
+                            "reason": "manual_resolved",
+                        },
+                    )
+                )
+            elif previous_status in {"resolved", "ignored"} and status == "open":
+                next_resolved_at = None
+                next_resolution_reason = None
+                next_resolution_note = None
+                next_snooze_until = None
+                events.append(("reopened", {"previous_status": previous_status}))
+            else:
+                next_resolved_at = None
+                next_resolution_reason = None
+                next_resolution_note = None
+                if status != "snoozed" and snooze_until is _UNSET:
+                    next_snooze_until = None
+                event_type: OpportunityEventType = (
+                    "snoozed" if status == "snoozed" else "status_updated"
+                )
+                events.append(
+                    (
+                        event_type,
+                        {
+                            "previous_status": previous_status,
+                            "status": status,
+                        },
+                    )
+                )
+
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    UPDATE opportunities
+                    SET status = ?,
+                        owner = ?,
+                        snooze_until = ?,
+                        notes = ?,
+                        resolved_at = ?,
+                        resolution_reason = ?,
+                        resolution_note = ?
+                    WHERE account_id = ? AND fingerprint = ?
+                    """,
+                    (
+                        next_status,
+                        next_owner,
+                        next_snooze_until,
+                        next_notes,
+                        next_resolved_at,
+                        next_resolution_reason,
+                        next_resolution_note,
+                        existing["account_id"],
+                        fingerprint,
+                    ),
+                )
+                for event_type, data in events:
+                    self._append_opportunity_event(
+                        cursor,
+                        account_id=existing["account_id"],
+                        fingerprint=fingerprint,
+                        event_type=event_type,
+                        data=data,
+                    )
+                conn.commit()
+        except sqlite3.Error as e:
+            logger.error(f"Failed to update opportunity state: {str(e)}")
+            return None
+
+        return self.get_opportunity(
+            fingerprint=fingerprint, account_id=existing["account_id"]
+        )
 
 
 # Global singleton

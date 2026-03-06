@@ -592,6 +592,12 @@ _PATCHES = {
     "aws_lighthouse.cli.run_cost_scan": lambda region=None: _ok([]),
     "aws_lighthouse.cli.check_tagging_compliance": lambda **kwargs: _ok([]),
     "aws_lighthouse.cli.db_manager": _make_db_mock(),
+    "aws_lighthouse.cli.sync_opportunities_from_scan": lambda **kwargs: {
+        "created": 0,
+        "reopened": 0,
+        "resolved": 0,
+        "still_open": 0,
+    },
 }
 
 
@@ -1549,3 +1555,32 @@ class TestAnalyzeInteractiveMode:
         assert result.exit_code == 0, result.output
         assert "Error" not in result.output
         assert "EC2 Instances" in result.output
+
+    def test_text_output_renders_opportunity_sync_summary(self):
+        result = self._run_text(
+            extra_patches={
+                "aws_lighthouse.cli.sync_opportunities_from_scan": lambda **kwargs: {
+                    "created": 2,
+                    "reopened": 1,
+                    "resolved": 3,
+                    "still_open": 4,
+                }
+            }
+        )
+
+        assert result.exit_code == 0, result.output
+        assert (
+            "Opportunities synced: 2 new, 1 reopened, 3 resolved, 4 still open."
+            in result.output
+        )
+
+    def test_json_output_does_not_emit_opportunity_summary_text(self):
+        runner = CliRunner()
+        patches = {**_PATCHES, "aws_lighthouse.cli.get_aws_session": _mock_session}
+        with patch.multiple(
+            "aws_lighthouse.cli", **{k.split(".")[-1]: v for k, v in patches.items()}
+        ):
+            result = runner.invoke(app, ["analyze", "--output", "json"])
+
+        assert result.exit_code == 0, result.output
+        assert "Opportunities synced:" not in result.output

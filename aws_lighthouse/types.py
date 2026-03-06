@@ -2,6 +2,31 @@ from typing import Any, Literal, NotRequired, TypedDict
 
 # Canonical severity levels used across all scan findings.
 Severity = Literal["HIGH", "MEDIUM", "LOW"]
+OpportunityStatus = Literal[
+    "open",
+    "triaged",
+    "in_progress",
+    "snoozed",
+    "resolved",
+    "ignored",
+]
+OpportunitySourceKind = Literal[
+    "cost_anomaly",
+    "cost_waste",
+    "security",
+    "iam",
+    "cloudwatch",
+    "tagging",
+]
+OpportunityEventType = Literal[
+    "created",
+    "reopened",
+    "resolved",
+    "status_updated",
+    "owner_updated",
+    "note_added",
+    "snoozed",
+]
 
 
 class ScanError(TypedDict):
@@ -82,3 +107,40 @@ class CostAnomaly(TypedDict):
     baseline_7d: float
     recent_7d: float
     pct_change: float
+
+
+class Opportunity(TypedDict):
+    """One persistent local opportunity synced from scan findings."""
+
+    account_id: str
+    fingerprint: str
+    source_kind: OpportunitySourceKind
+    title: str
+    summary: str
+    severity: Severity | None
+    resource_type: str | None
+    resource_id: str
+    resource_name: str | None
+    region: str | None
+    raw_payload: dict[str, Any]
+    first_seen_at: str
+    last_seen_at: str
+    seen_count: int
+    status: OpportunityStatus
+    owner: str | None
+    snooze_until: str | None
+    notes: str
+    resolution_reason: str | None
+    resolution_note: str | None
+    resolved_at: str | None
+    last_scan_scope: str | None
+
+
+class OpportunityEvent(TypedDict):
+    """One lifecycle event attached to a persistent opportunity."""
+
+    account_id: str
+    fingerprint: str
+    event_type: OpportunityEventType
+    timestamp: str
+    data: dict[str, Any]

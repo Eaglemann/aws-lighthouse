@@ -77,6 +77,41 @@ class TestEnsureDb:
     def test_creates_scan_snapshot_ordering_index(self, db, tmp_path):
         assert "idx_scan_snapshots_account_scope_ts_id" in _indexes(tmp_path)
 
+    def test_creates_opportunities_tables(self, db, tmp_path):
+        tables = _tables(tmp_path)
+        assert "opportunities" in tables
+        assert "opportunity_events" in tables
+
+    def test_creates_opportunity_indexes(self, db, tmp_path):
+        indexes = _indexes(tmp_path)
+        assert "idx_opportunities_account_status_seen" in indexes
+        assert "idx_opportunities_account_source_region" in indexes
+        assert "idx_opportunity_events_account_fp_id" in indexes
+
+    def test_existing_db_gains_opportunity_tables(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "test.db"
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE scans (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    account_id TEXT,
+                    region TEXT,
+                    scan_type TEXT,
+                    data TEXT
+                )
+                """
+            )
+        monkeypatch.setattr(db_module, "DB_DIR", tmp_path)
+        monkeypatch.setattr(db_module, "DB_PATH", db_path)
+
+        DatabaseManager()
+
+        tables = _tables(tmp_path)
+        assert "opportunities" in tables
+        assert "opportunity_events" in tables
+
 
 # ---------------------------------------------------------------------------
 # record_cost_snapshot
