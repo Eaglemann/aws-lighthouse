@@ -395,6 +395,45 @@ class DatabaseManager:
             logger.error(f"Failed to retrieve previous scan snapshot: {str(e)}")
             return None
 
+    def get_latest_scan_activity(
+        self, account_id: str | None = None
+    ) -> dict[str, Any] | None:
+        """Return the newest scan snapshot metadata across all scopes."""
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                cursor = conn.cursor()
+                if account_id:
+                    cursor.execute(
+                        """
+                        SELECT timestamp, account_id, scope_key
+                        FROM scan_snapshots
+                        WHERE account_id = ?
+                        ORDER BY timestamp DESC, id DESC
+                        LIMIT 1
+                        """,
+                        (account_id,),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        SELECT timestamp, account_id, scope_key
+                        FROM scan_snapshots
+                        ORDER BY timestamp DESC, id DESC
+                        LIMIT 1
+                        """
+                    )
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        "recorded_at": row[0],
+                        "account_id": row[1],
+                        "scope_key": row[2],
+                    }
+                return None
+        except sqlite3.Error as e:
+            logger.error(f"Failed to retrieve latest scan activity: {str(e)}")
+            return None
+
     def record_audit_log(
         self,
         tool_name: str,
@@ -789,6 +828,67 @@ class DatabaseManager:
         except sqlite3.Error as e:
             logger.error(f"Failed to list opportunities: {str(e)}")
             return []
+
+    def summarize_opportunities(
+        self,
+        *,
+        account_id: str | None = None,
+        statuses: list[OpportunityStatus] | None = None,
+    ) -> dict[str, Any]:
+        """Return aggregate counts for the current opportunity set."""
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                where_clauses = ["1 = 1"]
+                params: list[Any] = []
+                if account_id:
+                    where_clauses.append("account_id = ?")
+                    params.append(account_id)
+                if statuses:
+                    placeholders = ", ".join("?" for _ in statuses)
+                    where_clauses.append(f"status IN ({placeholders})")
+                    params.extend(statuses)
+
+                where_sql = " AND ".join(where_clauses)
+                total_query = f"SELECT COUNT(*) FROM opportunities WHERE {where_sql}"  # noqa: S608 - built from fixed SQL fragments
+                total = int(conn.execute(total_query, params).fetchone()[0])
+
+                source_query = f"""
+                    SELECT source_kind, COUNT(*)
+                    FROM opportunities
+                    WHERE {where_sql}
+                    GROUP BY source_kind
+                """  # noqa: S608 - built from fixed SQL fragments
+                severity_query = f"""
+                    SELECT COALESCE(severity, 'UNSPECIFIED'), COUNT(*)
+                    FROM opportunities
+                    WHERE {where_sql}
+                    GROUP BY COALESCE(severity, 'UNSPECIFIED')
+                """  # noqa: S608 - built from fixed SQL fragments
+                status_query = f"""
+                    SELECT status, COUNT(*)
+                    FROM opportunities
+                    WHERE {where_sql}
+                    GROUP BY status
+                """  # noqa: S608 - built from fixed SQL fragments
+
+                by_source = {
+                    row[0]: int(row[1]) for row in conn.execute(source_query, params)
+                }
+                by_severity = {
+                    row[0]: int(row[1]) for row in conn.execute(severity_query, params)
+                }
+                by_status = {
+                    row[0]: int(row[1]) for row in conn.execute(status_query, params)
+                }
+                return {
+                    "total": total,
+                    "by_source": dict(sorted(by_source.items())),
+                    "by_severity": dict(sorted(by_severity.items())),
+                    "by_status": dict(sorted(by_status.items())),
+                }
+        except sqlite3.Error as e:
+            logger.error(f"Failed to summarize opportunities: {str(e)}")
+            return {"total": 0, "by_source": {}, "by_severity": {}, "by_status": {}}
 
     def get_opportunity(
         self, fingerprint: str, account_id: str | None = None
