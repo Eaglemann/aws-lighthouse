@@ -259,6 +259,48 @@ def _parse_csv_filter(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+_VALID_OPPORTUNITY_STATUSES: frozenset[str] = frozenset(
+    {"open", "triaged", "in_progress", "snoozed", "resolved", "ignored"}
+)
+_VALID_SOURCE_KINDS: frozenset[str] = frozenset(
+    {"cost_anomaly", "cost_waste", "security", "iam", "cloudwatch", "tagging"}
+)
+_VALID_SEVERITIES: frozenset[str] = frozenset({"HIGH", "MEDIUM", "LOW"})
+
+
+def _parse_status_filter(value: str) -> list[OpportunityStatus] | None:
+    """Parse CSV status string, rejecting unknown status values."""
+    items = _parse_csv_filter(value)
+    if not items:
+        return None
+    unknown = [s for s in items if s not in _VALID_OPPORTUNITY_STATUSES]
+    if unknown:
+        raise ValueError(f"Unknown opportunity status(es): {', '.join(unknown)}")
+    return cast(list[OpportunityStatus], items)
+
+
+def _parse_source_kind_filter(value: str) -> list[OpportunitySourceKind] | None:
+    """Parse CSV source_kind string, rejecting unknown kind values."""
+    items = _parse_csv_filter(value)
+    if not items:
+        return None
+    unknown = [s for s in items if s not in _VALID_SOURCE_KINDS]
+    if unknown:
+        raise ValueError(f"Unknown opportunity source kind(s): {', '.join(unknown)}")
+    return cast(list[OpportunitySourceKind], items)
+
+
+def _parse_severity_filter(value: str) -> list[Severity] | None:
+    """Parse CSV severity string, rejecting unknown severity values."""
+    items = _parse_csv_filter(value)
+    if not items:
+        return None
+    unknown = [s for s in items if s not in _VALID_SEVERITIES]
+    if unknown:
+        raise ValueError(f"Unknown severity value(s): {', '.join(unknown)}")
+    return cast(list[Severity], items)
+
+
 class _SchemaArgs(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
@@ -508,18 +550,12 @@ def tool_list_opportunities(
     Use this first for questions like "what changed", "what should I fix",
     "what's new", "top risks", or "show unresolved issues".
     """
-    parsed_statuses = cast(
-        list[OpportunityStatus] | None,
-        _parse_csv_filter(statuses) or None,
-    )
-    parsed_source_kinds = cast(
-        list[OpportunitySourceKind] | None,
-        _parse_csv_filter(source_kinds) or None,
-    )
-    parsed_severities = cast(
-        list[Severity] | None,
-        _parse_csv_filter(severities) or None,
-    )
+    try:
+        parsed_statuses = _parse_status_filter(statuses)
+        parsed_source_kinds = _parse_source_kind_filter(source_kinds)
+        parsed_severities = _parse_severity_filter(severities)
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)})
     opportunities = db_manager.list_opportunities(
         account_id=_default_opportunity_account_id(account_id or None),
         statuses=parsed_statuses,
@@ -603,18 +639,12 @@ def tool_plan_opportunities(
     Build a grouped remediation and triage plan over locally persisted opportunities.
     Use this when the user asks for a plan rather than immediate execution.
     """
-    parsed_statuses = cast(
-        list[OpportunityStatus] | None,
-        _parse_csv_filter(statuses) or None,
-    )
-    parsed_source_kinds = cast(
-        list[OpportunitySourceKind] | None,
-        _parse_csv_filter(source_kinds) or None,
-    )
-    parsed_severities = cast(
-        list[Severity] | None,
-        _parse_csv_filter(severities) or None,
-    )
+    try:
+        parsed_statuses = _parse_status_filter(statuses)
+        parsed_source_kinds = _parse_source_kind_filter(source_kinds)
+        parsed_severities = _parse_severity_filter(severities)
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)})
     opportunities = db_manager.list_opportunities(
         account_id=_default_opportunity_account_id(account_id or None),
         statuses=parsed_statuses,
@@ -679,8 +709,9 @@ def _classify_tool_result(content: str) -> tuple[str, str | None]:
                             return "failed", str(message)
                     return "failed", str(first)
                 return "failed", "Tool reported ok=false"
-        except ValueError:
-            pass
+        except json.JSONDecodeError:
+            logger.warn(f"Tool returned malformed JSON: {stripped[:120]}")
+            return "failed", "malformed JSON response from tool"
     return "executed", None
 
 
@@ -733,6 +764,8 @@ def _normalize_schema_like_args(
 
 def _normalize_safe_tool_calls(state: AgentState) -> dict | None:
     """Repair safe tool calls in-place before ToolNode executes them."""
+    if not state["messages"]:
+        return None
     last_message = state["messages"][-1]
     if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
         return None
@@ -805,7 +838,12 @@ def approval_node(state: AgentState) -> dict:
     import typer
 
     # Find the last AIMessage with tool calls
-    last_message: AIMessage = state["messages"][-1]  # type: ignore[assignment]
+    if not state["messages"]:
+        return {"approved": False, "messages": []}
+    last_message = state["messages"][-1]
+    if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
+        # Nothing to approve — route back to agent
+        return {"approved": False, "messages": []}
 
     logger.print_header("AWS Lighthouse - Execution Plan")
     logger.warn("The agent has proposed the following infrastructure changes:")
@@ -890,11 +928,23 @@ SAFE_TOOLS = {
     "tool_plan_opportunities",
 }
 
+# Validate at module load: every name in SAFE_TOOLS must appear in the tools list.
+# This catches renames that would silently remove the approval gate.
+_tool_names: frozenset[str] = frozenset(t.name for t in tools)
+_unknown_safe_tools = SAFE_TOOLS - _tool_names
+if _unknown_safe_tools:
+    raise ValueError(
+        f"SAFE_TOOLS contains tool name(s) not in the tools list: {_unknown_safe_tools}. "
+        "Update SAFE_TOOLS to match the current tool names."
+    )
+
 
 def should_require_approval(state: AgentState) -> str:
     """Routing logic to intercept dangerous tools before they hit ToolNode."""
-    last_message: AIMessage = state["messages"][-1]  # type: ignore[assignment]
-    if not last_message.tool_calls:
+    if not state["messages"]:
+        return "end"
+    last_message = state["messages"][-1]
+    if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
         return "end"
 
     # Only require approval if at least one called tool is destructive
