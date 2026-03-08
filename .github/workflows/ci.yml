@@ -96,7 +96,7 @@ jobs:
     - name: Install wheel in a clean venv and smoke-test entry point
       run: |
         uv venv .venv-check
-        .venv-check/bin/pip install dist/*.whl --quiet
+        uv pip install dist/*.whl --python .venv-check/bin/python
         .venv-check/bin/aws-lighthouse --help
 
   dependency-audit:
