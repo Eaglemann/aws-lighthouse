@@ -38,6 +38,67 @@ jobs:
       run: |
         uv run pytest
 
+  test-matrix:
+    # Run tests across Python versions and operating systems.
+    # macOS has a different symlink layout (/etc -> /private/etc) that affects
+    # bash.py path blocking; Ubuntu validates standard Linux paths.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.12", "3.13"]
+        exclude:
+          # ubuntu/3.12 already covered by lint-and-test above
+          - os: ubuntu-latest
+            python: "3.12"
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+      with:
+        enable-cache: true
+
+    - name: Set up Python ${{ matrix.python }}
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      with:
+        python-version: ${{ matrix.python }}
+
+    - name: Install dependencies
+      run: uv sync --all-extras --dev
+
+    - name: Test with pytest
+      run: |
+        uv run pytest
+
+  build-check:
+    # Verify the wheel builds cleanly and is installable in a fresh venv.
+    # Catches broken pyproject.toml metadata, missing __init__.py, and
+    # entry-point wiring errors before they reach the release workflow.
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+      with:
+        enable-cache: true
+
+    - name: Set up Python
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      with:
+        python-version-file: ".python-version"
+
+    - name: Build wheel
+      run: uv build
+
+    - name: Install wheel in a clean venv and smoke-test entry point
+      run: |
+        uv venv .venv-check
+        .venv-check/bin/pip install dist/*.whl --quiet
+        .venv-check/bin/aws-lighthouse --help
+
   dependency-audit:
     runs-on: ubuntu-latest
     steps:
