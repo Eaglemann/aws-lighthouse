@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -66,5 +66,67 @@ def get_monthly_cost_summary(days: int = 14) -> ScanResult:
                     operation="GetCostAndUsage",
                     exc=e,
                 )
+            ],
+        )
+
+
+def get_cost_forecast(forecast_days: int = 30) -> ScanResult:
+    """Retrieve a 30-day cost forecast using AWS Cost Explorer's ML model.
+
+    Calls ``GetCostForecast`` with UNBLENDED_COST at MONTHLY granularity.
+    The forecast start is tomorrow (CE requires future dates); end is
+    ``forecast_days`` days from today.
+
+    Returns:
+        ScanResult with data dict containing:
+          ``forecast_start``  — ISO date the forecast period begins
+          ``forecast_end``    — ISO date the forecast period ends
+          ``total_usd``       — mean point estimate for the period ($)
+          ``lower_bound_usd`` — lower confidence bound ($)
+          ``upper_bound_usd`` — upper confidence bound ($)
+    """
+    today = datetime.now(UTC).date()
+    # CE forecast start must be a future date (tomorrow at earliest)
+    forecast_start = today + timedelta(days=1)
+    forecast_end = today + timedelta(days=forecast_days)
+    base_data: dict[str, object] = {
+        "forecast_start": forecast_start.isoformat(),
+        "forecast_end": forecast_end.isoformat(),
+        "total_usd": None,
+        "lower_bound_usd": None,
+        "upper_bound_usd": None,
+    }
+    try:
+        ce = get_client("ce")
+        response = ce.get_cost_forecast(
+            TimePeriod={
+                "Start": forecast_start.isoformat(),
+                "End": forecast_end.isoformat(),
+            },
+            Metric="UNBLENDED_COST",
+            Granularity="MONTHLY",
+        )
+        total = response.get("Total", {})
+        prediction = response.get("ForecastResultsByTime", [])
+        lower = min(
+            (float(p.get("MeanValue", 0)) for p in prediction), default=0.0
+        )
+        upper = max(
+            (float(p.get("MeanValue", 0)) for p in prediction), default=0.0
+        )
+        return ok_result(
+            {
+                **base_data,
+                "total_usd": float(total.get("Amount", 0) or 0),
+                "lower_bound_usd": lower,
+                "upper_bound_usd": upper,
+            }
+        )
+    except (ClientError, BotoCoreError) as e:
+        logger.error(f"Failed to retrieve cost forecast: {e}")
+        return error_result(
+            data=base_data,
+            errors=[
+                scan_error_from_exception(service="ce", operation="GetCostForecast", exc=e)
             ],
         )

@@ -1,3 +1,4 @@
+import os
 from datetime import date, timedelta
 
 from botocore.exceptions import BotoCoreError, ClientError
@@ -11,19 +12,38 @@ from ..types import CostAnomaly, ScanResult
 # Avoids noise from $0.01 → $0.02 triggering a 100% "anomaly".
 _MIN_BASELINE_USD = 1.0
 
+_DEFAULT_ANOMALY_THRESHOLD_PCT = float(os.getenv("LIGHTHOUSE_ANOMALY_THRESHOLD_PCT", "50.0"))
 
-def detect_cost_anomalies(threshold_pct: float = 50.0) -> ScanResult:
+# Creep threshold: gradual growth below the spike threshold but above this
+# value is flagged as a slow-burn cost increase.
+_CREEP_THRESHOLD_PCT = 20.0
+
+
+def detect_cost_anomalies(threshold_pct: float = _DEFAULT_ANOMALY_THRESHOLD_PCT) -> ScanResult:
     """
-    Compare the last 7 days of per-service spend against the prior 7-day baseline.
-    Returns services whose recent spend exceeds the baseline by more than threshold_pct.
-    Services with no prior baseline (new services) or negligible spend are skipped.
+    Compare the last 30 days of per-service spend against the prior 30-day
+    baseline to detect spikes and gradual creep.
+
+    Using 30-day windows avoids false positives from weekly traffic cycles
+    (7-day windows penalise services with higher weekday vs. weekend spend).
+
+    Two detection modes per service:
+
+    - **Spike**: recent 30 days > baseline 30 days by more than ``threshold_pct``
+      (default 50 %).  Returns detection_type = "spike".
+    - **Creep**: recent 30 days > baseline 30 days by more than 20 % (but below
+      the spike threshold) — catches gradual cost growth that never peaks in a
+      single week.  Returns detection_type = "creep".
+
+    Services with no prior baseline or negligible spend (_MIN_BASELINE_USD)
+    are skipped.
     """
     ce = get_client("ce")
 
     today = date.today()
-    end_str = today.strftime("%Y-%m-%d")
-    mid_str = (today - timedelta(days=7)).strftime("%Y-%m-%d")
-    start_str = (today - timedelta(days=14)).strftime("%Y-%m-%d")
+    end_str = today.isoformat()
+    mid_str = (today - timedelta(days=30)).isoformat()
+    start_str = (today - timedelta(days=60)).isoformat()
 
     try:
         response = ce.get_cost_and_usage(
@@ -65,13 +85,25 @@ def detect_cost_anomalies(threshold_pct: float = 50.0) -> ScanResult:
             continue
 
         pct_change = ((recent_total - baseline_total) / baseline_total) * 100
+
         if pct_change >= threshold_pct:
             anomalies.append(
                 {
                     "service": service,
-                    "baseline_7d": round(baseline_total, 2),
-                    "recent_7d": round(recent_total, 2),
+                    "baseline_30d": round(baseline_total, 2),
+                    "recent_30d": round(recent_total, 2),
                     "pct_change": round(pct_change, 1),
+                    "detection_type": "spike",
+                }
+            )
+        elif pct_change >= _CREEP_THRESHOLD_PCT:
+            anomalies.append(
+                {
+                    "service": service,
+                    "baseline_30d": round(baseline_total, 2),
+                    "recent_30d": round(recent_total, 2),
+                    "pct_change": round(pct_change, 1),
+                    "detection_type": "creep",
                 }
             )
 
