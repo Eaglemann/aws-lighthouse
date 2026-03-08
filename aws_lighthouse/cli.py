@@ -38,7 +38,7 @@ from .scan_contract import (
     scan_error_reason,
 )
 from .tools.cloudwatch_scan import detect_cloudwatch_gaps
-from .tools.cost import get_monthly_cost_summary
+from .tools.cost import get_cost_forecast, get_monthly_cost_summary
 from .tools.cost_anomaly import detect_cost_anomalies
 from .tools.cost_scan import run_cost_scan
 from .tools.iam_scan import detect_overpermissive_iam
@@ -851,14 +851,14 @@ def _render_cost_anomalies_panel(c: Console, anomalies_result: ScanResult) -> No
             box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False
         )
         anomaly_table.add_column("Service", style="cyan")
-        anomaly_table.add_column("Baseline 7d", justify="right", style="dim")
-        anomaly_table.add_column("Recent 7d", justify="right")
+        anomaly_table.add_column("Baseline 30d", justify="right", style="dim")
+        anomaly_table.add_column("Recent 30d", justify="right")
         anomaly_table.add_column("Change", justify="right")
         for anomaly in anomalies:
             anomaly_table.add_row(
                 anomaly["service"],
-                f"${anomaly['baseline_7d']:,.2f}",
-                f"[bold yellow]${anomaly['recent_7d']:,.2f}[/bold yellow]",
+                f"${anomaly['baseline_30d']:,.2f}",
+                f"[bold yellow]${anomaly['recent_30d']:,.2f}[/bold yellow]",
                 f"[bold red]▲ {anomaly['pct_change']:+.1f}%[/bold red]",
             )
         c.print(
@@ -866,7 +866,7 @@ def _render_cost_anomalies_panel(c: Console, anomalies_result: ScanResult) -> No
                 anomaly_table,
                 title=(
                     "[bold red]🚨 Cost Anomalies[/bold red]  "
-                    f"[dim]{len(anomalies)} spike{'s' if len(anomalies) != 1 else ''} vs prior 7d[/dim]"
+                    f"[dim]{len(anomalies)} spike{'s' if len(anomalies) != 1 else ''} vs prior 30d[/dim]"
                 ),
                 border_style="red",
                 padding=(0, 1),
@@ -1375,6 +1375,23 @@ def _section_cost_anomalies(
     if render:
         _render_cost_anomalies_panel(c, anomalies_result)
     return anomalies_result
+
+
+def _section_cost_forecast(c: Console, render: bool = True) -> ScanResult:
+    """Fetch and optionally render a 30-day cost forecast."""
+    with c.status("[cyan]📈  Fetching 30-day cost forecast...[/cyan]", spinner="dots"):
+        forecast_result = get_cost_forecast()
+    if render and forecast_result["ok"]:
+        fc = cast(dict[str, Any], forecast_result["data"])
+        total = fc.get("total_usd")
+        period = f"{fc.get('forecast_start')} → {fc.get('forecast_end')}"
+        if total is not None:
+            c.print(
+                f"[bold cyan]📈 30-Day Forecast[/bold cyan]  "
+                f"[bold yellow]${total:,.2f}[/bold yellow]  "
+                f"[dim]{period}[/dim]"
+            )
+    return forecast_result
 
 
 def _section_ri_sp_coverage(c: Console, days: int, render: bool = True) -> ScanResult:
@@ -1936,6 +1953,7 @@ def _run_analyze_cycle(
             if effective_policy.scan_enabled("cost_anomalies")
             else _skipped_result(c, "[bold dim]🚨 Cost Anomalies[/bold dim]", [])
         )
+        forecast_result = _section_cost_forecast(c, render=False)
         ri_sp_result = (
             _section_ri_sp_coverage(c, days, render=False)
             if effective_policy.scan_enabled("ri_sp_coverage")
@@ -1989,6 +2007,7 @@ def _run_analyze_cycle(
         section_results: dict[str, ScanResult] = {
             "inventory": inventory_result,
             "costs": costs_result,
+            "cost_forecast": forecast_result,
             "cost_anomalies": anomalies_result,
             "ri_sp_coverage": ri_sp_result,
             "security_findings": sec_result,
