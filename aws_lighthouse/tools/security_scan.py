@@ -141,16 +141,19 @@ def _check_open_security_groups(ec2, region: str | None = None) -> ScanResult:
     return ok_result(findings)
 
 
-def _check_iam_users_mfa() -> ScanResult:
+def _check_iam_users_mfa(report: ScanResult | None = None) -> ScanResult:
     """Flag IAM users with console access (password_enabled) but no MFA device.
 
     Uses the IAM credential report (2 API calls) instead of per-user
     get_login_profile + list_mfa_devices (2N calls).
+    Pass a pre-fetched report to avoid duplicate API calls when multiple checks
+    share the same credential report.
     """
     findings: list[SecurityFinding] = []
     try:
-        iam = get_aws_client("iam")
-        report = _get_credential_report(iam)
+        if report is None:
+            iam = get_aws_client("iam")
+            report = _get_credential_report(iam)
         for row in report["data"]:
             username = row.get("user", "")
             if username == "<root_account>":
@@ -181,17 +184,20 @@ def _check_iam_users_mfa() -> ScanResult:
     return error_result(data=findings, errors=report["errors"])
 
 
-def _check_iam_key_age() -> ScanResult:
+def _check_iam_key_age(report: ScanResult | None = None) -> ScanResult:
     """Flag active IAM access keys older than 90 days.
 
     Uses the IAM credential report (2 API calls) instead of per-user
     list_access_keys (N calls, one per user).
+    Pass a pre-fetched report to avoid duplicate API calls when multiple checks
+    share the same credential report.
     """
     findings: list[SecurityFinding] = []
     try:
-        iam = get_aws_client("iam")
+        if report is None:
+            iam = get_aws_client("iam")
+            report = _get_credential_report(iam)
         now = datetime.now(UTC)
-        report = _get_credential_report(iam)
         for row in report["data"]:
             username = row.get("user", "")
             if username == "<root_account>":
@@ -557,8 +563,11 @@ def run_security_scan(
     results: list[ScanResult] = []
     if include_global:
         results.append(_check_root_mfa())
-        results.append(_check_iam_users_mfa())
-        results.append(_check_iam_key_age())
+        # Generate the credential report once and share it between both checks
+        # to avoid 2× the polling overhead (up to 40 s each).
+        _shared_cred_report = _get_credential_report(get_aws_client("iam"))
+        results.append(_check_iam_users_mfa(_shared_cred_report))
+        results.append(_check_iam_key_age(_shared_cred_report))
         results.append(_check_s3_block_public_access(s3s))
         results.append(_check_s3_encryption(s3s))
     ec2 = _cl("ec2")
