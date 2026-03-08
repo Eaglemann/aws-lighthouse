@@ -48,6 +48,37 @@ def test_statements_service_star_is_medium():
     assert _check_statements(stmts) == "MEDIUM"
 
 
+# HIGH-7: high-risk specific action detection
+def test_statements_iam_wildcard_is_high():
+    """iam:* with Resource:* — can create admin users, must be HIGH."""
+    stmts = [{"Effect": "Allow", "Action": "iam:*", "Resource": "*"}]
+    assert _check_statements(stmts) == "HIGH"
+
+
+def test_statements_sts_assume_role_is_high():
+    """sts:AssumeRole with Resource:* — can assume any role, must be HIGH."""
+    stmts = [{"Effect": "Allow", "Action": "sts:AssumeRole", "Resource": "*"}]
+    assert _check_statements(stmts) == "HIGH"
+
+
+def test_statements_logs_wildcard_is_high():
+    """logs:* with Resource:* — can delete CloudTrail logs, must be HIGH."""
+    stmts = [{"Effect": "Allow", "Action": "logs:*", "Resource": "*"}]
+    assert _check_statements(stmts) == "HIGH"
+
+
+def test_statements_high_risk_scoped_resource_not_flagged():
+    """High-risk actions on scoped (non-star) Resource should NOT be flagged."""
+    stmts = [
+        {
+            "Effect": "Allow",
+            "Action": "sts:AssumeRole",
+            "Resource": "arn:aws:iam::123456789012:role/MyRole",
+        }
+    ]
+    assert _check_statements(stmts) is None
+
+
 def test_statements_deny_ignored():
     stmts = [{"Effect": "Deny", "Action": "*", "Resource": "*"}]
     assert _check_statements(stmts) is None
