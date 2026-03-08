@@ -33,6 +33,7 @@ _SCHEMA_GUARDED_TOOLS: frozenset[str] = frozenset(
         "tool_get_lambda_inventory",
         "tool_get_ri_sp_coverage",
         "tool_detect_cost_anomalies",
+        "tool_get_cost_attribution",
         "tool_run_cost_scan",
         "tool_check_tagging_compliance",
         "tool_detect_overpermissive_iam",
@@ -224,6 +225,7 @@ def tool_execute_bash(
     return json.dumps(res)
 
 
+from .tools.cloudtrail_attribution import get_cost_attribution as _get_cost_attribution
 from .tools.cloudwatch_scan import detect_cloudwatch_gaps as _detect_cloudwatch_gaps
 from .tools.cost_anomaly import detect_cost_anomalies as _detect_cost_anomalies
 from .tools.cost_scan import run_cost_scan as _run_cost_scan
@@ -483,6 +485,22 @@ def tool_detect_cost_anomalies(
     return _format_scan_payload(result, schema_version)
 
 
+@tool
+def tool_get_cost_attribution(schema_version: Literal["v1", "v2"] = "v1") -> str:
+    """
+    Correlate Cost Explorer anomalies with CloudTrail API call history to identify
+    which IAM actor (user, role, or service) triggered the activity responsible
+    for a cost spike.  Internally runs detect_cost_anomalies then looks up the
+    matching CloudTrail events in the same window.  Returns a list of attributions
+    — one per anomalous service — each containing the event name, actor, timestamp,
+    and AWS region of the call.
+    """
+    anomaly_result = _detect_cost_anomalies()
+    anomalies = anomaly_result.get("data") or []
+    result = _get_cost_attribution(anomalies)
+    return _format_scan_payload(result, schema_version)
+
+
 @tool(args_schema=_SecurityScanArgs)
 def tool_run_security_scan(
     region: str = "",
@@ -672,6 +690,7 @@ tools = [
     tool_get_lambda_inventory,
     tool_get_ri_sp_coverage,
     tool_detect_cost_anomalies,
+    tool_get_cost_attribution,
     tool_run_cost_scan,
     tool_check_tagging_compliance,
     tool_detect_overpermissive_iam,
@@ -917,6 +936,7 @@ SAFE_TOOLS = {
     "tool_get_lambda_inventory",
     "tool_get_ri_sp_coverage",
     "tool_detect_cost_anomalies",
+    "tool_get_cost_attribution",
     "tool_run_cost_scan",
     "tool_check_tagging_compliance",
     "tool_detect_overpermissive_iam",

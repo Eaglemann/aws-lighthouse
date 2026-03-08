@@ -37,6 +37,7 @@ from .scan_contract import (
     merge_list_results,
     scan_error_reason,
 )
+from .tools.cloudtrail_attribution import get_cost_attribution
 from .tools.cloudwatch_scan import detect_cloudwatch_gaps
 from .tools.cost import get_cost_forecast, get_monthly_cost_summary
 from .tools.cost_anomaly import detect_cost_anomalies
@@ -1394,6 +1395,55 @@ def _section_cost_forecast(c: Console, render: bool = True) -> ScanResult:
     return forecast_result
 
 
+def _render_cost_attribution_panel(c: Console, attribution_result: ScanResult) -> None:
+    attributions = cast(list[dict[str, Any]], attribution_result["data"])
+    if not attributions:
+        return
+    for attr in attributions:
+        table = Table(
+            box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False
+        )
+        table.add_column("Event", style="cyan", no_wrap=True)
+        table.add_column("Actor", style="bold")
+        table.add_column("Time", style="dim")
+        table.add_column("Region", style="dim")
+        for ev in attr.get("events", []):
+            table.add_row(
+                ev.get("event_name", ""),
+                ev.get("actor", "unknown"),
+                str(ev.get("event_time", ""))[:19],
+                ev.get("region", ""),
+            )
+        c.print(
+            Panel(
+                table,
+                title=(
+                    f"[bold magenta]🔍 Attribution: {attr['service']}[/bold magenta]  "
+                    f"[dim]{attr['pct_change']:+.1f}% spend change[/dim]"
+                ),
+                border_style="magenta",
+                padding=(0, 1),
+            )
+        )
+    c.print()
+
+
+def _section_cost_attribution(
+    c: Console,
+    anomalies_result: ScanResult,
+    render: bool = True,
+) -> ScanResult:
+    """Correlate cost anomalies with CloudTrail events and optionally render."""
+    anomalies = anomalies_result.get("data") or []
+    with c.status(
+        "[cyan]🔍  Attributing cost anomalies via CloudTrail...[/cyan]", spinner="dots"
+    ):
+        attribution_result = get_cost_attribution(anomalies)
+    if render:
+        _render_cost_attribution_panel(c, attribution_result)
+    return attribution_result
+
+
 def _section_ri_sp_coverage(c: Console, days: int, render: bool = True) -> ScanResult:
     """Fetch and render RI / Savings Plan coverage panel."""
     with c.status(
@@ -1954,6 +2004,9 @@ def _run_analyze_cycle(
             else _skipped_result(c, "[bold dim]🚨 Cost Anomalies[/bold dim]", [])
         )
         forecast_result = _section_cost_forecast(c, render=False)
+        attribution_result = _section_cost_attribution(
+            c, anomalies_result, render=False
+        )
         ri_sp_result = (
             _section_ri_sp_coverage(c, days, render=False)
             if effective_policy.scan_enabled("ri_sp_coverage")
@@ -2009,6 +2062,7 @@ def _run_analyze_cycle(
             "costs": costs_result,
             "cost_forecast": forecast_result,
             "cost_anomalies": anomalies_result,
+            "cost_attribution": attribution_result,
             "ri_sp_coverage": ri_sp_result,
             "security_findings": sec_result,
             "iam_findings": iam_result,
@@ -2180,6 +2234,8 @@ def _run_analyze_cycle(
                     _render_cost_anomalies_panel(c, anomalies_result)
                 else:
                     _render_skipped_panel(c, "[bold dim]🚨 Cost Anomalies[/bold dim]")
+
+                _render_cost_attribution_panel(c, attribution_result)
 
                 _render_inventory_cost_columns(
                     c,
