@@ -1,7 +1,7 @@
 from typing import Any, Literal, NotRequired, TypedDict
 
 # Canonical severity levels used across all scan findings.
-Severity = Literal["HIGH", "MEDIUM", "LOW"]
+Severity = Literal["CRITICAL", "HIGH", "MEDIUM", "LOW"]
 OpportunityStatus = Literal[
     "open",
     "triaged",
@@ -104,9 +104,10 @@ class CostAnomaly(TypedDict):
     """One anomaly emitted by detect_cost_anomalies()."""
 
     service: str
-    baseline_7d: float
-    recent_7d: float
+    baseline_30d: float
+    recent_30d: float
     pct_change: float
+    detection_type: str
 
 
 class Opportunity(TypedDict):
