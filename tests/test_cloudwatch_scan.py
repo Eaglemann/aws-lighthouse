@@ -81,13 +81,27 @@ def _make_lambda_client(functions=None):
     return lmb
 
 
-def _run(cw, ec2, rds, lmb=None):
+def _make_empty_paginator(key: str):
+    """Return a mock client whose paginator yields one empty page for ``key``."""
+    client = MagicMock()
+    client.get_paginator.return_value.paginate.return_value = [{key: []}]
+    return client
+
+
+def _run(cw, ec2, rds, lmb=None, elc=None, rs=None):
     lmb = lmb or _make_lambda_client()
+    elc = elc or _make_empty_paginator("CacheClusters")
+    rs = rs or _make_empty_paginator("Clusters")
 
     def _dispatch(svc, region=None):
-        return {"cloudwatch": cw, "ec2": ec2, "rds": rds, "lambda": lmb}.get(
-            svc, MagicMock()
-        )
+        return {
+            "cloudwatch": cw,
+            "ec2": ec2,
+            "rds": rds,
+            "lambda": lmb,
+            "elasticache": elc,
+            "redshift": rs,
+        }.get(svc, MagicMock())
 
     with patch(f"{MOD}.get_client", side_effect=_dispatch):
         return detect_cloudwatch_gaps()
@@ -135,16 +149,23 @@ def test_ec2_terminated_skipped():
     assert not any(f["resource_id"] == "i-dead" for f in findings)
 
 
+_ALL_RDS_METRICS = {
+    "CPUUtilization",
+    "FreeStorageSpace",
+    "DatabaseConnections",
+    "ReadLatency",
+    "WriteLatency",
+    "ReplicaLag",
+}
+
+
 def test_rds_missing_alarms_flagged():
     db = {"DBInstanceIdentifier": "my-db"}
     cw, ec2, rds = _make_clients(dbs=[db])
     findings = _data(_run(cw, ec2, rds))
     rds_findings = [f for f in findings if f["resource_type"] == "RDS"]
     assert len(rds_findings) == 1
-    assert set(rds_findings[0]["missing_alarms"]) == {
-        "CPUUtilization",
-        "FreeStorageSpace",
-    }
+    assert set(rds_findings[0]["missing_alarms"]) == _ALL_RDS_METRICS
 
 
 def test_rds_with_all_alarms_not_flagged():
@@ -152,14 +173,10 @@ def test_rds_with_all_alarms_not_flagged():
     alarms = [
         {
             "Namespace": "AWS/RDS",
-            "MetricName": "CPUUtilization",
+            "MetricName": m,
             "Dimensions": [{"Name": "DBInstanceIdentifier", "Value": "ok-db"}],
-        },
-        {
-            "Namespace": "AWS/RDS",
-            "MetricName": "FreeStorageSpace",
-            "Dimensions": [{"Name": "DBInstanceIdentifier", "Value": "ok-db"}],
-        },
+        }
+        for m in _ALL_RDS_METRICS
     ]
     cw, ec2, rds = _make_clients(dbs=[db], alarms=alarms)
     findings = _data(_run(cw, ec2, rds))
@@ -283,3 +300,101 @@ def test_rds_two_page_pagination_collects_all_dbs():
     findings = _data(_run(cw, ec2, rds))
     ids = {f["resource_id"] for f in findings if f["resource_type"] == "RDS"}
     assert ids == {"db-page1", "db-page2"}
+
+
+# ── ElastiCache alarm gaps ────────────────────────────────────────────────────
+
+_ALL_ELASTICACHE_METRICS = {"CPUUtilization", "CurrConnections", "Evictions", "FreeableMemory"}
+
+
+def _make_elc_client(clusters=None):
+    elc = MagicMock()
+    elc.get_paginator.return_value.paginate.return_value = [
+        {"CacheClusters": clusters or []}
+    ]
+    return elc
+
+
+def test_elasticache_missing_alarms_flagged():
+    elc = _make_elc_client([{"CacheClusterId": "my-cluster"}])
+    cw, ec2, rds = _make_clients()
+    findings = _data(_run(cw, ec2, rds, elc=elc))
+    elc_findings = [f for f in findings if f["resource_type"] == "ElastiCache"]
+    assert len(elc_findings) == 1
+    assert set(elc_findings[0]["missing_alarms"]) == _ALL_ELASTICACHE_METRICS
+
+
+def test_elasticache_with_all_alarms_not_flagged():
+    elc = _make_elc_client([{"CacheClusterId": "ok-cluster"}])
+    alarms = [
+        {
+            "Namespace": "AWS/ElastiCache",
+            "MetricName": m,
+            "Dimensions": [{"Name": "CacheClusterId", "Value": "ok-cluster"}],
+        }
+        for m in _ALL_ELASTICACHE_METRICS
+    ]
+    cw, ec2, rds = _make_clients(alarms=alarms)
+    findings = _data(_run(cw, ec2, rds, elc=elc))
+    assert not any(f["resource_type"] == "ElastiCache" for f in findings)
+
+
+def test_elasticache_api_error_doesnt_break_other_findings():
+    bad_elc = MagicMock()
+    bad_elc.get_paginator.side_effect = BotoCoreError()
+    db = {"DBInstanceIdentifier": "prod-db"}
+    cw, ec2, rds = _make_clients(dbs=[db])
+    result = _run(cw, ec2, rds, elc=bad_elc)
+    findings = _data(result)
+    assert result["ok"] is False
+    assert not any(f["resource_type"] == "ElastiCache" for f in findings)
+    assert any(f["resource_type"] == "RDS" for f in findings)
+
+
+# ── Redshift alarm gaps ───────────────────────────────────────────────────────
+
+_ALL_REDSHIFT_METRICS = {"CPUUtilization", "PercentageDiskSpaceUsed", "DatabaseConnections"}
+
+
+def _make_rs_client(clusters=None):
+    rs = MagicMock()
+    rs.get_paginator.return_value.paginate.return_value = [
+        {"Clusters": clusters or []}
+    ]
+    return rs
+
+
+def test_redshift_missing_alarms_flagged():
+    rs = _make_rs_client([{"ClusterIdentifier": "my-rs"}])
+    cw, ec2, rds = _make_clients()
+    findings = _data(_run(cw, ec2, rds, rs=rs))
+    rs_findings = [f for f in findings if f["resource_type"] == "Redshift"]
+    assert len(rs_findings) == 1
+    assert set(rs_findings[0]["missing_alarms"]) == _ALL_REDSHIFT_METRICS
+
+
+def test_redshift_with_all_alarms_not_flagged():
+    rs = _make_rs_client([{"ClusterIdentifier": "ok-rs"}])
+    alarms = [
+        {
+            "Namespace": "AWS/Redshift",
+            "MetricName": m,
+            "Dimensions": [{"Name": "ClusterIdentifier", "Value": "ok-rs"}],
+        }
+        for m in _ALL_REDSHIFT_METRICS
+    ]
+    cw, ec2, rds = _make_clients(alarms=alarms)
+    findings = _data(_run(cw, ec2, rds, rs=rs))
+    assert not any(f["resource_type"] == "Redshift" for f in findings)
+
+
+def test_redshift_api_error_doesnt_break_other_findings():
+    bad_rs = MagicMock()
+    bad_rs.get_paginator.side_effect = BotoCoreError()
+    db = {"DBInstanceIdentifier": "prod-db"}
+    cw, ec2, rds = _make_clients(dbs=[db])
+    result = _run(cw, ec2, rds, rs=bad_rs)
+    findings = _data(result)
+    assert result["ok"] is False
+    assert not any(f["resource_type"] == "Redshift" for f in findings)
+    assert any(f["resource_type"] == "RDS" for f in findings)
