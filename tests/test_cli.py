@@ -196,8 +196,8 @@ class TestSectionCostAnomalies:
         anomalies = [
             {
                 "service": "EC2",
-                "baseline_7d": 100.0,
-                "recent_7d": 200.0,
+                "baseline_30d": 100.0,
+                "recent_30d": 200.0,
                 "pct_change": 100.0,
             }
         ]
@@ -220,14 +220,14 @@ class TestSectionCostAnomalies:
         anomalies = [
             {
                 "service": "S3",
-                "baseline_7d": 10.0,
-                "recent_7d": 20.0,
+                "baseline_30d": 10.0,
+                "recent_30d": 20.0,
                 "pct_change": 100.0,
             },
             {
                 "service": "RDS",
-                "baseline_7d": 5.0,
-                "recent_7d": 15.0,
+                "baseline_30d": 5.0,
+                "recent_30d": 15.0,
                 "pct_change": 200.0,
             },
         ]
@@ -242,8 +242,8 @@ class TestSectionCostAnomalies:
         anomalies = [
             {
                 "service": "Lambda",
-                "baseline_7d": 1.0,
-                "recent_7d": 3.0,
+                "baseline_30d": 1.0,
+                "recent_30d": 3.0,
                 "pct_change": 200.0,
             }
         ]
@@ -743,6 +743,15 @@ _PATCHES = {
         }
     ),
     "aws_lighthouse.cli.detect_cost_anomalies": lambda threshold_pct=50.0: _ok([]),
+    "aws_lighthouse.cli.get_cost_forecast": lambda forecast_days=30: _ok(
+        {
+            "forecast_start": "2024-02-01",
+            "forecast_end": "2024-03-02",
+            "total_usd": 55.0,
+            "lower_bound_usd": 50.0,
+            "upper_bound_usd": 60.0,
+        }
+    ),
     "aws_lighthouse.cli.get_ri_sp_coverage": lambda days=14: _ok({}),
     "aws_lighthouse.cli.run_security_scan": lambda **kwargs: _ok([]),
     "aws_lighthouse.cli.detect_overpermissive_iam": lambda: _ok([]),
@@ -797,6 +806,7 @@ class TestAnalyzeJsonOutput:
             "regions",
             "inventory",
             "costs",
+            "cost_forecast",
             "cost_anomalies",
             "ri_sp_coverage",
             "security_findings",
@@ -1033,6 +1043,7 @@ class TestAnalyzeJsonOutput:
             "regions",
             "inventory",
             "costs",
+            "cost_forecast",
             "cost_anomalies",
             "ri_sp_coverage",
             "security_findings",
