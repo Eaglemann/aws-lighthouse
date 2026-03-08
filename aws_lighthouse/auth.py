@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 import boto3
 import typer
 from botocore.config import Config
-from botocore.exceptions import ClientError, NoCredentialsError
+from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError
 
 from .logger import logger
 
@@ -123,7 +123,7 @@ class AuthManager:
             self._session = session
             logger.success(f"Successfully authenticated as: {identity['Arn']}")
 
-        except Exception as e:
+        except (ClientError, BotoCoreError, ValueError) as e:
             logger.error(f"Authentication failed: {str(e)}")
             raise typer.Exit(code=1) from e
 
