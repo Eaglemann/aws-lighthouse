@@ -312,3 +312,20 @@ def test_lambda_api_error_doesnt_break_other_findings():
     # RDS finding still returned despite Lambda error
     assert any(f["resource_type"] == "RDS" for f in findings)
     assert not any(f["resource_type"] == "Lambda" for f in findings)
+
+
+# HIGH-9: Skipped Lambda resources surface a warning
+def test_lambda_per_function_fallback_failure_logs_warning():
+    """When per-function tag lookup fails, the skipped name must appear in a logger.warn call."""
+    tagging = MagicMock()
+    tagging.get_paginator.side_effect = BotoCoreError()
+    lmb = _make_lambda([_FN])
+    lmb.list_tags.side_effect = BotoCoreError()
+
+    with patch(f"{MOD}.logger.warn") as mock_warn:
+        _run(lmb=lmb, tagging=tagging, required_tags=["Owner"])
+
+    # A warning mentioning the skipped function name must be emitted
+    assert mock_warn.called, "Expected logger.warn to be called for skipped Lambda"
+    warn_text = mock_warn.call_args.args[0]
+    assert "my-fn" in warn_text or "Skipped" in warn_text
