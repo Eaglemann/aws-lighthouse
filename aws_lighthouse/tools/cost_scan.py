@@ -1,3 +1,4 @@
+import os
 from datetime import UTC, datetime, timedelta
 
 from botocore.exceptions import BotoCoreError, ClientError
@@ -12,7 +13,7 @@ from ..scan_contract import (
 )
 from ..types import CostFinding
 
-_SNAPSHOT_AGE_DAYS = 90
+_SNAPSHOT_AGE_DAYS = int(os.getenv("LIGHTHOUSE_SNAPSHOT_AGE_DAYS", "90"))
 
 
 def _check_unattached_ebs(ec2, region: str | None = None):
