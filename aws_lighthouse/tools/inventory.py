@@ -1,3 +1,4 @@
+import os
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -8,7 +9,7 @@ from ..logger import logger
 from ..scan_contract import error_result, ok_result, scan_error_from_exception
 from ..types import ScanResult
 
-_LAMBDA_STALE_DAYS = 180
+_LAMBDA_STALE_DAYS = int(os.getenv("LIGHTHOUSE_LAMBDA_STALE_DAYS", "180"))
 
 
 def get_s3_inventory() -> ScanResult:
