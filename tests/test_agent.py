@@ -5,13 +5,16 @@ and the approval_node approval/denial paths.
 
 from unittest.mock import MagicMock, patch
 
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from aws_lighthouse.agent import (
     OLLAMA_MODEL_NAME,
     SAFE_TOOLS,
     _classify_tool_result,
     _normalize_schema_like_args,
+    _parse_severity_filter,
+    _parse_source_kind_filter,
+    _parse_status_filter,
     _record_tool_execution_results,
     _route_after_approval,
     approval_node,
@@ -23,6 +26,7 @@ from aws_lighthouse.agent import (
     tool_list_opportunities,
     tool_plan_opportunities,
     tool_update_opportunity,
+    tools,
     tools_node,
 )
 
@@ -665,3 +669,123 @@ def test_plan_opportunities_groups_results():
     )
     assert "groups" in payload
     assert "security" in payload
+
+
+# ---------------------------------------------------------------------------
+# CRIT-1: Guard state["messages"][-1] empty-state edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_should_require_approval_empty_messages_returns_end():
+    """An empty messages list must not raise IndexError — must return 'end'."""
+    assert should_require_approval({"messages": []}) == "end"
+
+
+def test_approval_node_empty_messages_returns_not_approved():
+    """approval_node with empty messages must return approved=False without crashing."""
+    result = approval_node({"messages": []})
+    assert result.get("approved") is False
+
+
+def test_should_require_approval_non_ai_message_returns_end():
+    """A HumanMessage as the last message should not trigger approval."""
+    state = {"messages": [HumanMessage(content="hello")]}
+    assert should_require_approval(state) == "end"
+
+
+# ---------------------------------------------------------------------------
+# HIGH-2: isinstance(AIMessage) guard in approval_node
+# ---------------------------------------------------------------------------
+
+
+def test_approval_node_non_ai_message_returns_not_approved():
+    """approval_node must handle non-AIMessage last message gracefully."""
+    state = {"messages": [HumanMessage(content="hello")]}
+    result = approval_node(state)
+    assert result.get("approved") is False
+    assert result.get("messages") == []
+
+
+# ---------------------------------------------------------------------------
+# CRIT-2: Runtime validation in _parse_*_filter helpers
+# ---------------------------------------------------------------------------
+
+
+def test_parse_status_filter_accepts_valid_statuses():
+    result = _parse_status_filter("open,resolved")
+    assert result == ["open", "resolved"]
+
+
+def test_parse_status_filter_rejects_invalid_status():
+    import pytest
+
+    with pytest.raises(ValueError, match="Unknown opportunity status"):
+        _parse_status_filter("open,bogus_status")
+
+
+def test_parse_status_filter_empty_string_returns_none():
+    assert _parse_status_filter("") is None
+
+
+def test_parse_source_kind_filter_rejects_invalid_kind():
+    import pytest
+
+    with pytest.raises(ValueError, match="Unknown opportunity source kind"):
+        _parse_source_kind_filter("security,not_a_kind")
+
+
+def test_parse_severity_filter_accepts_valid_severities():
+    result = _parse_severity_filter("HIGH,LOW")
+    assert result == ["HIGH", "LOW"]
+
+
+def test_parse_severity_filter_rejects_invalid_severity():
+    import pytest
+
+    with pytest.raises(ValueError, match="Unknown severity"):
+        _parse_severity_filter("HIGH,CRITICAL")
+
+
+def test_list_opportunities_returns_error_on_invalid_status():
+    with patch(
+        "aws_lighthouse.agent.db_manager.get_latest_scan_activity",
+        return_value={
+            "recorded_at": "2026-03-06T11:00:00+00:00",
+            "account_id": "123456789012",
+            "scope_key": "multi-region:days=14",
+        },
+    ):
+        payload = tool_list_opportunities.invoke({"statuses": "open,not_real"})
+    import json
+
+    data = json.loads(payload)
+    assert "error" in data
+
+
+# ---------------------------------------------------------------------------
+# HIGH-3: Malformed JSON returns failed classification with warning
+# ---------------------------------------------------------------------------
+
+
+def test_classify_tool_result_malformed_json_returns_failed():
+    with patch("aws_lighthouse.agent.logger.warn") as mock_warn:
+        status, error = _classify_tool_result("{not valid json}")
+    assert status == "failed"
+    assert error is not None
+    assert "malformed" in error
+    mock_warn.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# HIGH-4: SAFE_TOOLS cross-check against actual tools list
+# ---------------------------------------------------------------------------
+
+
+def test_safe_tools_all_exist_in_tools_list():
+    """Every name in SAFE_TOOLS must correspond to a real tool in the tools list."""
+    tool_names = {t.name for t in tools}
+    unknown = SAFE_TOOLS - tool_names
+    assert not unknown, (
+        f"SAFE_TOOLS references tool(s) that don't exist: {unknown}. "
+        "This is a silent approval bypass — remove or rename to match."
+    )
