@@ -5,6 +5,7 @@ and the approval_node approval/denial paths.
 
 from unittest.mock import MagicMock, patch
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from aws_lighthouse.agent import (
@@ -29,6 +30,8 @@ from aws_lighthouse.agent import (
     tools,
     tools_node,
 )
+
+pytestmark = [pytest.mark.unit, pytest.mark.security]
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -789,3 +792,134 @@ def test_safe_tools_all_exist_in_tools_list():
         f"SAFE_TOOLS references tool(s) that don't exist: {unknown}. "
         "This is a silent approval bypass — remove or rename to match."
     )
+
+
+# ---------------------------------------------------------------------------
+# TEST-2: End-to-end state machine — full graph cycle
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_full_cycle_safe_tool_auto_approved_then_ends():
+    """
+    Simulate: agent calls a safe read-only tool → auto-approved → tool executes
+    → agent called again with result → ends.
+
+    Node sequence: agent → (should_require_approval='tools') → tools_node
+                   → agent → (should_require_approval='end').
+    The approval_node is never reached for safe-only calls.
+    """
+    safe_tc = {
+        "name": "tool_get_ec2_inventory",
+        "id": "call-safe-1",
+        "args": {"region": "us-east-1"},
+    }
+    tool_result_msg = ToolMessage(
+        content='[{"InstanceId":"i-abc","State":"running"}]',
+        tool_call_id="call-safe-1",
+    )
+    final_ai_msg = AIMessage(content="Found 1 running EC2 instance.", tool_calls=[])
+
+    # Turn 1: agent returns a safe tool call
+    turn1_ai = AIMessage(content="", tool_calls=[safe_tc])
+    state1 = {"messages": [HumanMessage(content="List my EC2 instances"), turn1_ai]}
+
+    # safe tool → routed directly to tools (no approval)
+    assert should_require_approval(state1) == "tools"
+
+    # tools_node executes the safe tool
+    tool_output = {"messages": [tool_result_msg]}
+    with (
+        patch("aws_lighthouse.agent._tool_node.invoke", return_value=tool_output),
+        patch("aws_lighthouse.agent.db_manager.record_audit_log"),
+        patch("aws_lighthouse.agent.db_manager.update_audit_log_result"),
+    ):
+        tools_result = tools_node(state1)
+
+    assert tools_result == tool_output
+
+    # Turn 2: agent receives tool result and decides to end (no tool calls)
+    state2 = {
+        "messages": [
+            HumanMessage(content="List my EC2 instances"),
+            turn1_ai,
+            tool_result_msg,
+            final_ai_msg,
+        ]
+    }
+    assert should_require_approval(state2) == "end"
+
+
+@pytest.mark.integration
+def test_full_cycle_destructive_tool_denied_returns_to_agent():
+    """
+    Simulate: agent calls a destructive tool → approval_node shown → user denies
+    → rejections injected → routed back to agent → agent replies without tools → ends.
+
+    Node sequence: agent → (should_require_approval='approval') → approval_node
+                   [denied] → _route_after_approval='agent' → agent → end.
+    """
+    destructive_tc = {
+        "name": "terminate_ec2",
+        "id": "call-destr-1",
+        "args": {"instance_ids": ["i-badcafe"]},
+    }
+    # Turn 1: agent calls a destructive tool
+    agent_msg = AIMessage(content="I will terminate the instance.", tool_calls=[destructive_tc])
+    state = {"messages": [HumanMessage(content="Terminate i-badcafe"), agent_msg]}
+
+    # destructive tool → requires approval
+    assert should_require_approval(state) == "approval"
+
+    # User denies
+    with patch("typer.prompt", return_value="n"), patch("aws_lighthouse.agent.logger"):
+        approval_result = approval_node(state)
+
+    assert approval_result["approved"] is False
+    rejections = approval_result["messages"]
+    assert len(rejections) == 1
+    assert rejections[0].tool_call_id == "call-destr-1"
+
+    # After denial, route is back to agent (not tools)
+    merged_state = {**state, **approval_result}
+    assert _route_after_approval(merged_state) == "agent"
+
+    # Agent replies acknowledging the denial — no more tool calls
+    ack_msg = AIMessage(content="Understood, I will not terminate the instance.", tool_calls=[])
+    final_state = {
+        "messages": [
+            HumanMessage(content="Terminate i-badcafe"),
+            agent_msg,
+            *rejections,
+            ack_msg,
+        ]
+    }
+    assert should_require_approval(final_state) == "end"
+
+
+@pytest.mark.integration
+def test_full_cycle_safe_plus_destructive_batch_requires_approval():
+    """
+    A batch with one safe and one destructive tool must still require approval.
+    The safe tool must NOT auto-execute if any sibling is destructive.
+    """
+    tcs = [
+        {"name": "tool_get_ec2_inventory", "id": "call-safe", "args": {}},
+        {"name": "terminate_ec2", "id": "call-destr", "args": {"instance_ids": ["i-1"]}},
+    ]
+    ai_msg = AIMessage(content="", tool_calls=tcs)
+    state = {"messages": [HumanMessage(content="Inspect then terminate"), ai_msg]}
+
+    # Mixed batch must go to approval, NOT directly to tools
+    route = should_require_approval(state)
+    assert route == "approval", (
+        f"Mixed safe+destructive batch routed to {route!r} instead of 'approval'. "
+        "This would let the destructive tool bypass the approval gate."
+    )
+
+    # User approves
+    with patch("typer.prompt", return_value="y"), patch("aws_lighthouse.agent.logger"):
+        approval_result = approval_node(state)
+
+    assert approval_result.get("approved") is True
+    assert _route_after_approval({**state, **approval_result}) == "tools"
