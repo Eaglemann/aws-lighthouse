@@ -171,7 +171,14 @@ def get_ri_sp_coverage(days: int = 30) -> ScanResult:
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = [executor.submit(fn, ce, period) for fn in _FETCHERS]
         for future in as_completed(futures):
-            result = future.result()
+            try:
+                result = future.result()
+            except Exception as e:
+                logger.error(f"Unexpected error in RI/SP coverage fetch: {e}")
+                errors.append(
+                    scan_error_from_exception(service="ce", operation="unknown", exc=e)
+                )
+                continue
             payload = result.get("data", {})
             if isinstance(payload, dict):
                 result_data.update(payload)
