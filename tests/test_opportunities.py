@@ -88,9 +88,10 @@ def test_sync_promotes_all_supported_sources_into_opportunities(db):
             cost_anomalies=[
                 {
                     "service": "AmazonEC2",
-                    "baseline_7d": 100.0,
-                    "recent_7d": 220.0,
+                    "baseline_30d": 100.0,
+                    "recent_30d": 220.0,
                     "pct_change": 120.0,
+                    "detection_type": "spike",
                 }
             ],
             cost_waste=[
