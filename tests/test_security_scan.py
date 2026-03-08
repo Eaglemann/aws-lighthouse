@@ -763,3 +763,68 @@ def test_run_security_scan_guardduty_disabled_produces_finding():
     gd_findings = [f for f in findings if f["resource"] == "guardduty"]
     assert len(gd_findings) == 1
     assert gd_findings[0]["severity"] == "HIGH"
+
+
+# HIGH-8: Credential report generated once and shared between mfa+key-age checks
+def test_run_security_scan_credential_report_generated_once():
+    """run_security_scan must call generate_credential_report exactly once,
+    not once per check (which would incur ~40 s each)."""
+    iam, ec2, s3, ct, gd = _make_clean_clients()
+
+    def _dispatch(svc, region=None):
+        return {"iam": iam, "ec2": ec2, "s3": s3, "cloudtrail": ct, "guardduty": gd}[
+            svc
+        ]
+
+    with (
+        patch(f"{MOD}.get_aws_client", side_effect=_dispatch),
+        patch(f"{MOD}.get_client", side_effect=_dispatch),
+    ):
+        run_security_scan(s3s=[{"BucketName": "b"}], rdss=[], include_global=True)
+
+    # generate_credential_report should be called exactly once (shared report)
+    assert iam.generate_credential_report.call_count == 1, (
+        f"Expected 1 call to generate_credential_report, got "
+        f"{iam.generate_credential_report.call_count}. "
+        "Shared credential report is not working — this doubles scan time."
+    )
+
+
+def test_check_iam_users_mfa_accepts_pre_fetched_report():
+    """_check_iam_users_mfa must use the supplied report and not create a new IAM client."""
+    report = {
+        "ok": True,
+        "data": [{"user": "alice", "password_enabled": "true", "mfa_active": "false"}],
+        "errors": [],
+    }
+    with patch(f"{MOD}.get_aws_client") as mock_client:
+        findings = _data(_check_iam_users_mfa(report))
+
+    # No IAM client should be created when the report is pre-fetched
+    mock_client.assert_not_called()
+    assert len(findings) == 1
+    assert "alice" in findings[0]["finding"]
+
+
+def test_check_iam_key_age_accepts_pre_fetched_report():
+    """_check_iam_key_age must use the supplied report and not create a new IAM client."""
+    old_ts = (datetime.now(UTC) - timedelta(days=100)).isoformat()
+    report = {
+        "ok": True,
+        "data": [
+            {
+                "user": "bob",
+                "access_key_1_active": "true",
+                "access_key_1_last_rotated": old_ts,
+                "access_key_2_active": "false",
+                "access_key_2_last_rotated": "N/A",
+            }
+        ],
+        "errors": [],
+    }
+    with patch(f"{MOD}.get_aws_client") as mock_client:
+        findings = _data(_check_iam_key_age(report))
+
+    mock_client.assert_not_called()
+    assert len(findings) == 1
+    assert "bob" in findings[0]["finding"]
