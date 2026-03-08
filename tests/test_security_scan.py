@@ -10,6 +10,7 @@ from aws_lighthouse.tools.security_scan import (
     _check_iam_key_age,
     _check_iam_users_mfa,
     _check_imdsv2,
+    _check_kms_rotation,
     _check_open_security_groups,
     _check_public_rds,
     _check_root_mfa,
@@ -142,6 +143,103 @@ def test_open_sg_api_error_returns_empty():
     ec2.get_paginator.side_effect = make_client_error("AccessDenied")
     findings = _data(_check_open_security_groups(ec2))
     assert findings == []
+
+
+def test_open_sg_mysql_port_flagged():
+    ec2 = _make_sg_ec2(
+        [
+            {
+                "GroupId": "sg-mysql",
+                "GroupName": "db-open",
+                "IpPermissions": [
+                    {
+                        "FromPort": 3306,
+                        "ToPort": 3306,
+                        "IpProtocol": "tcp",
+                        "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
+                        "Ipv6Ranges": [],
+                    }
+                ],
+            }
+        ]
+    )
+    findings = _data(_check_open_security_groups(ec2))
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "HIGH"
+    assert "3306" in findings[0]["finding"]
+    assert "MySQL" in findings[0]["finding"]
+
+
+def test_open_sg_postgres_port_flagged():
+    ec2 = _make_sg_ec2(
+        [
+            {
+                "GroupId": "sg-pg",
+                "GroupName": "pg-open",
+                "IpPermissions": [
+                    {
+                        "FromPort": 5432,
+                        "ToPort": 5432,
+                        "IpProtocol": "tcp",
+                        "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
+                        "Ipv6Ranges": [],
+                    }
+                ],
+            }
+        ]
+    )
+    findings = _data(_check_open_security_groups(ec2))
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "HIGH"
+    assert "5432" in findings[0]["finding"]
+    assert "PostgreSQL" in findings[0]["finding"]
+
+
+def test_open_sg_all_ports_flagged_critical():
+    ec2 = _make_sg_ec2(
+        [
+            {
+                "GroupId": "sg-allports",
+                "GroupName": "wide-open",
+                "IpPermissions": [
+                    {
+                        "FromPort": 0,
+                        "ToPort": 65535,
+                        "IpProtocol": "tcp",
+                        "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
+                        "Ipv6Ranges": [],
+                    }
+                ],
+            }
+        ]
+    )
+    findings = _data(_check_open_security_groups(ec2))
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "CRITICAL"
+    assert "all ports" in findings[0]["finding"].lower()
+    # Should not also generate per-port findings for 22, 3389, etc.
+
+
+def test_open_sg_all_traffic_protocol_minus1_flagged_critical():
+    ec2 = _make_sg_ec2(
+        [
+            {
+                "GroupId": "sg-all-traffic",
+                "GroupName": "all-traffic",
+                "IpPermissions": [
+                    {
+                        "IpProtocol": "-1",
+                        "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
+                        "Ipv6Ranges": [],
+                    }
+                ],
+            }
+        ]
+    )
+    findings = _data(_check_open_security_groups(ec2))
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "CRITICAL"
+    assert "all traffic" in findings[0]["finding"].lower()
 
 
 # ── _get_credential_report ────────────────────────────────────────────────────
@@ -704,22 +802,29 @@ def _make_clean_clients():
     gd.list_detectors.return_value = {"DetectorIds": ["det-111"]}
     gd.get_detector.return_value = {"Status": "ENABLED"}
 
-    return iam, ec2, s3, ct, gd
+    # KMS: no customer-managed keys (clean environment)
+    kms = MagicMock()
+    kms.get_paginator.return_value.paginate.return_value = [{"Keys": []}]
+
+    return iam, ec2, s3, ct, gd, kms
+
+
+def _make_dispatch(iam, ec2, s3, ct, gd, kms):
+    def _dispatch(svc, region=None):
+        return {
+            "iam": iam, "ec2": ec2, "s3": s3,
+            "cloudtrail": ct, "guardduty": gd, "kms": kms,
+        }[svc]
+    return _dispatch
 
 
 def test_run_security_scan_clean_environment_no_findings():
-    iam, ec2, s3, ct, gd = _make_clean_clients()
-
-    def _dispatch(svc, region=None):
-        return {"iam": iam, "ec2": ec2, "s3": s3, "cloudtrail": ct, "guardduty": gd}[
-            svc
-        ]
-
+    iam, ec2, s3, ct, gd, kms = _make_clean_clients()
     s3s = [{"BucketName": "my-bucket"}]
 
     with (
-        patch(f"{MOD}.get_aws_client", side_effect=_dispatch),
-        patch(f"{MOD}.get_client", side_effect=_dispatch),
+        patch(f"{MOD}.get_aws_client", side_effect=_make_dispatch(iam, ec2, s3, ct, gd, kms)),
+        patch(f"{MOD}.get_client", side_effect=_make_dispatch(iam, ec2, s3, ct, gd, kms)),
     ):
         findings = _data(run_security_scan(s3s=s3s, rdss=[], include_global=True))
 
@@ -727,18 +832,13 @@ def test_run_security_scan_clean_environment_no_findings():
 
 
 def test_run_security_scan_include_global_false_skips_root_mfa():
-    iam, ec2, s3, ct, gd = _make_clean_clients()
+    iam, ec2, s3, ct, gd, kms = _make_clean_clients()
     # If include_global were True, this would produce a finding
     iam.get_account_summary.return_value = {"SummaryMap": {"AccountMFAEnabled": 0}}
 
-    def _dispatch(svc, region=None):
-        return {"iam": iam, "ec2": ec2, "s3": s3, "cloudtrail": ct, "guardduty": gd}[
-            svc
-        ]
-
     with (
-        patch(f"{MOD}.get_aws_client", side_effect=_dispatch),
-        patch(f"{MOD}.get_client", side_effect=_dispatch),
+        patch(f"{MOD}.get_aws_client", side_effect=_make_dispatch(iam, ec2, s3, ct, gd, kms)),
+        patch(f"{MOD}.get_client", side_effect=_make_dispatch(iam, ec2, s3, ct, gd, kms)),
     ):
         findings = _data(run_security_scan(s3s=[], rdss=[], include_global=False))
 
@@ -746,17 +846,12 @@ def test_run_security_scan_include_global_false_skips_root_mfa():
 
 
 def test_run_security_scan_guardduty_disabled_produces_finding():
-    iam, ec2, s3, ct, gd = _make_clean_clients()
+    iam, ec2, s3, ct, gd, kms = _make_clean_clients()
     gd.list_detectors.return_value = {"DetectorIds": []}
 
-    def _dispatch(svc, region=None):
-        return {"iam": iam, "ec2": ec2, "s3": s3, "cloudtrail": ct, "guardduty": gd}[
-            svc
-        ]
-
     with (
-        patch(f"{MOD}.get_aws_client", side_effect=_dispatch),
-        patch(f"{MOD}.get_client", side_effect=_dispatch),
+        patch(f"{MOD}.get_aws_client", side_effect=_make_dispatch(iam, ec2, s3, ct, gd, kms)),
+        patch(f"{MOD}.get_client", side_effect=_make_dispatch(iam, ec2, s3, ct, gd, kms)),
     ):
         findings = _data(run_security_scan(s3s=[], rdss=[], include_global=False))
 
@@ -769,16 +864,11 @@ def test_run_security_scan_guardduty_disabled_produces_finding():
 def test_run_security_scan_credential_report_generated_once():
     """run_security_scan must call generate_credential_report exactly once,
     not once per check (which would incur ~40 s each)."""
-    iam, ec2, s3, ct, gd = _make_clean_clients()
-
-    def _dispatch(svc, region=None):
-        return {"iam": iam, "ec2": ec2, "s3": s3, "cloudtrail": ct, "guardduty": gd}[
-            svc
-        ]
+    iam, ec2, s3, ct, gd, kms = _make_clean_clients()
 
     with (
-        patch(f"{MOD}.get_aws_client", side_effect=_dispatch),
-        patch(f"{MOD}.get_client", side_effect=_dispatch),
+        patch(f"{MOD}.get_aws_client", side_effect=_make_dispatch(iam, ec2, s3, ct, gd, kms)),
+        patch(f"{MOD}.get_client", side_effect=_make_dispatch(iam, ec2, s3, ct, gd, kms)),
     ):
         run_security_scan(s3s=[{"BucketName": "b"}], rdss=[], include_global=True)
 
@@ -828,3 +918,96 @@ def test_check_iam_key_age_accepts_pre_fetched_report():
     mock_client.assert_not_called()
     assert len(findings) == 1
     assert "bob" in findings[0]["finding"]
+
+
+# ── _check_kms_rotation ───────────────────────────────────────────────────────
+
+
+def _make_kms(keys=None, rotation_enabled=True, key_manager="CUSTOMER", key_state="Enabled", key_spec="SYMMETRIC_DEFAULT"):
+    """Return a KMS mock for a single key with the given attributes."""
+    kms = MagicMock()
+    key_id = "key-123"
+    kms.get_paginator.return_value.paginate.return_value = [
+        {"Keys": [{"KeyId": key_id}] if keys is None else keys}
+    ]
+    kms.describe_key.return_value = {
+        "KeyMetadata": {
+            "KeyId": key_id,
+            "KeyManager": key_manager,
+            "KeyState": key_state,
+            "KeySpec": key_spec,
+        }
+    }
+    kms.get_key_rotation_status.return_value = {"KeyRotationEnabled": rotation_enabled}
+    return kms, key_id
+
+
+def test_kms_rotation_disabled_flagged():
+    kms, key_id = _make_kms(rotation_enabled=False)
+    with patch(f"{MOD}.get_client", return_value=kms):
+        result = _check_kms_rotation()
+    findings = _data(result)
+    assert result["ok"] is True
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "MEDIUM"
+    assert key_id in findings[0]["finding"]
+    assert "rotation" in findings[0]["finding"].lower()
+
+
+def test_kms_rotation_enabled_not_flagged():
+    kms, _ = _make_kms(rotation_enabled=True)
+    with patch(f"{MOD}.get_client", return_value=kms):
+        result = _check_kms_rotation()
+    assert _data(result) == []
+
+
+def test_kms_aws_managed_key_skipped():
+    kms, _ = _make_kms(key_manager="AWS")
+    with patch(f"{MOD}.get_client", return_value=kms):
+        result = _check_kms_rotation()
+    assert _data(result) == []
+    kms.get_key_rotation_status.assert_not_called()
+
+
+def test_kms_disabled_key_skipped():
+    kms, _ = _make_kms(key_state="PendingDeletion")
+    with patch(f"{MOD}.get_client", return_value=kms):
+        result = _check_kms_rotation()
+    assert _data(result) == []
+    kms.get_key_rotation_status.assert_not_called()
+
+
+def test_kms_asymmetric_key_skipped():
+    kms, _ = _make_kms(key_spec="RSA_2048")
+    with patch(f"{MOD}.get_client", return_value=kms):
+        result = _check_kms_rotation()
+    assert _data(result) == []
+    kms.get_key_rotation_status.assert_not_called()
+
+
+def test_kms_list_keys_error_returns_error_result():
+    kms = MagicMock()
+    kms.get_paginator.side_effect = make_client_error("AccessDenied")
+    with patch(f"{MOD}.get_client", return_value=kms):
+        result = _check_kms_rotation()
+    assert result["ok"] is False
+    assert _data(result) == []
+
+
+def test_kms_describe_key_error_continues_to_next_key():
+    kms = MagicMock()
+    kms.get_paginator.return_value.paginate.return_value = [
+        {"Keys": [{"KeyId": "key-bad"}, {"KeyId": "key-good"}]}
+    ]
+    kms.describe_key.side_effect = [
+        make_client_error("AccessDenied"),  # key-bad fails
+        {"KeyMetadata": {"KeyId": "key-good", "KeyManager": "CUSTOMER", "KeyState": "Enabled", "KeySpec": "SYMMETRIC_DEFAULT"}},
+    ]
+    kms.get_key_rotation_status.return_value = {"KeyRotationEnabled": False}
+    with patch(f"{MOD}.get_client", return_value=kms):
+        result = _check_kms_rotation()
+    findings = _data(result)
+    # key-good still produces a finding despite key-bad erroring
+    assert len(findings) == 1
+    assert "key-good" in findings[0]["finding"]
+    assert result["ok"] is False  # errors list is non-empty
