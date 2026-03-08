@@ -16,6 +16,16 @@ _DANGEROUS_AWS_MANAGED: dict[str, str] = {
     "PowerUserAccess": "MEDIUM",
 }
 
+# Specific actions that grant credential-theft or lateral-movement capabilities
+# even without a full wildcard.  Detected as HIGH when combined with Resource:*.
+_HIGH_RISK_ACTIONS: frozenset[str] = frozenset(
+    {
+        "iam:*",  # can create admin users / escalate privilege
+        "sts:AssumeRole",  # can assume any role in the account
+        "logs:*",  # can delete CloudTrail log streams to cover tracks
+    }
+)
+
 
 def _normalise(value: Any) -> list[str]:
     """Ensure Action / Resource values are always a list of strings."""
@@ -51,6 +61,9 @@ def _check_statements(statements: Any) -> str | None:
 
         if "*" in actions:
             return "HIGH"  # can't get worse — short-circuit
+
+        if any(a in _HIGH_RISK_ACTIONS for a in actions):
+            return "HIGH"
 
         if any(a.endswith(":*") for a in actions):
             highest = "MEDIUM"
