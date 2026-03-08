@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 
 from ..auth import get_client
 from ..logger import logger
+from .remediation_actions import delete_ebs_volume
 
 
 class TerminateEC2Input(BaseModel):
@@ -78,17 +79,10 @@ def delete_ebs(args: DeleteEBSInput) -> str:
     """
     deleted: list[str] = []
     failed: list[str] = []
-    try:
-        ec2 = get_client("ec2")
-    except (ClientError, BotoCoreError) as e:
-        logger.error(f"Failed to initialise EC2 client: {str(e)}")
-        return f"Error: {str(e)}"
     for vid in args.volume_ids:
-        try:
-            ec2.delete_volume(VolumeId=vid)
+        if delete_ebs_volume(vid):
             deleted.append(vid)
-        except (ClientError, BotoCoreError) as e:
-            logger.error(f"Failed to delete EBS volume {vid}: {str(e)}")
+        else:
             failed.append(vid)
     if deleted:
         logger.success(f"Successfully deleted {len(deleted)} EBS volumes.")
