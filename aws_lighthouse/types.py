@@ -110,6 +110,23 @@ class CostAnomaly(TypedDict):
     detection_type: str
 
 
+class CostAttributionEvent(TypedDict):
+    """One CloudTrail event surfaced by get_cost_attribution()."""
+
+    event_name: str
+    actor: str
+    event_time: str  # ISO 8601
+    region: str
+
+
+class CostAttribution(TypedDict):
+    """Attribution result for one anomalous service."""
+
+    service: str
+    pct_change: float
+    events: list[CostAttributionEvent]
+
+
 class Opportunity(TypedDict):
     """One persistent local opportunity synced from scan findings."""
 
