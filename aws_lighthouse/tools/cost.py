@@ -108,12 +108,8 @@ def get_cost_forecast(forecast_days: int = 30) -> ScanResult:
         )
         total = response.get("Total", {})
         prediction = response.get("ForecastResultsByTime", [])
-        lower = min(
-            (float(p.get("MeanValue", 0)) for p in prediction), default=0.0
-        )
-        upper = max(
-            (float(p.get("MeanValue", 0)) for p in prediction), default=0.0
-        )
+        lower = min((float(p.get("MeanValue", 0)) for p in prediction), default=0.0)
+        upper = max((float(p.get("MeanValue", 0)) for p in prediction), default=0.0)
         return ok_result(
             {
                 **base_data,
@@ -127,6 +123,8 @@ def get_cost_forecast(forecast_days: int = 30) -> ScanResult:
         return error_result(
             data=base_data,
             errors=[
-                scan_error_from_exception(service="ce", operation="GetCostForecast", exc=e)
+                scan_error_from_exception(
+                    service="ce", operation="GetCostForecast", exc=e
+                )
             ],
         )

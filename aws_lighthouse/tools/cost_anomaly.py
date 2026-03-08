@@ -12,14 +12,18 @@ from ..types import CostAnomaly, ScanResult
 # Avoids noise from $0.01 → $0.02 triggering a 100% "anomaly".
 _MIN_BASELINE_USD = 1.0
 
-_DEFAULT_ANOMALY_THRESHOLD_PCT = float(os.getenv("LIGHTHOUSE_ANOMALY_THRESHOLD_PCT", "50.0"))
+_DEFAULT_ANOMALY_THRESHOLD_PCT = float(
+    os.getenv("LIGHTHOUSE_ANOMALY_THRESHOLD_PCT", "50.0")
+)
 
 # Creep threshold: gradual growth below the spike threshold but above this
 # value is flagged as a slow-burn cost increase.
 _CREEP_THRESHOLD_PCT = 20.0
 
 
-def detect_cost_anomalies(threshold_pct: float = _DEFAULT_ANOMALY_THRESHOLD_PCT) -> ScanResult:
+def detect_cost_anomalies(
+    threshold_pct: float = _DEFAULT_ANOMALY_THRESHOLD_PCT,
+) -> ScanResult:
     """
     Compare the last 30 days of per-service spend against the prior 30-day
     baseline to detect spikes and gradual creep.
