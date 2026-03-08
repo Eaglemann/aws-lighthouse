@@ -92,8 +92,22 @@ def _check_root_mfa() -> ScanResult:
     return ok_result([])
 
 
+_SENSITIVE_PORTS: dict[int, str] = {
+    22: "SSH",
+    3389: "RDP",
+    3306: "MySQL",
+    5432: "PostgreSQL",
+}
+
+
 def _check_open_security_groups(ec2, region: str | None = None) -> ScanResult:
-    """Flag security groups that allow unrestricted ingress on SSH (22) or RDP (3389)."""
+    """Flag SGs that allow unrestricted ingress on sensitive ports or all traffic.
+
+    Checks (in priority order per permission rule):
+      - All-traffic rules (IpProtocol="-1"): CRITICAL
+      - All-ports rules (0-65535): CRITICAL
+      - Specific ports (SSH/22, RDP/3389, MySQL/3306, PostgreSQL/5432): HIGH
+    """
     findings: list[SecurityFinding] = []
     try:
         paginator = ec2.get_paginator("describe_security_groups")
@@ -113,15 +127,44 @@ def _check_open_security_groups(ec2, region: str | None = None) -> ScanResult:
                     ]
                     if not open_cidrs:
                         continue
-                    for port in (22, 3389):
+                    cidr_str = ", ".join(open_cidrs)
+                    sg_name = sg.get("GroupName", sg["GroupId"])
+                    # All-traffic rule (protocol -1 = all protocols/ports)
+                    if perm.get("IpProtocol") == "-1":
+                        findings.append(
+                            {
+                                "severity": "CRITICAL",
+                                "resource": sg["GroupId"],
+                                "finding": (
+                                    f"Security group '{sg_name}' allows all traffic "
+                                    f"from {cidr_str}"
+                                ),
+                            }
+                        )
+                        continue
+                    # All-ports TCP/UDP rule (0-65535)
+                    if from_port == 0 and to_port == 65535:
+                        findings.append(
+                            {
+                                "severity": "CRITICAL",
+                                "resource": sg["GroupId"],
+                                "finding": (
+                                    f"Security group '{sg_name}' allows all ports "
+                                    f"from {cidr_str}"
+                                ),
+                            }
+                        )
+                        continue
+                    # Specific sensitive ports
+                    for port, service in _SENSITIVE_PORTS.items():
                         if from_port <= port <= to_port:
                             findings.append(
                                 {
                                     "severity": "HIGH",
                                     "resource": sg["GroupId"],
                                     "finding": (
-                                        f"Security group '{sg.get('GroupName')}' allows port {port} "
-                                        f"from {', '.join(open_cidrs)}"
+                                        f"Security group '{sg_name}' allows port {port} ({service}) "
+                                        f"from {cidr_str}"
                                     ),
                                 }
                             )
@@ -544,6 +587,75 @@ def _check_guardduty_enabled(gd, region: str | None = None) -> ScanResult:
     return ok_result([])
 
 
+def _check_kms_rotation(region: str | None = None) -> ScanResult:
+    """Flag customer-managed KMS symmetric keys with automatic rotation disabled.
+
+    Only checks keys with KeyManager=CUSTOMER, KeyState=Enabled, and
+    KeySpec=SYMMETRIC_DEFAULT. AWS-managed keys and asymmetric keys are skipped
+    (asymmetric keys do not support automatic rotation via the API).
+    """
+    findings: list[SecurityFinding] = []
+    errors: list[Any] = []
+    try:
+        kms = get_client("kms", region)
+        paginator = kms.get_paginator("list_keys")
+        for page in paginator.paginate():
+            for key_entry in page.get("Keys", []):
+                key_id = key_entry["KeyId"]
+                try:
+                    meta = kms.describe_key(KeyId=key_id)["KeyMetadata"]
+                except (ClientError, BotoCoreError) as e:
+                    logger.error(f"Failed to describe KMS key {key_id}: {e}")
+                    errors.append(
+                        scan_error_from_exception(
+                            service="kms", operation="DescribeKey", exc=e, region=region
+                        )
+                    )
+                    continue
+                if meta.get("KeyManager") != "CUSTOMER":
+                    continue
+                if meta.get("KeyState") != "Enabled":
+                    continue
+                if meta.get("KeySpec", "SYMMETRIC_DEFAULT") != "SYMMETRIC_DEFAULT":
+                    continue
+                try:
+                    rotation = kms.get_key_rotation_status(KeyId=key_id)
+                    if not rotation.get("KeyRotationEnabled"):
+                        findings.append(
+                            {
+                                "severity": "MEDIUM",
+                                "resource": key_id,
+                                "finding": (
+                                    f"KMS CMK '{key_id}' does not have automatic"
+                                    " key rotation enabled"
+                                ),
+                            }
+                        )
+                except (ClientError, BotoCoreError) as e:
+                    logger.error(
+                        f"Failed to check rotation status for KMS key {key_id}: {e}"
+                    )
+                    errors.append(
+                        scan_error_from_exception(
+                            service="kms",
+                            operation="GetKeyRotationStatus",
+                            exc=e,
+                            region=region,
+                        )
+                    )
+    except (ClientError, BotoCoreError) as e:
+        logger.error(f"Failed to list KMS keys: {e}")
+        return error_result(
+            data=findings,
+            errors=[
+                scan_error_from_exception(
+                    service="kms", operation="ListKeys", exc=e, region=region
+                )
+            ],
+        )
+    return error_result(data=findings, errors=errors) if errors else ok_result(findings)
+
+
 def run_security_scan(
     s3s: list[dict[str, Any]],
     rdss: list[dict[str, Any]],
@@ -577,4 +689,5 @@ def run_security_scan(
     results.append(_check_public_rds(rdss))
     results.append(_check_cloudtrail(_cl("cloudtrail"), region))
     results.append(_check_guardduty_enabled(_cl("guardduty"), region))
+    results.append(_check_kms_rotation(region))
     return merge_list_results(results)
