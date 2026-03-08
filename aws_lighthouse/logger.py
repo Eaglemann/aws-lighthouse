@@ -1,3 +1,4 @@
+import threading
 import traceback
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -14,6 +15,7 @@ class LighthouseLogger:
     def __init__(self) -> None:
         self.console = Console()
         self._error_capture_stack: list[list[str]] = []
+        self._stack_lock = threading.Lock()
         self._log_dir = Path.home() / ".aws-lighthouse" / "logs"
         self._log_path = self._log_dir / "aws-lighthouse.log"
 
@@ -78,8 +80,9 @@ class LighthouseLogger:
         if display:
             self.console.print(f"[red]✗[/red] [bold red]{message}[/bold red]")
             self.console.print(f"[dim]Log file: {self.get_log_path()}[/dim]")
-            if self._error_capture_stack:
-                self._error_capture_stack[-1].append(message)
+            with self._stack_lock:
+                if self._error_capture_stack:
+                    self._error_capture_stack[-1].append(message)
         self._write_log_entry("ERROR", message, detail)
 
     def record_exception(self, message: str, exc: BaseException) -> str:
@@ -88,8 +91,9 @@ class LighthouseLogger:
         traceback_text = "".join(
             traceback.format_exception(type(exc), exc, exc.__traceback__)
         )
-        if self._error_capture_stack:
-            self._error_capture_stack[-1].append(summary)
+        with self._stack_lock:
+            if self._error_capture_stack:
+                self._error_capture_stack[-1].append(summary)
         self._write_log_entry("ERROR", summary, traceback_text)
         return str(self.get_log_path())
 
@@ -113,11 +117,13 @@ class LighthouseLogger:
     def capture_errors(self) -> Generator[list[str], None, None]:
         """Capture logger.error messages emitted inside this context."""
         buf: list[str] = []
-        self._error_capture_stack.append(buf)
+        with self._stack_lock:
+            self._error_capture_stack.append(buf)
         try:
             yield buf
         finally:
-            self._error_capture_stack.pop()
+            with self._stack_lock:
+                self._error_capture_stack.pop()
 
 
 logger = LighthouseLogger()
