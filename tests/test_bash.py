@@ -1,13 +1,21 @@
+import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from aws_lighthouse.tools.bash import (
     ExecuteBashInput,
+    ReadFileInput,
+    WriteFileInput,
     _is_blocked_path,
     _is_dangerous_command,
     execute_bash,
+    read_file,
+    write_file,
 )
+
+pytestmark = [pytest.mark.unit, pytest.mark.security]
 
 # ── _is_blocked_path — sensitive file/directory blocklist ─────────────────────
 
@@ -255,3 +263,147 @@ def test_execute_bash_command_substitution_is_not_executed():
     assert result["returncode"] == 0
     # With shell=False the literal string '$(whoami)' is passed to echo.
     assert "$(whoami)" in result["stdout"]
+
+
+def test_execute_bash_empty_command_is_blocked():
+    result = execute_bash(ExecuteBashInput(command=""))
+    assert result["returncode"] == -1
+    assert "empty command" in result["stderr"].lower()
+
+
+def test_execute_bash_timeout_returns_error():
+    with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("echo", 1)):
+        result = execute_bash(ExecuteBashInput(command="echo hi"))
+    assert result["returncode"] == -1
+    assert "timed out" in result["stderr"].lower()
+    assert result["error"] == "Timeout"
+
+
+def test_execute_bash_oserror_returns_error():
+    with patch("subprocess.run", side_effect=OSError("No such file or directory")):
+        result = execute_bash(ExecuteBashInput(command="echo hi"))
+    assert result["returncode"] == -1
+    assert "No such file or directory" in result["stderr"]
+
+
+# ── rm flag variations (denylist must catch all forms) ────────────────────────
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm -rf /",
+        "rm -fr /",
+        "rm --recursive /",
+        "rm --recursive /*",
+        "rm -r /",
+        "rm -R /",
+        "rm -rF /",
+    ],
+)
+def test_rm_flag_variations_are_blocked(command):
+    result = execute_bash(ExecuteBashInput(command=command))
+    assert result["returncode"] == -1
+    assert "Blocked" in result["stderr"]
+
+
+# ── _is_blocked_path — OSError / resolve failure ──────────────────────────────
+
+
+def test_blocked_path_oserror_falls_back_to_expanduser(tmp_path):
+    # Simulate a path that raises OSError during resolve (e.g. a broken symlink).
+    broken = tmp_path / "broken_link"
+    broken.symlink_to(tmp_path / "nonexistent_target")
+    # The broken symlink should NOT be blocked (it's in /tmp, not a sensitive location).
+    assert not _is_blocked_path(str(broken))
+
+
+# ── read_file ─────────────────────────────────────────────────────────────────
+
+
+def test_read_file_returns_contents(tmp_path):
+    f = tmp_path / "hello.txt"
+    f.write_text("hello world\n")
+    result = read_file(ReadFileInput(filepath=str(f)))
+    assert result == "hello world\n"
+
+
+def test_read_file_missing_returns_error(tmp_path):
+    result = read_file(ReadFileInput(filepath=str(tmp_path / "nonexistent.txt")))
+    assert result.startswith("Error:")
+    assert "does not exist" in result
+
+
+def test_read_file_blocked_path_returns_error():
+    result = read_file(ReadFileInput(filepath="~/.aws/credentials"))
+    assert "blocked" in result.lower()
+
+
+def test_read_file_max_lines_truncates(tmp_path):
+    f = tmp_path / "big.txt"
+    f.write_text("".join(f"line{i}\n" for i in range(20)))
+    result = read_file(ReadFileInput(filepath=str(f), max_lines=5))
+    assert "TRUNCATED" in result
+    assert "line4" in result
+    assert "line5" not in result
+
+
+def test_read_file_max_lines_none_returns_all(tmp_path):
+    f = tmp_path / "small.txt"
+    f.write_text("a\nb\nc\n")
+    result = read_file(ReadFileInput(filepath=str(f), max_lines=None))
+    assert "a\nb\nc\n" == result
+
+
+def test_read_file_permission_denied_returns_error(tmp_path):
+    f = tmp_path / "secret.txt"
+    f.write_text("secret")
+    f.chmod(0o000)
+    result = read_file(ReadFileInput(filepath=str(f)))
+    assert result.startswith("Error")
+    f.chmod(0o644)  # restore so tmp_path cleanup works
+
+
+# ── write_file ────────────────────────────────────────────────────────────────
+
+
+def test_write_file_creates_file(tmp_path):
+    dest = tmp_path / "output.txt"
+    result = write_file(WriteFileInput(filepath=str(dest), content="hello", overwrite=False))
+    assert "Successfully" in result
+    assert dest.read_text() == "hello"
+
+
+def test_write_file_blocked_path_returns_error():
+    result = write_file(WriteFileInput(filepath="~/.aws/test.txt", content="x"))
+    assert "blocked" in result.lower()
+
+
+def test_write_file_no_overwrite_when_exists(tmp_path):
+    f = tmp_path / "existing.txt"
+    f.write_text("original")
+    result = write_file(WriteFileInput(filepath=str(f), content="new", overwrite=False))
+    assert "Error" in result
+    assert f.read_text() == "original"
+
+
+def test_write_file_overwrite_when_flag_set(tmp_path):
+    f = tmp_path / "existing.txt"
+    f.write_text("original")
+    result = write_file(WriteFileInput(filepath=str(f), content="new content", overwrite=True))
+    assert "Successfully" in result
+    assert f.read_text() == "new content"
+
+
+def test_write_file_creates_parent_directories(tmp_path):
+    dest = tmp_path / "nested" / "deep" / "file.txt"
+    result = write_file(WriteFileInput(filepath=str(dest), content="deep"))
+    assert "Successfully" in result
+    assert dest.read_text() == "deep"
+
+
+def test_write_file_oserror_returns_error(tmp_path):
+    dest = tmp_path / "out.txt"
+    with patch("builtins.open", side_effect=OSError("disk full")):
+        result = write_file(WriteFileInput(filepath=str(dest), content="x", overwrite=True))
+    assert "Error" in result
