@@ -208,6 +208,38 @@ def test_fetch_sp_utilization_expected_unavailable_logs_without_display():
     assert mock_error.call_args.kwargs["display"] is False
 
 
+# ── MED-2: partial result preservation on unexpected future exception ─────────
+
+
+def test_unexpected_future_exception_preserves_partial_results():
+    """An unexpected exception in one fetcher does not discard remaining futures."""
+    mock_ce = _make_ce()
+
+    def _boom(ce, period):  # noqa: ARG001
+        raise RuntimeError("unexpected kaboom")
+
+    patched_fetchers = [
+        _boom,
+        _fetch_ri_utilization,
+        _fetch_sp_coverage,
+        _fetch_sp_utilization,
+    ]
+
+    with (
+        patch(f"{MOD}.get_client", return_value=mock_ce),
+        patch(f"{MOD}._FETCHERS", patched_fetchers),
+    ):
+        result = get_ri_sp_coverage()
+
+    assert result["ok"] is False
+    assert len(result["errors"]) >= 1
+    # Partial results from the other three fetchers are still present
+    payload = result["data"]
+    assert payload["ri_utilization_pct"] == 80.0
+    assert payload["sp_coverage_pct"] == 60.0
+    assert payload["sp_utilization_pct"] == 90.0
+
+
 # ── Parallelism smoke test ────────────────────────────────────────────────────
 
 
