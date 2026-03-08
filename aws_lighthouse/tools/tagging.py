@@ -128,6 +128,7 @@ def check_tagging_compliance(
 
         lmb = _cl("lambda")
         paginator = lmb.get_paginator("list_functions")
+        skipped_lambdas: list[str] = []
         for page in paginator.paginate():
             for fn in page.get("Functions", []):
                 name = fn["FunctionName"]
@@ -146,6 +147,7 @@ def check_tagging_compliance(
                                 region=region,
                             )
                         )
+                        skipped_lambdas.append(name)
                         continue
                     existing = set(tag_map.keys())
                 else:
@@ -160,6 +162,11 @@ def check_tagging_compliance(
                             "missing_tags": missing,
                         }
                     )
+        if skipped_lambdas:
+            logger.warn(
+                f"Skipped {len(skipped_lambdas)} Lambda function(s) due to tag lookup failure: "
+                + ", ".join(skipped_lambdas)
+            )
     except (ClientError, BotoCoreError) as e:
         logger.error(f"Failed to check Lambda tags: {e}")
         errors.append(
