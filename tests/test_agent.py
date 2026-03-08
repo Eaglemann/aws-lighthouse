@@ -865,7 +865,9 @@ def test_full_cycle_destructive_tool_denied_returns_to_agent():
         "args": {"instance_ids": ["i-badcafe"]},
     }
     # Turn 1: agent calls a destructive tool
-    agent_msg = AIMessage(content="I will terminate the instance.", tool_calls=[destructive_tc])
+    agent_msg = AIMessage(
+        content="I will terminate the instance.", tool_calls=[destructive_tc]
+    )
     state = {"messages": [HumanMessage(content="Terminate i-badcafe"), agent_msg]}
 
     # destructive tool → requires approval
@@ -885,7 +887,9 @@ def test_full_cycle_destructive_tool_denied_returns_to_agent():
     assert _route_after_approval(merged_state) == "agent"
 
     # Agent replies acknowledging the denial — no more tool calls
-    ack_msg = AIMessage(content="Understood, I will not terminate the instance.", tool_calls=[])
+    ack_msg = AIMessage(
+        content="Understood, I will not terminate the instance.", tool_calls=[]
+    )
     final_state = {
         "messages": [
             HumanMessage(content="Terminate i-badcafe"),
@@ -905,7 +909,11 @@ def test_full_cycle_safe_plus_destructive_batch_requires_approval():
     """
     tcs = [
         {"name": "tool_get_ec2_inventory", "id": "call-safe", "args": {}},
-        {"name": "terminate_ec2", "id": "call-destr", "args": {"instance_ids": ["i-1"]}},
+        {
+            "name": "terminate_ec2",
+            "id": "call-destr",
+            "args": {"instance_ids": ["i-1"]},
+        },
     ]
     ai_msg = AIMessage(content="", tool_calls=tcs)
     state = {"messages": [HumanMessage(content="Inspect then terminate"), ai_msg]}

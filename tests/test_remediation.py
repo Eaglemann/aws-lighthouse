@@ -51,9 +51,7 @@ def test_delete_ebs_all_success():
 
 
 def test_delete_ebs_partial_failure_continues_remaining_volumes():
-    with patch(
-        f"{MOD}.delete_ebs_volume", side_effect=[True, False, True]
-    ) as mock_del:
+    with patch(f"{MOD}.delete_ebs_volume", side_effect=[True, False, True]) as mock_del:
         result = delete_ebs.func(
             DeleteEBSInput(volume_ids=["vol-aaa", "vol-bbb", "vol-ccc"])
         )

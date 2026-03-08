@@ -812,9 +812,14 @@ def _make_clean_clients():
 def _make_dispatch(iam, ec2, s3, ct, gd, kms):
     def _dispatch(svc, region=None):
         return {
-            "iam": iam, "ec2": ec2, "s3": s3,
-            "cloudtrail": ct, "guardduty": gd, "kms": kms,
+            "iam": iam,
+            "ec2": ec2,
+            "s3": s3,
+            "cloudtrail": ct,
+            "guardduty": gd,
+            "kms": kms,
         }[svc]
+
     return _dispatch
 
 
@@ -823,8 +828,13 @@ def test_run_security_scan_clean_environment_no_findings():
     s3s = [{"BucketName": "my-bucket"}]
 
     with (
-        patch(f"{MOD}.get_aws_client", side_effect=_make_dispatch(iam, ec2, s3, ct, gd, kms)),
-        patch(f"{MOD}.get_client", side_effect=_make_dispatch(iam, ec2, s3, ct, gd, kms)),
+        patch(
+            f"{MOD}.get_aws_client",
+            side_effect=_make_dispatch(iam, ec2, s3, ct, gd, kms),
+        ),
+        patch(
+            f"{MOD}.get_client", side_effect=_make_dispatch(iam, ec2, s3, ct, gd, kms)
+        ),
     ):
         findings = _data(run_security_scan(s3s=s3s, rdss=[], include_global=True))
 
@@ -837,8 +847,13 @@ def test_run_security_scan_include_global_false_skips_root_mfa():
     iam.get_account_summary.return_value = {"SummaryMap": {"AccountMFAEnabled": 0}}
 
     with (
-        patch(f"{MOD}.get_aws_client", side_effect=_make_dispatch(iam, ec2, s3, ct, gd, kms)),
-        patch(f"{MOD}.get_client", side_effect=_make_dispatch(iam, ec2, s3, ct, gd, kms)),
+        patch(
+            f"{MOD}.get_aws_client",
+            side_effect=_make_dispatch(iam, ec2, s3, ct, gd, kms),
+        ),
+        patch(
+            f"{MOD}.get_client", side_effect=_make_dispatch(iam, ec2, s3, ct, gd, kms)
+        ),
     ):
         findings = _data(run_security_scan(s3s=[], rdss=[], include_global=False))
 
@@ -850,8 +865,13 @@ def test_run_security_scan_guardduty_disabled_produces_finding():
     gd.list_detectors.return_value = {"DetectorIds": []}
 
     with (
-        patch(f"{MOD}.get_aws_client", side_effect=_make_dispatch(iam, ec2, s3, ct, gd, kms)),
-        patch(f"{MOD}.get_client", side_effect=_make_dispatch(iam, ec2, s3, ct, gd, kms)),
+        patch(
+            f"{MOD}.get_aws_client",
+            side_effect=_make_dispatch(iam, ec2, s3, ct, gd, kms),
+        ),
+        patch(
+            f"{MOD}.get_client", side_effect=_make_dispatch(iam, ec2, s3, ct, gd, kms)
+        ),
     ):
         findings = _data(run_security_scan(s3s=[], rdss=[], include_global=False))
 
@@ -867,8 +887,13 @@ def test_run_security_scan_credential_report_generated_once():
     iam, ec2, s3, ct, gd, kms = _make_clean_clients()
 
     with (
-        patch(f"{MOD}.get_aws_client", side_effect=_make_dispatch(iam, ec2, s3, ct, gd, kms)),
-        patch(f"{MOD}.get_client", side_effect=_make_dispatch(iam, ec2, s3, ct, gd, kms)),
+        patch(
+            f"{MOD}.get_aws_client",
+            side_effect=_make_dispatch(iam, ec2, s3, ct, gd, kms),
+        ),
+        patch(
+            f"{MOD}.get_client", side_effect=_make_dispatch(iam, ec2, s3, ct, gd, kms)
+        ),
     ):
         run_security_scan(s3s=[{"BucketName": "b"}], rdss=[], include_global=True)
 
@@ -923,7 +948,13 @@ def test_check_iam_key_age_accepts_pre_fetched_report():
 # ── _check_kms_rotation ───────────────────────────────────────────────────────
 
 
-def _make_kms(keys=None, rotation_enabled=True, key_manager="CUSTOMER", key_state="Enabled", key_spec="SYMMETRIC_DEFAULT"):
+def _make_kms(
+    keys=None,
+    rotation_enabled=True,
+    key_manager="CUSTOMER",
+    key_state="Enabled",
+    key_spec="SYMMETRIC_DEFAULT",
+):
     """Return a KMS mock for a single key with the given attributes."""
     kms = MagicMock()
     key_id = "key-123"
@@ -1001,7 +1032,14 @@ def test_kms_describe_key_error_continues_to_next_key():
     ]
     kms.describe_key.side_effect = [
         make_client_error("AccessDenied"),  # key-bad fails
-        {"KeyMetadata": {"KeyId": "key-good", "KeyManager": "CUSTOMER", "KeyState": "Enabled", "KeySpec": "SYMMETRIC_DEFAULT"}},
+        {
+            "KeyMetadata": {
+                "KeyId": "key-good",
+                "KeyManager": "CUSTOMER",
+                "KeyState": "Enabled",
+                "KeySpec": "SYMMETRIC_DEFAULT",
+            }
+        },
     ]
     kms.get_key_rotation_status.return_value = {"KeyRotationEnabled": False}
     with patch(f"{MOD}.get_client", return_value=kms):

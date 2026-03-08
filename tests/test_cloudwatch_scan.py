@@ -304,7 +304,12 @@ def test_rds_two_page_pagination_collects_all_dbs():
 
 # ── ElastiCache alarm gaps ────────────────────────────────────────────────────
 
-_ALL_ELASTICACHE_METRICS = {"CPUUtilization", "CurrConnections", "Evictions", "FreeableMemory"}
+_ALL_ELASTICACHE_METRICS = {
+    "CPUUtilization",
+    "CurrConnections",
+    "Evictions",
+    "FreeableMemory",
+}
 
 
 def _make_elc_client(clusters=None):
@@ -353,14 +358,16 @@ def test_elasticache_api_error_doesnt_break_other_findings():
 
 # ── Redshift alarm gaps ───────────────────────────────────────────────────────
 
-_ALL_REDSHIFT_METRICS = {"CPUUtilization", "PercentageDiskSpaceUsed", "DatabaseConnections"}
+_ALL_REDSHIFT_METRICS = {
+    "CPUUtilization",
+    "PercentageDiskSpaceUsed",
+    "DatabaseConnections",
+}
 
 
 def _make_rs_client(clusters=None):
     rs = MagicMock()
-    rs.get_paginator.return_value.paginate.return_value = [
-        {"Clusters": clusters or []}
-    ]
+    rs.get_paginator.return_value.paginate.return_value = [{"Clusters": clusters or []}]
     return rs
 
 

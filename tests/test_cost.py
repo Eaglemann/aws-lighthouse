@@ -146,9 +146,7 @@ def _make_forecast_ce(total_amount="55.00", forecast_values=None):
     forecast_values = forecast_values or ["50.00", "60.00"]
     ce.get_cost_forecast.return_value = {
         "Total": {"Amount": total_amount, "Unit": "USD"},
-        "ForecastResultsByTime": [
-            {"MeanValue": v} for v in forecast_values
-        ],
+        "ForecastResultsByTime": [{"MeanValue": v} for v in forecast_values],
     }
     return ce
 
@@ -173,6 +171,7 @@ def test_forecast_period_keys_present():
     assert "forecast_end" in payload
     # Start should be tomorrow (future date)
     from datetime import UTC, datetime, timedelta
+
     today = datetime.now(UTC).date()
     assert payload["forecast_start"] == (today + timedelta(days=1)).isoformat()
 

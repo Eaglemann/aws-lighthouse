@@ -13,7 +13,7 @@ MOD = "aws_lighthouse.tools.cost_anomaly"
 # recent  window: day_start >= "2023-12-16"  → use "2023-12-16"
 _TODAY = datetime.date(2024, 1, 15)
 _BASELINE_DAY = "2023-11-20"  # falls in baseline bucket
-_RECENT_DAY = "2023-12-16"    # falls in recent bucket (== mid_str)
+_RECENT_DAY = "2023-12-16"  # falls in recent bucket (== mid_str)
 
 
 def _make_ce(baseline_amount: float, recent_amount: float, service: str = "Amazon EC2"):

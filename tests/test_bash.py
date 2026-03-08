@@ -369,7 +369,9 @@ def test_read_file_permission_denied_returns_error(tmp_path):
 
 def test_write_file_creates_file(tmp_path):
     dest = tmp_path / "output.txt"
-    result = write_file(WriteFileInput(filepath=str(dest), content="hello", overwrite=False))
+    result = write_file(
+        WriteFileInput(filepath=str(dest), content="hello", overwrite=False)
+    )
     assert "Successfully" in result
     assert dest.read_text() == "hello"
 
@@ -390,7 +392,9 @@ def test_write_file_no_overwrite_when_exists(tmp_path):
 def test_write_file_overwrite_when_flag_set(tmp_path):
     f = tmp_path / "existing.txt"
     f.write_text("original")
-    result = write_file(WriteFileInput(filepath=str(f), content="new content", overwrite=True))
+    result = write_file(
+        WriteFileInput(filepath=str(f), content="new content", overwrite=True)
+    )
     assert "Successfully" in result
     assert f.read_text() == "new content"
 
@@ -405,5 +409,7 @@ def test_write_file_creates_parent_directories(tmp_path):
 def test_write_file_oserror_returns_error(tmp_path):
     dest = tmp_path / "out.txt"
     with patch("builtins.open", side_effect=OSError("disk full")):
-        result = write_file(WriteFileInput(filepath=str(dest), content="x", overwrite=True))
+        result = write_file(
+            WriteFileInput(filepath=str(dest), content="x", overwrite=True)
+        )
     assert "Error" in result
