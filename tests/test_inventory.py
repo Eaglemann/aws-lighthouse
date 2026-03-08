@@ -220,3 +220,20 @@ def test_rds_inventory_api_error_returns_error_list():
     assert result["ok"] is False
     assert result["data"] == []
     assert result["errors"][0]["code"] == "AccessDenied"
+
+
+# ── MED-7: env var threshold override ─────────────────────────────────────────
+
+
+def test_lambda_stale_days_env_var_overrides_default(monkeypatch):
+    """LIGHTHOUSE_LAMBDA_STALE_DAYS controls the staleness cutoff."""
+    import importlib
+
+    import aws_lighthouse.tools.inventory as mod
+
+    monkeypatch.setenv("LIGHTHOUSE_LAMBDA_STALE_DAYS", "60")
+    importlib.reload(mod)
+    assert mod._LAMBDA_STALE_DAYS == 60
+    monkeypatch.delenv("LIGHTHOUSE_LAMBDA_STALE_DAYS", raising=False)
+    importlib.reload(mod)
+    assert mod._LAMBDA_STALE_DAYS == 180
