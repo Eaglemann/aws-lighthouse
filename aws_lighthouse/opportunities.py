@@ -178,8 +178,8 @@ def _map_cost_anomaly(
         "source_kind": "cost_anomaly",
         "title": f"Cost anomaly: {resource_id}",
         "summary": (
-            f"7-day spend increased to ${float(finding['recent_7d']):.2f} "
-            f"from ${float(finding['baseline_7d']):.2f} "
+            f"30-day spend increased to ${float(finding['recent_30d']):.2f} "
+            f"from ${float(finding['baseline_30d']):.2f} "
             f"({float(finding['pct_change']):.1f}% change)"
         ),
         "severity": _cost_anomaly_severity(finding),

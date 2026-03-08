@@ -15,6 +15,23 @@ _EC2_REQUIRED: list[tuple[str, str, str]] = [
 _RDS_REQUIRED: list[tuple[str, str, str]] = [
     ("AWS/RDS", "CPUUtilization", "DBInstanceIdentifier"),
     ("AWS/RDS", "FreeStorageSpace", "DBInstanceIdentifier"),
+    ("AWS/RDS", "DatabaseConnections", "DBInstanceIdentifier"),
+    ("AWS/RDS", "ReadLatency", "DBInstanceIdentifier"),
+    ("AWS/RDS", "WriteLatency", "DBInstanceIdentifier"),
+    ("AWS/RDS", "ReplicaLag", "DBInstanceIdentifier"),
+]
+
+_ELASTICACHE_REQUIRED: list[tuple[str, str, str]] = [
+    ("AWS/ElastiCache", "CPUUtilization", "CacheClusterId"),
+    ("AWS/ElastiCache", "CurrConnections", "CacheClusterId"),
+    ("AWS/ElastiCache", "Evictions", "CacheClusterId"),
+    ("AWS/ElastiCache", "FreeableMemory", "CacheClusterId"),
+]
+
+_REDSHIFT_REQUIRED: list[tuple[str, str, str]] = [
+    ("AWS/Redshift", "CPUUtilization", "ClusterIdentifier"),
+    ("AWS/Redshift", "PercentageDiskSpaceUsed", "ClusterIdentifier"),
+    ("AWS/Redshift", "DatabaseConnections", "ClusterIdentifier"),
 ]
 
 _LAMBDA_REQUIRED: list[tuple[str, str, str]] = [
@@ -55,12 +72,14 @@ def _build_alarm_index(cw, region: str | None = None):
 
 def detect_cloudwatch_gaps(region: str | None = None):
     """
-    Find EC2 instances, RDS databases, and Lambda functions that have no
-    CloudWatch alarm configured for one or more key metrics:
+    Find resources that have no CloudWatch alarm for one or more key metrics:
 
-      EC2     — CPUUtilization, StatusCheckFailed
-      RDS     — CPUUtilization, FreeStorageSpace
-      Lambda  — Errors, Throttles
+      EC2         — CPUUtilization, StatusCheckFailed
+      RDS         — CPUUtilization, FreeStorageSpace, DatabaseConnections,
+                    ReadLatency, WriteLatency, ReplicaLag
+      ElastiCache — CPUUtilization, CurrConnections, Evictions, FreeableMemory
+      Redshift    — CPUUtilization, PercentageDiskSpaceUsed, DatabaseConnections
+      Lambda      — Errors, Throttles
 
     Terminated EC2 instances are skipped.
     Returns one finding per resource, listing every missing metric.
@@ -146,6 +165,70 @@ def detect_cloudwatch_gaps(region: str | None = None):
             scan_error_from_exception(
                 service="rds",
                 operation="DescribeDBInstances",
+                exc=e,
+                region=region,
+            )
+        )
+
+    # ── ElastiCache ───────────────────────────────────────────────────────────
+    try:
+        elc = _cl("elasticache")
+        paginator = elc.get_paginator("describe_cache_clusters")
+        for page in paginator.paginate():
+            for cluster in page.get("CacheClusters", []):
+                cluster_id = cluster["CacheClusterId"]
+                missing = [
+                    metric
+                    for ns, metric, dim in _ELASTICACHE_REQUIRED
+                    if (ns, metric, dim, cluster_id) not in alarm_index
+                ]
+                if missing:
+                    findings.append(
+                        {
+                            "resource_type": "ElastiCache",
+                            "resource_id": cluster_id,
+                            "resource_name": cluster_id,
+                            "missing_alarms": missing,
+                        }
+                    )
+    except (ClientError, BotoCoreError) as e:
+        logger.error(f"Failed to check ElastiCache alarm gaps: {e}")
+        errors.append(
+            scan_error_from_exception(
+                service="elasticache",
+                operation="DescribeCacheClusters",
+                exc=e,
+                region=region,
+            )
+        )
+
+    # ── Redshift ──────────────────────────────────────────────────────────────
+    try:
+        rs = _cl("redshift")
+        paginator = rs.get_paginator("describe_clusters")
+        for page in paginator.paginate():
+            for cluster in page.get("Clusters", []):
+                cluster_id = cluster["ClusterIdentifier"]
+                missing = [
+                    metric
+                    for ns, metric, dim in _REDSHIFT_REQUIRED
+                    if (ns, metric, dim, cluster_id) not in alarm_index
+                ]
+                if missing:
+                    findings.append(
+                        {
+                            "resource_type": "Redshift",
+                            "resource_id": cluster_id,
+                            "resource_name": cluster_id,
+                            "missing_alarms": missing,
+                        }
+                    )
+    except (ClientError, BotoCoreError) as e:
+        logger.error(f"Failed to check Redshift alarm gaps: {e}")
+        errors.append(
+            scan_error_from_exception(
+                service="redshift",
+                operation="DescribeClusters",
                 exc=e,
                 region=region,
             )
