@@ -294,3 +294,21 @@ def test_run_cost_scan_aggregates_all_checks():
     assert "i-bbb" in resources
     assert "snap-ccc" in resources
     assert "eipalloc-ddd" in resources
+
+
+# ── MED-7: env var threshold override ─────────────────────────────────────────
+
+
+def test_snapshot_age_env_var_overrides_default(monkeypatch):
+    """LIGHTHOUSE_SNAPSHOT_AGE_DAYS controls the snapshot staleness cutoff."""
+    import importlib
+
+    import aws_lighthouse.tools.cost_scan as mod
+
+    monkeypatch.setenv("LIGHTHOUSE_SNAPSHOT_AGE_DAYS", "30")
+    importlib.reload(mod)
+    assert mod._SNAPSHOT_AGE_DAYS == 30
+    # Restore default
+    monkeypatch.delenv("LIGHTHOUSE_SNAPSHOT_AGE_DAYS", raising=False)
+    importlib.reload(mod)
+    assert mod._SNAPSHOT_AGE_DAYS == 90

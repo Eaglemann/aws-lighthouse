@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from botocore.exceptions import BotoCoreError
 
-from aws_lighthouse.tools.cost import get_monthly_cost_summary
+from aws_lighthouse.tools.cost import get_cost_forecast, get_monthly_cost_summary
 
 MOD = "aws_lighthouse.tools.cost"
 
@@ -136,3 +136,52 @@ def test_api_error_returns_envelope_error():
     assert result["ok"] is False
     assert result["errors"]
     assert payload["total_usd"] == 0.0
+
+
+# ── get_cost_forecast ─────────────────────────────────────────────────────────
+
+
+def _make_forecast_ce(total_amount="55.00", forecast_values=None):
+    ce = MagicMock()
+    forecast_values = forecast_values or ["50.00", "60.00"]
+    ce.get_cost_forecast.return_value = {
+        "Total": {"Amount": total_amount, "Unit": "USD"},
+        "ForecastResultsByTime": [
+            {"MeanValue": v} for v in forecast_values
+        ],
+    }
+    return ce
+
+
+def test_forecast_returns_total_usd():
+    ce = _make_forecast_ce()
+    with patch(f"{MOD}.get_client", return_value=ce):
+        result = get_cost_forecast()
+    payload = _data(result)
+    assert result["ok"] is True
+    assert payload["total_usd"] == 55.0
+    assert payload["lower_bound_usd"] == 50.0
+    assert payload["upper_bound_usd"] == 60.0
+
+
+def test_forecast_period_keys_present():
+    ce = _make_forecast_ce()
+    with patch(f"{MOD}.get_client", return_value=ce):
+        result = get_cost_forecast(forecast_days=30)
+    payload = _data(result)
+    assert "forecast_start" in payload
+    assert "forecast_end" in payload
+    # Start should be tomorrow (future date)
+    from datetime import UTC, datetime, timedelta
+    today = datetime.now(UTC).date()
+    assert payload["forecast_start"] == (today + timedelta(days=1)).isoformat()
+
+
+def test_forecast_api_error_returns_error_envelope():
+    ce = MagicMock()
+    ce.get_cost_forecast.side_effect = BotoCoreError()
+    with patch(f"{MOD}.get_client", return_value=ce):
+        result = get_cost_forecast()
+    assert result["ok"] is False
+    assert result["errors"]
+    assert _data(result)["total_usd"] is None
