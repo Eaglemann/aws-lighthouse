@@ -50,6 +50,7 @@ from .tools.inventory import (
     get_s3_inventory,
 )
 from .tools.multi_region import get_enabled_regions
+from .tools.ri_sp_advisor import get_ri_recommendations, get_sp_recommendations
 from .tools.ri_sp_coverage import get_ri_sp_coverage
 from .tools.security_scan import run_security_scan
 from .tools.tagging import check_tagging_compliance
@@ -370,8 +371,12 @@ _ACTIVE_OPPORTUNITY_STATUSES: tuple[OpportunityStatus, ...] = (
 _SUMMARY_SECTION_LABELS = {
     "inventory": "Inventory",
     "costs": "Cost",
+    "cost_forecast": "Cost Forecast",
     "cost_anomalies": "Cost Anomalies",
+    "cost_attribution": "Cost Attribution",
     "ri_sp_coverage": "RI/SP Coverage",
+    "ri_recommendations": "RI Recommendations",
+    "sp_recommendations": "SP Recommendations",
     "security_findings": "Security",
     "iam_findings": "IAM",
     "cloudwatch_findings": "CloudWatch",
@@ -1455,6 +1460,97 @@ def _section_ri_sp_coverage(c: Console, days: int, render: bool = True) -> ScanR
     return ri_sp_result
 
 
+def _render_ri_sp_advisor_panel(
+    c: Console,
+    ri_result: ScanResult,
+    sp_result: ScanResult,
+) -> None:
+    """Render RI and SP purchase recommendations as a single panel."""
+    ri_recs = cast(list[dict[str, Any]], ri_result["data"])
+    sp_recs = cast(list[dict[str, Any]], sp_result["data"])
+    if not ri_recs and not sp_recs:
+        return
+
+    groups: list[Any] = []
+
+    if ri_recs:
+        ri_table = Table(
+            box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False
+        )
+        ri_table.add_column("Service", style="dim", no_wrap=True)
+        ri_table.add_column("Instance", style="cyan", no_wrap=True)
+        ri_table.add_column("Region", style="dim", no_wrap=True)
+        ri_table.add_column("Term", no_wrap=True)
+        ri_table.add_column("Qty", justify="right")
+        ri_table.add_column("Monthly Savings", justify="right", style="bold green")
+        ri_table.add_column("Break-even", justify="right", style="dim")
+        for rec in ri_recs[:10]:
+            be = rec["break_even_months"]
+            be_str = "immediate" if be <= 0 else f"{be:.1f} mo"
+            ri_table.add_row(
+                rec["service"],
+                rec["instance_type"],
+                rec["region"],
+                rec["term"],
+                str(rec["count"]),
+                f"${rec['monthly_savings_usd']:,.0f}",
+                be_str,
+            )
+        groups.append(Text("Reserved Instances", style="bold dim"))
+        groups.append(ri_table)
+
+    if sp_recs:
+        sp_table = Table(
+            box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False
+        )
+        sp_table.add_column("Plan Type", style="cyan", no_wrap=True)
+        sp_table.add_column("Term", no_wrap=True)
+        sp_table.add_column("Hourly Commit", justify="right")
+        sp_table.add_column("Monthly Savings", justify="right", style="bold green")
+        sp_table.add_column("Savings %", justify="right")
+        for rec in sp_recs:
+            sp_table.add_row(
+                rec["savings_plan_type"],
+                rec["term"],
+                f"${rec['hourly_commitment_usd']:.4f}",
+                f"${rec['estimated_monthly_savings_usd']:,.0f}",
+                f"{rec['estimated_savings_pct']:.1f}%",
+            )
+        if ri_recs:
+            groups.append(Text(""))
+        groups.append(Text("Savings Plans", style="bold dim"))
+        groups.append(sp_table)
+
+    total_ri_savings = sum(r["monthly_savings_usd"] for r in ri_recs)
+    total_sp_savings = sum(r["estimated_monthly_savings_usd"] for r in sp_recs)
+    total_savings = total_ri_savings + total_sp_savings
+
+    c.print(
+        Panel(
+            Group(*groups),
+            title=(
+                "[bold green]💡 RI / SP Purchase Advisor[/bold green]  "
+                f"[dim]potential savings [bold]${total_savings:,.0f}[/bold]/mo[/dim]"
+            ),
+            border_style="green",
+            padding=(0, 1),
+        )
+    )
+    c.print()
+
+
+def _section_ri_sp_advisor(c: Console, render: bool = True) -> dict[str, ScanResult]:
+    """Fetch RI and SP purchase recommendations and optionally render them."""
+    with c.status(
+        "[cyan]💡  Fetching RI / SP purchase recommendations...[/cyan]", spinner="dots"
+    ):
+        ri_result = get_ri_recommendations()
+        sp_result = get_sp_recommendations()
+    if render:
+        _render_ri_sp_advisor_panel(c, ri_result, sp_result)
+    return {"ri": ri_result, "sp": sp_result}
+
+
 def _section_security(
     c: Console,
     s3s: list,
@@ -2014,6 +2110,7 @@ def _run_analyze_cycle(
                 c, "[bold dim]📊 RI / Savings Plan Coverage[/bold dim]", {}
             )
         )
+        advisor_results = _section_ri_sp_advisor(c, render=False)
         sec_result = (
             _section_security(
                 c,
@@ -2064,6 +2161,8 @@ def _run_analyze_cycle(
             "cost_anomalies": anomalies_result,
             "cost_attribution": attribution_result,
             "ri_sp_coverage": ri_sp_result,
+            "ri_recommendations": advisor_results["ri"],
+            "sp_recommendations": advisor_results["sp"],
             "security_findings": sec_result,
             "iam_findings": iam_result,
             "cloudwatch_findings": cw_result,
@@ -2252,6 +2351,10 @@ def _run_analyze_cycle(
                     _render_skipped_panel(
                         c, "[bold dim]📊 RI / Savings Plan Coverage[/bold dim]"
                     )
+
+                _render_ri_sp_advisor_panel(
+                    c, advisor_results["ri"], advisor_results["sp"]
+                )
 
                 if effective_policy.scan_enabled("cost_waste"):
                     _render_cost_waste_panel(

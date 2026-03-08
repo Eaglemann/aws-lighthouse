@@ -244,6 +244,8 @@ from .tools.inventory import (
 )
 from .tools.multi_region import get_enabled_regions as _get_enabled_regions
 from .tools.remediation import delete_ebs, terminate_ec2
+from .tools.ri_sp_advisor import get_ri_recommendations as _get_ri_recommendations
+from .tools.ri_sp_advisor import get_sp_recommendations as _get_sp_recommendations
 from .tools.ri_sp_coverage import get_ri_sp_coverage as _get_ri_sp_coverage
 from .tools.security import s3_block_public_access
 from .tools.security_scan import run_security_scan as _run_security_scan
@@ -471,6 +473,28 @@ def tool_get_ri_sp_coverage(
     return _format_scan_payload(result, schema_version)
 
 
+@tool
+def tool_get_ri_sp_recommendations(schema_version: Literal["v1", "v2"] = "v1") -> str:
+    """
+    Fetch specific RI and Savings Plan purchase recommendations from Cost Explorer.
+    Unlike the coverage check (which shows %, this returns what to actually buy:
+    instance type, region, count, monthly savings, and break-even months for RIs;
+    hourly commitment and monthly savings for Savings Plans.
+    Use this when the user asks "what should I buy?", "how do I reduce costs?",
+    or "give me RI/SP purchase recommendations".
+    """
+    ri_result = _get_ri_recommendations()
+    sp_result = _get_sp_recommendations()
+    combined = {
+        "ri_recommendations": ri_result["data"],
+        "sp_recommendations": sp_result["data"],
+        "errors": ri_result["errors"] + sp_result["errors"],
+    }
+    from .scan_contract import ok_result as _ok
+
+    return _format_scan_payload(_ok(combined), schema_version)
+
+
 @tool(args_schema=_ThresholdSchemaArgs)
 def tool_detect_cost_anomalies(
     threshold_pct: float = 50.0,
@@ -689,6 +713,7 @@ tools = [
     tool_get_s3_inventory,
     tool_get_lambda_inventory,
     tool_get_ri_sp_coverage,
+    tool_get_ri_sp_recommendations,
     tool_detect_cost_anomalies,
     tool_get_cost_attribution,
     tool_run_cost_scan,
@@ -935,6 +960,7 @@ SAFE_TOOLS = {
     "tool_get_s3_inventory",
     "tool_get_lambda_inventory",
     "tool_get_ri_sp_coverage",
+    "tool_get_ri_sp_recommendations",
     "tool_detect_cost_anomalies",
     "tool_get_cost_attribution",
     "tool_run_cost_scan",

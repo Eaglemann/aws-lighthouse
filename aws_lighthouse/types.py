@@ -127,6 +127,36 @@ class CostAttribution(TypedDict):
     events: list[CostAttributionEvent]
 
 
+class RIRecommendation(TypedDict):
+    """One RI purchase recommendation from CE get_reservation_purchase_recommendation."""
+
+    service: str
+    instance_type: str
+    region: str
+    platform: str
+    term: str  # "1yr" | "3yr"
+    payment_option: str
+    count: int
+    monthly_savings_usd: float
+    break_even_months: float
+    estimated_monthly_on_demand_usd: float
+    estimated_monthly_ri_usd: float
+    upfront_cost_usd: float
+
+
+class SPRecommendation(TypedDict):
+    """One SP purchase recommendation from CE get_savings_plans_purchase_recommendation."""
+
+    savings_plan_type: str
+    term: str  # "1yr" | "3yr"
+    payment_option: str
+    hourly_commitment_usd: float
+    estimated_monthly_savings_usd: float
+    estimated_savings_pct: float
+    estimated_monthly_on_demand_usd: float
+    upfront_cost_usd: float
+
+
 class Opportunity(TypedDict):
     """One persistent local opportunity synced from scan findings."""
 
