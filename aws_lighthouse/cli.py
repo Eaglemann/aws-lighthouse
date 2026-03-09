@@ -50,6 +50,7 @@ from .tools.inventory import (
     get_s3_inventory,
 )
 from .tools.multi_region import get_enabled_regions
+from .tools.remediation_plan import build_remediation_plan, parse_phase_selection
 from .tools.ri_sp_advisor import get_ri_recommendations, get_sp_recommendations
 from .tools.ri_sp_coverage import get_ri_sp_coverage
 from .tools.security_scan import run_security_scan
@@ -58,6 +59,7 @@ from .types import (
     CostFinding,
     OpportunitySourceKind,
     OpportunityStatus,
+    RemediationPlan,
     ScanError,
     ScanResult,
     SecurityFinding,
@@ -1768,6 +1770,37 @@ def _parse_remediation_selection(raw: str, total: int) -> list[int]:
     return indices
 
 
+def _render_remediation_plan_panel(c: Console, plan: RemediationPlan) -> None:
+    groups: list[Any] = []
+    for phase in plan["phases"]:
+        color = phase["color"]
+        risk = phase["risk"]
+        count = len(phase["actions"])
+        header = Text(
+            f"  {phase['title']}  ·  {risk}  ({count} action{'s' if count != 1 else ''})",
+            style=f"bold {color}",
+        )
+        phase_table = Table(
+            box=box.SIMPLE_HEAD, show_header=False, padding=(0, 2), show_edge=False
+        )
+        phase_table.add_column("Label", no_wrap=True)
+        phase_table.add_column("Source", style="dim", no_wrap=True)
+        phase_table.add_column("Resource", no_wrap=True)
+        for action in phase["actions"]:
+            phase_table.add_row(action["label"], action["source"], action["resource"])
+        groups.append(header)
+        groups.append(phase_table)
+    c.print(
+        Panel(
+            Group(*groups),
+            title="[bold cyan]🔧 Remediation Plan[/bold cyan]",
+            border_style="cyan",
+            padding=(0, 1),
+        )
+    )
+    c.print()
+
+
 def _render_remediation_preview(c: Console, selections: list[dict[str, Any]]) -> None:
     preview = Table(
         box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False
@@ -1838,38 +1871,14 @@ def _section_remediation(
         "enforce_imdsv2",
     }
 
-    rem_table = Table(
-        box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False
-    )
-    rem_table.add_column("#", justify="right", style="dim", no_wrap=True)
-    rem_table.add_column("Action", style="bold cyan", no_wrap=True)
-    rem_table.add_column("Source", style="dim", no_wrap=True)
-    rem_table.add_column("Scope", style="dim", no_wrap=True)
-    rem_table.add_column("Resource", no_wrap=True)
-    for i, f in enumerate(remediable, 1):
-        rem_table.add_row(
-            str(i),
-            str(f["remediation_label"]),
-            str(f["_source"]),
-            _display_scope_label(cast(str | None, f.get("region"))),
-            str(f["resource"]),
-        )
+    plan = build_remediation_plan(remediable)
+    _render_remediation_plan_panel(c, plan)
 
-    c.print(
-        Panel(
-            rem_table,
-            title=(
-                f"[bold cyan]🔧 One-Click Remediation[/bold cyan]  "
-                f"[dim]{len(remediable)} fix{'es' if len(remediable) != 1 else ''} available[/dim]"
-            ),
-            border_style="cyan",
-            padding=(0, 1),
-        )
-    )
-    c.print()
-
+    available_phases = [p["phase"] for p in plan["phases"]]
+    phase_labels = " / ".join(str(p) for p in available_phases)
     raw = Prompt.ask(
-        "  [bold cyan]Apply fixes[/bold cyan] [dim](all, top, or e.g. 1,3 — Enter to skip)[/dim]",
+        f"  [bold cyan]Approve phases[/bold cyan] "
+        f"[dim](all / {phase_labels} / none, Enter=skip)[/dim]",
         default="",
     )
 
@@ -1878,47 +1887,54 @@ def _section_remediation(
         return
 
     try:
-        indices = _parse_remediation_selection(raw, len(remediable))
+        approved = parse_phase_selection(raw, available_phases)
     except ValueError as exc:
         logger.error(str(exc))
         c.print()
         return
 
-    selected = [remediable[idx] for idx in indices]
-    _render_remediation_preview(c, selected)
-    if not typer.confirm(
-        f"  Review complete. Continue with {len(selected)} remediation action(s)?",
-        default=False,
-    ):
-        c.print("  [dim]Skipped remediation run.[/dim]")
+    if not approved:
+        c.print("  [dim]No phases approved. Skipped.[/dim]")
         c.print()
         return
 
-    for selected_finding in selected:
-        label = str(selected_finding["remediation_label"])
-        resource = str(selected_finding["resource"])
-        action = _ACTIONS.get(str(selected_finding["remediation_type"]))
-        if not action:
-            logger.error(
-                f"Unknown remediation type: {selected_finding['remediation_type']}"
-            )
+    applied = 0
+    failed = 0
+    for phase in plan["phases"]:
+        if phase["phase"] not in approved:
             continue
-        region = cast(str | None, selected_finding.get("region"))
-        if str(selected_finding["remediation_type"]) in _REGION_REQUIRED and not region:
-            logger.error(
-                "Missing region for remediation "
-                f"{selected_finding['remediation_type']} on {resource}; skipping."
-            )
-            continue
-        if typer.confirm(f"  Apply '{label}' on {resource}?", default=False):
-            with c.status(f"[cyan]🔧  Applying {label}...[/cyan]", spinner="dots"):
-                ok = action(resource, region=region)
+        for action in phase["actions"]:
+            rtype = action["remediation_type"]
+            resource = action["resource"]
+            label = action["label"]
+            fn = _ACTIONS.get(rtype)
+            if not fn:
+                logger.error(f"Unknown remediation type: {rtype}")
+                failed += 1
+                continue
+            region = action["region"]
+            if rtype in _REGION_REQUIRED and not region:
+                logger.error(f"Missing region for {rtype} on {resource}; skipping.")
+                failed += 1
+                continue
+            with c.status(
+                f"[cyan]🔧  Applying {label} on {resource}...[/cyan]", spinner="dots"
+            ):
+                ok = fn(resource, region=region)
             if ok:
                 logger.success(f"{label} applied to {resource}.")
+                applied += 1
             else:
                 logger.error(f"Failed to apply {label} on {resource}.")
-        else:
-            c.print(f"  [dim]Skipped {resource}.[/dim]")
+                failed += 1
+
+    parts = []
+    if applied:
+        parts.append(f"[green]✅ {applied} applied[/green]")
+    if failed:
+        parts.append(f"[red]❌ {failed} failed[/red]")
+    if parts:
+        c.print(f"  {' · '.join(parts)}")
     c.print()
 
 

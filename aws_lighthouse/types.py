@@ -157,6 +157,35 @@ class SPRecommendation(TypedDict):
     upfront_cost_usd: float
 
 
+class RemediationAction(TypedDict):
+    """One action in a batch remediation plan."""
+
+    action_id: str
+    phase: int
+    remediation_type: str
+    resource: str
+    label: str
+    region: str | None
+    source: str  # "security" | "cost_waste"
+
+
+class PlanPhase(TypedDict):
+    """A phase grouping in a batch remediation plan."""
+
+    phase: int
+    title: str
+    risk: str  # "REVERSIBLE" | "PERMANENT" | "DESTRUCTIVE"
+    color: str  # "green" | "yellow" | "red"
+    actions: list[RemediationAction]
+
+
+class RemediationPlan(TypedDict):
+    """A full batch remediation plan grouped by risk phase."""
+
+    phases: list[PlanPhase]
+    total: int
+
+
 class Opportunity(TypedDict):
     """One persistent local opportunity synced from scan findings."""
 

@@ -34,6 +34,7 @@ _SCHEMA_GUARDED_TOOLS: frozenset[str] = frozenset(
         "tool_get_ri_sp_coverage",
         "tool_detect_cost_anomalies",
         "tool_get_cost_attribution",
+        "tool_plan_remediation",
         "tool_run_cost_scan",
         "tool_check_tagging_compliance",
         "tool_detect_overpermissive_iam",
@@ -244,6 +245,7 @@ from .tools.inventory import (
 )
 from .tools.multi_region import get_enabled_regions as _get_enabled_regions
 from .tools.remediation import delete_ebs, terminate_ec2
+from .tools.remediation_plan import build_remediation_plan as _build_remediation_plan
 from .tools.ri_sp_advisor import get_ri_recommendations as _get_ri_recommendations
 from .tools.ri_sp_advisor import get_sp_recommendations as _get_sp_recommendations
 from .tools.ri_sp_coverage import get_ri_sp_coverage as _get_ri_sp_coverage
@@ -525,6 +527,43 @@ def tool_get_cost_attribution(schema_version: Literal["v1", "v2"] = "v1") -> str
     return _format_scan_payload(result, schema_version)
 
 
+@tool
+def tool_plan_remediation(schema_version: Literal["v1", "v2"] = "v1") -> str:
+    """Build a risk-tiered batch remediation plan from current scan findings.
+
+    Runs the security scan and cost waste scan, groups all actionable findings
+    into three phases (Reversible / Permanent / Destructive), and returns a
+    structured plan the user can approve by phase.  This tool is READ-ONLY —
+    it does not execute any changes.
+
+    Phase 1 (REVERSIBLE): S3 BPA, S3 encryption, IMDSv2, GuardDuty, CloudTrail
+    Phase 2 (PERMANENT):  Release EIP (IP released, no data loss)
+    Phase 3 (DESTRUCTIVE): Delete EBS volumes, terminate EC2 (data loss)
+    """
+    s3_result = _get_s3_inventory()
+    rds_result = _get_rds_inventory()
+    sec_result = _run_security_scan(
+        s3s=s3_result["data"],
+        rdss=rds_result["data"],
+    )
+    cost_result = _run_cost_scan()
+
+    remediable: list[dict] = []
+    for f in sec_result.get("data") or []:
+        if f.get("remediation_type"):
+            remediable.append({**f, "_source": "security"})
+    for f in cost_result.get("data") or []:
+        if f.get("remediation_type"):
+            remediable.append({**f, "_source": "cost_waste"})
+
+    plan = _build_remediation_plan(remediable)
+    if schema_version == "v2":
+        from .scan_contract import ok_result
+
+        return json.dumps(ok_result(plan), default=str)
+    return json.dumps(plan, default=str)
+
+
 @tool(args_schema=_SecurityScanArgs)
 def tool_run_security_scan(
     region: str = "",
@@ -716,6 +755,7 @@ tools = [
     tool_get_ri_sp_recommendations,
     tool_detect_cost_anomalies,
     tool_get_cost_attribution,
+    tool_plan_remediation,
     tool_run_cost_scan,
     tool_check_tagging_compliance,
     tool_detect_overpermissive_iam,
@@ -963,6 +1003,7 @@ SAFE_TOOLS = {
     "tool_get_ri_sp_recommendations",
     "tool_detect_cost_anomalies",
     "tool_get_cost_attribution",
+    "tool_plan_remediation",
     "tool_run_cost_scan",
     "tool_check_tagging_compliance",
     "tool_detect_overpermissive_iam",
