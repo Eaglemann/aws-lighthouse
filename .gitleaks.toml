@@ -1,0 +1,16 @@
+[extend]
+# Extend the default gitleaks rules.
+useDefault = true
+
+[allowlist]
+description = "Project-wide false positive allowlist"
+
+# gitleaks flags AWS SDK type names (e.g. "EC2InstanceDetails") as generic API
+# keys due to their entropy.  These are string literals in source code — not secrets.
+regexes = [
+    '''EC2InstanceDetails''',
+    '''RDSInstanceDetails''',
+    '''ElastiCacheInstanceDetails''',
+    '''RedshiftInstanceDetails''',
+    '''ESInstanceDetails''',
+]

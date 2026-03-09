@@ -131,4 +131,4 @@ jobs:
         sudo mv /tmp/gitleaks /usr/local/bin/gitleaks
 
     - name: Scan for secrets with Gitleaks
-      run: gitleaks detect --source . --log-opts="--all" --verbose
+      run: gitleaks detect --source . --config .gitleaks.toml --log-opts="--all" --verbose
