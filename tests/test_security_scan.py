@@ -16,6 +16,7 @@ from aws_lighthouse.tools.security_scan import (
     _check_root_mfa,
     _check_s3_block_public_access,
     _check_s3_encryption,
+    _check_vpc_flow_logs,
     _get_credential_report,
     run_security_scan,
 )
@@ -772,6 +773,7 @@ def _make_clean_clients():
 
     ec2 = MagicMock()
     ec2.get_paginator.side_effect = _ec2_get_paginator
+    ec2.describe_vpcs.return_value = {"Vpcs": []}
 
     s3 = MagicMock()
     s3.get_public_access_block.return_value = {
@@ -1049,3 +1051,77 @@ def test_kms_describe_key_error_continues_to_next_key():
     assert len(findings) == 1
     assert "key-good" in findings[0]["finding"]
     assert result["ok"] is False  # errors list is non-empty
+
+
+# ── _check_vpc_flow_logs ────────────────────────────────────────────────────
+
+
+class TestCheckVpcFlowLogs:
+    def _make_ec2(self, vpcs, flow_logs_map=None):
+        """flow_logs_map: {vpc_id: [flow_log_dicts]}"""
+        ec2 = MagicMock()
+        ec2.describe_vpcs.return_value = {"Vpcs": vpcs}
+        if flow_logs_map is None:
+            ec2.describe_flow_logs.return_value = {"FlowLogs": []}
+        else:
+
+            def describe_flow_logs(Filters):
+                vpc_id = Filters[0]["Values"][0]
+                return {"FlowLogs": flow_logs_map.get(vpc_id, [])}
+
+            ec2.describe_flow_logs.side_effect = describe_flow_logs
+
+        return ec2
+
+    def test_no_vpcs_returns_empty(self):
+        ec2 = self._make_ec2([])
+        result = _check_vpc_flow_logs(ec2)
+        assert _data(result) == []
+
+    def test_vpc_without_flow_logs_flagged(self):
+        ec2 = self._make_ec2([{"VpcId": "vpc-111", "IsDefault": False}])
+        result = _check_vpc_flow_logs(ec2)
+        findings = _data(result)
+        assert len(findings) == 1
+        assert findings[0]["resource"] == "vpc-111"
+        assert findings[0]["severity"] == "MEDIUM"
+        assert "flow logs" in findings[0]["finding"].lower()
+
+    def test_vpc_with_flow_logs_not_flagged(self):
+        ec2 = self._make_ec2(
+            [{"VpcId": "vpc-222", "IsDefault": False}],
+            flow_logs_map={
+                "vpc-222": [{"FlowLogId": "fl-abc", "FlowLogStatus": "ACTIVE"}]
+            },
+        )
+        result = _check_vpc_flow_logs(ec2)
+        assert _data(result) == []
+
+    def test_mixed_vpcs(self):
+        ec2 = self._make_ec2(
+            [
+                {"VpcId": "vpc-ok", "IsDefault": False},
+                {"VpcId": "vpc-bad", "IsDefault": False},
+            ],
+            flow_logs_map={"vpc-ok": [{"FlowLogId": "fl-1"}]},
+        )
+        result = _check_vpc_flow_logs(ec2)
+        findings = _data(result)
+        assert len(findings) == 1
+        assert findings[0]["resource"] == "vpc-bad"
+
+    def test_client_error_returns_empty(self):
+        ec2 = MagicMock()
+        ec2.describe_vpcs.side_effect = ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": "denied"}},
+            "DescribeVpcs",
+        )
+        result = _check_vpc_flow_logs(ec2)
+        assert _data(result) == []
+
+    def test_finding_has_remediation_fields(self):
+        ec2 = self._make_ec2([{"VpcId": "vpc-333", "IsDefault": False}])
+        result = _check_vpc_flow_logs(ec2)
+        findings = _data(result)
+        assert findings[0]["remediation_type"] == "vpc_flow_logs"
+        assert "vpc-333" in findings[0]["remediation_label"]
