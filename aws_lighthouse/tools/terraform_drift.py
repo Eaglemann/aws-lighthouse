@@ -91,6 +91,15 @@ _FINDING_TO_HCL: list[tuple[str, str]] = [
         "publicly accessible",
         "# In your aws_db_instance for {resource_id}:\n  publicly_accessible = false",
     ),
+    (
+        "flow logs",
+        'resource "aws_flow_log" "{name}" {{\n'
+        '  vpc_id          = "{resource_id}"\n'
+        '  traffic_type    = "ALL"\n'
+        "  iam_role_arn    = aws_iam_role.flow_log.arn\n"
+        "  log_destination = aws_cloudwatch_log_group.flow_log.arn\n"
+        "}}",
+    ),
 ]
 
 # ---------------------------------------------------------------------------
