@@ -2211,6 +2211,7 @@ class TestShellCommands:
             since_last=True,
             config=None,
             interactive=False,
+            terraform_dir=None,
         )
 
     def test_shell_slash_analyze_bypasses_agent(self):
@@ -2241,6 +2242,7 @@ class TestShellCommands:
             since_last=False,
             config=None,
             interactive=False,
+            terraform_dir=None,
         )
 
     def test_shell_analyze_invalid_flags_keep_shell_running(self, capsys):
@@ -2464,3 +2466,81 @@ class TestAnalyzeMultiProfile:
             result = runner.invoke(app, ["analyze", "--profiles", "bad-profile"])
 
         assert result.exit_code == 0, result.output
+
+
+class TestAnalyzeTerraformDir:
+    """Tests for --terraform-dir flag on the analyze command."""
+
+    def _run(self, extra_args=None, extra_patches=None):
+        runner = CliRunner()
+        patches = {**_PATCHES, "aws_lighthouse.cli.get_aws_session": _mock_session}
+        if extra_patches:
+            patches.update(extra_patches)
+        with patch.multiple(
+            "aws_lighthouse.cli", **{k.split(".")[-1]: v for k, v in patches.items()}
+        ):
+            return runner.invoke(
+                app, ["analyze", "--output", "json"] + (extra_args or [])
+            )
+
+    def test_terraform_dir_adds_drift_to_json_output(self, tmp_path):
+        (tmp_path / "main.tf").write_text(
+            'resource "aws_s3_bucket" "b" { bucket = "my-bucket" }'
+        )
+        drift_data = [
+            {
+                "source_kind": "security",
+                "resource_id": "my-bucket",
+                "finding": "S3 bucket has no public access block",
+                "severity": "HIGH",
+                "iac_managed": True,
+                "shadow_infra": False,
+                "tf_resource": None,
+                "hcl_fix": None,
+            }
+        ]
+        mock_classify = MagicMock(
+            return_value={"ok": True, "data": drift_data, "errors": []}
+        )
+        result = self._run(
+            extra_args=["--terraform-dir", str(tmp_path)],
+            extra_patches={
+                "aws_lighthouse.cli.classify_findings_by_iac": mock_classify
+            },
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert "terraform_drift" in data
+        assert data["terraform_drift"] == drift_data
+
+    def test_terraform_dir_nonexistent_does_not_crash(self, tmp_path):
+        nonexistent = str(tmp_path / "does-not-exist")
+        mock_classify = MagicMock(
+            return_value={
+                "ok": False,
+                "data": [],
+                "errors": [
+                    {
+                        "code": "DirectoryNotFound",
+                        "message": "not found",
+                        "service": "terraform",
+                        "operation": "classify_findings_by_iac",
+                    }
+                ],
+            }
+        )
+        result = self._run(
+            extra_args=["--terraform-dir", nonexistent],
+            extra_patches={
+                "aws_lighthouse.cli.classify_findings_by_iac": mock_classify
+            },
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert "terraform_drift" in data
+
+    def test_terraform_dir_not_set_no_drift_key(self):
+        result = self._run()
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert "terraform_drift" not in data
