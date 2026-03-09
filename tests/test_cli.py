@@ -424,6 +424,7 @@ class TestSectionRemediation:
             _parse_remediation_selection("1,banana,5", 3)
 
     def test_regional_remediation_passes_region_to_action(self):
+        # delete_ebs_volume is phase 3 (DESTRUCTIVE); approve phase "3" to execute it.
         c, _ = _console()
         sec_findings = [
             {
@@ -436,8 +437,7 @@ class TestSectionRemediation:
             }
         ]
         with (
-            patch("aws_lighthouse.cli.Prompt.ask", return_value="1"),
-            patch("aws_lighthouse.cli.typer.confirm", return_value=True),
+            patch("aws_lighthouse.cli.Prompt.ask", return_value="3"),
             patch(
                 "aws_lighthouse.tools.remediation_actions.delete_ebs_volume",
                 return_value=True,
@@ -448,6 +448,7 @@ class TestSectionRemediation:
         mock_action.assert_called_once_with("vol-abc123", region="eu-west-1")
 
     def test_regional_remediation_without_region_is_skipped(self):
+        # delete_ebs_volume without a region should be skipped with an error.
         c, _ = _console()
         sec_findings = [
             {
@@ -459,8 +460,7 @@ class TestSectionRemediation:
             }
         ]
         with (
-            patch("aws_lighthouse.cli.Prompt.ask", return_value="1"),
-            patch("aws_lighthouse.cli.typer.confirm", return_value=True),
+            patch("aws_lighthouse.cli.Prompt.ask", return_value="3"),
             patch("aws_lighthouse.cli.logger.error") as mock_error,
             patch(
                 "aws_lighthouse.tools.remediation_actions.delete_ebs_volume",
@@ -471,9 +471,10 @@ class TestSectionRemediation:
 
         mock_action.assert_not_called()
         mock_error.assert_called_once()
-        assert "Missing region for remediation" in mock_error.call_args[0][0]
+        assert "Missing region for" in mock_error.call_args[0][0]
 
-    def test_preview_confirmation_blocks_remediation_execution(self):
+    def test_skipping_phases_blocks_remediation_execution(self):
+        # Answering "none" skips all phases without executing any action.
         c, _ = _console()
         sec_findings = [
             {
@@ -486,8 +487,7 @@ class TestSectionRemediation:
             }
         ]
         with (
-            patch("aws_lighthouse.cli.Prompt.ask", return_value="all"),
-            patch("aws_lighthouse.cli.typer.confirm", return_value=False),
+            patch("aws_lighthouse.cli.Prompt.ask", return_value="none"),
             patch(
                 "aws_lighthouse.tools.remediation_actions.delete_ebs_volume",
                 return_value=True,
