@@ -20,7 +20,7 @@ from rich.rule import Rule
 from rich.table import Table
 from rich.text import Text
 
-from .auth import get_aws_session
+from .auth import get_aws_session, profile_context
 from .db import db_manager
 from .logger import logger
 from .opportunities import (
@@ -140,6 +140,18 @@ _DB_HEALTH_LABELS = {
     "get_opportunity_events": "Opportunity history reads",
     "update_opportunity_state": "Opportunity state updates",
 }
+
+
+def _parse_profiles(raw: str) -> list[str]:
+    """Parse comma-separated AWS profile names, strip whitespace, deduplicate preserving order."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for p in raw.split(","):
+        name = p.strip()
+        if name and name not in seen:
+            seen.add(name)
+            result.append(name)
+    return result
 
 
 def _scan_scope_key(
@@ -2508,6 +2520,109 @@ def _run_analyze_cycle(
             logger.console = original_logger_console
 
 
+def _render_multi_profile_summary_panel(
+    c: Console,
+    profile_results: list[dict[str, Any]],
+) -> None:
+    """Render a cross-account findings summary after all profiles have been scanned."""
+    table = Table(
+        box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False
+    )
+    table.add_column("Profile", style="bold", no_wrap=True)
+    table.add_column("Account", style="dim", no_wrap=True)
+    table.add_column("Security", justify="right")
+    table.add_column("IAM", justify="right")
+    table.add_column("Cost Waste", justify="right")
+    table.add_column("Tagging", justify="right")
+    for r in profile_results:
+        v1 = r.get("v1", {})
+        error = r.get("error")
+        if error:
+            table.add_row(
+                r["profile"],
+                "[red]FAILED[/red]",
+                "-",
+                "-",
+                "-",
+                "-",
+            )
+        else:
+            table.add_row(
+                r["profile"],
+                v1.get("account_id", "unknown"),
+                str(len(v1.get("security_findings", []))),
+                str(len(v1.get("iam_findings", []))),
+                str(len(v1.get("cost_waste", []))),
+                str(len(v1.get("tagging_findings", []))),
+            )
+    c.print(
+        Panel(
+            table,
+            title="[bold cyan]Multi-Profile Summary[/bold cyan]",
+            border_style="cyan",
+            padding=(0, 1),
+        )
+    )
+    c.print()
+
+
+def _run_multi_profile_analyze(
+    *,
+    profiles: list[str],
+    days: int,
+    output_mode: str,
+    json_schema: str,
+    since_last: bool,
+    interactive: bool,
+    policy: ScanPolicy | None,
+) -> None:
+    """Run analyze sequentially for each profile and render a cross-account summary."""
+    profile_results: list[dict[str, Any]] = []
+    for profile_name in profiles:
+        if output_mode == "text":
+            logger.console.print(
+                Rule(f" profile: {profile_name} ", style="cyan", align="center")
+            )
+        try:
+            with profile_context(profile_name):
+                payloads = _run_analyze_cycle(
+                    days=days,
+                    region=None,
+                    output_mode=output_mode,
+                    interactive=interactive,
+                    since_last=since_last,
+                    policy=policy,
+                )
+            profile_results.append({"profile": profile_name, **payloads})
+        except Exception as exc:
+            logger.error(f"Profile '{profile_name}' scan failed: {exc}")
+            profile_results.append({"profile": profile_name, "error": str(exc)})
+
+    if output_mode == "json":
+        schema = json_schema
+        print(
+            json.dumps(
+                {
+                    "profiles": [
+                        {
+                            "profile": r["profile"],
+                            **(
+                                {"data": r[schema]}
+                                if schema in r
+                                else {"error": r.get("error")}
+                            ),
+                        }
+                        for r in profile_results
+                    ]
+                },
+                default=str,
+                indent=2,
+            )
+        )
+    else:
+        _render_multi_profile_summary_panel(logger.console, profile_results)
+
+
 @app.command()
 def analyze(
     days: int = typer.Option(
@@ -2545,8 +2660,36 @@ def analyze(
         "--interactive/--no-interactive",
         help="Enable interactive remediation and CUR deployment prompts (default: disabled).",
     ),
+    profiles: str | None = typer.Option(
+        None,
+        "--profiles",
+        help="Comma-separated AWS profile names to scan (e.g. dev,staging,prod). Cannot be combined with --region.",
+    ),
 ) -> None:
     """Retrieve read-only state (inventory, cost, security) and render a dashboard."""
+    if profiles is not None and region is not None:
+        raise typer.BadParameter(
+            "--profiles and --region cannot be used together. "
+            "Use --profiles to scan multiple accounts, or --region to target one region."
+        )
+    if profiles is not None:
+        profile_list = _parse_profiles(profiles)
+        if not profile_list:
+            raise typer.BadParameter(
+                "--profiles requires at least one non-empty profile name."
+            )
+        output_mode, schema = _validate_output_options(output, json_schema)
+        policy = _load_scan_policy(config)
+        _run_multi_profile_analyze(
+            profiles=profile_list,
+            days=days,
+            output_mode=output_mode,
+            json_schema=schema,
+            since_last=since_last,
+            interactive=interactive,
+            policy=policy,
+        )
+        return
     _run_analyze_command(
         days=days,
         region=region,
@@ -2927,6 +3070,7 @@ def _run_shell_analyze(c: Console, command_text: str) -> None:  # noqa: S105
     since_last = False
     config: Path | None = None
     interactive = False
+    profiles: str | None = None
     value_flags = {
         "--days": "days",
         "-d": "days",
@@ -2936,6 +3080,7 @@ def _run_shell_analyze(c: Console, command_text: str) -> None:  # noqa: S105
         "-o": "output",
         "--json-schema": "json_schema",
         "--config": "config",
+        "--profiles": "profiles",
     }
     boolean_flags = {
         "--since-last": ("since_last", True),
@@ -2968,6 +3113,8 @@ def _run_shell_analyze(c: Console, command_text: str) -> None:  # noqa: S105
                 json_schema = option_value
             elif option_name == "config":
                 config = Path(option_value)
+            elif option_name == "profiles":
+                profiles = option_value
         elif arg_token in boolean_flags:
             bool_option_name, bool_option_value = boolean_flags[arg_token]
             if bool_option_name == "since_last":
@@ -2978,6 +3125,22 @@ def _run_shell_analyze(c: Console, command_text: str) -> None:  # noqa: S105
             logger.error(f"Unknown analyze option: {arg_token}")
             return
         idx += 1
+
+    if profiles is not None:
+        profile_list = _parse_profiles(profiles)
+        if profile_list:
+            output_mode_val, schema_val = _validate_output_options(output, json_schema)
+            policy_val = _load_scan_policy(config)
+            _run_multi_profile_analyze(
+                profiles=profile_list,
+                days=days,
+                output_mode=output_mode_val,
+                json_schema=schema_val,
+                since_last=since_last,
+                interactive=interactive,
+                policy=policy_val,
+            )
+            return
 
     _run_analyze_command(
         days=days,

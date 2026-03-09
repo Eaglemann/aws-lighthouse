@@ -1,4 +1,6 @@
+import contextlib
 import threading
+from collections.abc import Iterator
 from datetime import UTC, datetime
 
 import boto3
@@ -177,3 +179,21 @@ def get_client(service_name: str, region: str | None = None):
     accept an optional region parameter).
     """
     return auth_manager.get_client(service_name, region)
+
+
+@contextlib.contextmanager
+def profile_context(profile_name: str) -> Iterator[None]:
+    """Temporarily configure auth_manager to use a named AWS profile.
+
+    Saves and restores the global auth_manager session and client cache.
+    NOT thread-safe -- designed for sequential single-profile scan loops.
+    """
+    saved_session = auth_manager._session
+    saved_clients = dict(auth_manager._clients)
+    try:
+        auth_manager._session = boto3.Session(profile_name=profile_name)
+        auth_manager._clients = {}
+        yield
+    finally:
+        auth_manager._session = saved_session
+        auth_manager._clients = saved_clients
