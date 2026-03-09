@@ -656,6 +656,44 @@ def _check_kms_rotation(region: str | None = None) -> ScanResult:
     return error_result(data=findings, errors=errors) if errors else ok_result(findings)
 
 
+def _check_vpc_flow_logs(ec2, region: str | None = None) -> ScanResult:
+    """Flag VPCs that do not have VPC Flow Logs enabled."""
+    findings: list[SecurityFinding] = []
+    try:
+        vpcs = ec2.describe_vpcs(
+            Filters=[{"Name": "state", "Values": ["available"]}]
+        ).get("Vpcs", [])
+        for vpc in vpcs:
+            vpc_id = vpc["VpcId"]
+            flow_logs = ec2.describe_flow_logs(
+                Filters=[{"Name": "resource-id", "Values": [vpc_id]}]
+            ).get("FlowLogs", [])
+            if not flow_logs:
+                findings.append(
+                    {
+                        "severity": "MEDIUM",
+                        "resource": vpc_id,
+                        "finding": f"VPC {vpc_id} has no flow logs enabled",
+                        "remediation_type": "vpc_flow_logs",
+                        "remediation_label": f"Enable flow logs for {vpc_id}",
+                    }
+                )
+    except (ClientError, BotoCoreError) as e:
+        logger.error(f"Failed to check VPC flow logs: {e}")
+        return error_result(
+            data=findings,
+            errors=[
+                scan_error_from_exception(
+                    service="ec2",
+                    operation="DescribeVpcs",
+                    exc=e,
+                    region=region,
+                )
+            ],
+        )
+    return ok_result(findings)
+
+
 def run_security_scan(
     s3s: list[dict[str, Any]],
     rdss: list[dict[str, Any]],
@@ -690,4 +728,5 @@ def run_security_scan(
     results.append(_check_cloudtrail(_cl("cloudtrail"), region))
     results.append(_check_guardduty_enabled(_cl("guardduty"), region))
     results.append(_check_kms_rotation(region))
+    results.append(_check_vpc_flow_logs(ec2, region))
     return merge_list_results(results)
