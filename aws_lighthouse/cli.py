@@ -1,5 +1,6 @@
 import io
 import json
+import re
 import shlex
 import time
 from collections.abc import Mapping, Sequence
@@ -2089,13 +2090,135 @@ def _section_cur_upsell(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SARIF 2.1.0 output helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _finding_to_rule_id(text: str) -> str:
+    """Convert a finding description to a kebab-case SARIF rule ID."""
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:64]
+
+
+def _rule_id_to_name(rule_id: str) -> str:
+    """Convert a kebab-case rule ID to CamelCase rule name."""
+    return "".join(part.capitalize() for part in rule_id.split("-"))
+
+
+def _severity_to_sarif_level(severity: str | None) -> str:
+    """Map scan severity to SARIF level."""
+    if severity in ("CRITICAL", "HIGH"):
+        return "error"
+    if severity == "MEDIUM":
+        return "warning"
+    if severity == "LOW":
+        return "note"
+    return "warning"
+
+
+def _build_sarif_output(payloads: dict[str, Any], account_id: str) -> dict[str, Any]:
+    """Build a SARIF 2.1.0 document from scan payloads."""
+    v1 = payloads.get("v1", {})
+
+    # Collect all (finding_text, resource_id, severity) tuples
+    raw_findings: list[tuple[str, str, str | None]] = []
+    for f in v1.get("security_findings", []):
+        raw_findings.append(
+            (str(f.get("finding", "")), str(f.get("resource", "")), f.get("severity"))
+        )
+    for f in v1.get("iam_findings", []):
+        raw_findings.append(
+            (
+                str(f.get("reason", "")),
+                str(f.get("principal_name", "")),
+                f.get("severity"),
+            )
+        )
+    for f in v1.get("cost_waste", []):
+        raw_findings.append(
+            (str(f.get("finding", "")), str(f.get("resource", "")), None)
+        )
+    for f in v1.get("tagging_findings", []):
+        missing = f.get("missing_tags", [])
+        text = (
+            "Missing tags: " + ", ".join(missing)
+            if missing
+            else "Missing required tags"
+        )
+        raw_findings.append((text, str(f.get("resource_id", "")), None))
+    for f in v1.get("cloudwatch_findings", []):
+        missing = f.get("missing_alarms", [])
+        text = (
+            "Missing alarms: " + ", ".join(missing)
+            if missing
+            else "Missing CloudWatch alarms"
+        )
+        raw_findings.append((text, str(f.get("resource_id", "")), None))
+
+    # Build unique rules (dedup by rule_id)
+    seen_rules: dict[str, dict[str, Any]] = {}
+    for finding_text, _, severity in raw_findings:
+        rid = _finding_to_rule_id(finding_text)
+        if rid and rid not in seen_rules:
+            level = _severity_to_sarif_level(severity)
+            seen_rules[rid] = {
+                "id": rid,
+                "name": _rule_id_to_name(rid),
+                "shortDescription": {"text": finding_text},
+                "defaultConfiguration": {"level": level},
+            }
+
+    # Build results
+    results: list[dict[str, Any]] = []
+    for finding_text, resource_id, severity in raw_findings:
+        rid = _finding_to_rule_id(finding_text)
+        if not rid:
+            continue
+        results.append(
+            {
+                "ruleId": rid,
+                "level": _severity_to_sarif_level(severity),
+                "message": {"text": finding_text},
+                "locations": [
+                    {
+                        "logicalLocations": [
+                            {
+                                "name": resource_id,
+                                "kind": "aws-resource",
+                                "fullyQualifiedName": f"aws://{account_id}/{resource_id}",
+                            }
+                        ]
+                    }
+                ],
+            }
+        )
+
+    return {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": "aws-lighthouse",
+                        "version": "0.1.0",
+                        "informationUri": "https://github.com/your-org/aws-lighthouse",
+                        "rules": list(seen_rules.values()),
+                    }
+                },
+                "results": results,
+            }
+        ],
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # analyze command
 # ─────────────────────────────────────────────────────────────────────────────
 def _validate_output_options(output: str, json_schema: str) -> tuple[str, str]:
     output_mode = output.lower().strip()
     schema = json_schema.lower().strip()
-    if output_mode not in {"text", "json"}:
-        raise typer.BadParameter("--output must be either 'text' or 'json'")
+    if output_mode not in {"text", "json", "sarif"}:
+        raise typer.BadParameter("--output must be 'text', 'json', or 'sarif'")
     if schema not in {"v1", "v2"}:
         raise typer.BadParameter("--json-schema must be either 'v1' or 'v2'")
     return output_mode, schema
@@ -2121,7 +2244,7 @@ def _run_analyze_cycle(
 ) -> dict[str, dict[str, Any]]:
     """Execute one analyze cycle and return both v1 and v2 machine payloads."""
     effective_policy = policy or ScanPolicy.default()
-    json_mode = output_mode == "json"
+    json_mode = output_mode in {"json", "sarif"}
     c = Console(file=io.StringIO(), no_color=True) if json_mode else logger.console
     original_logger_console = logger.console
     if json_mode:
@@ -2732,7 +2855,7 @@ def analyze(
         "text",
         "--output",
         "-o",
-        help="Output format: text (default) or json",
+        help="Output format: text (default), json, or sarif",
     ),
     json_schema: str = typer.Option(
         "v1",
@@ -2843,13 +2966,17 @@ def _run_analyze_command(
                     drift_result["data"] if schema == "v1" else drift_result
                 )
             print(json.dumps(out, indent=2, default=str))
+        elif output_mode == "sarif":
+            account_id = payloads["v1"].get("account_id", "unknown")
+            sarif_doc = _build_sarif_output(payloads, str(account_id))
+            print(json.dumps(sarif_doc, indent=2, default=str))
     except Exception as exc:
         log_path = (
             logger.record_exception("Analyze command failed", exc)
-            if output_mode == "json"
+            if output_mode in {"json", "sarif"}
             else logger.exception("Analyze command failed", exc)
         )
-        if output_mode == "json":
+        if output_mode in {"json", "sarif"}:
             print(
                 json.dumps(
                     {
