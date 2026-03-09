@@ -99,6 +99,11 @@ class TestGetHclFix:
         assert fix is not None
         assert "publicly_accessible" in fix
 
+    def test_vpc_flow_logs(self):
+        fix = _get_hcl_fix("VPC vpc-123 has no flow logs enabled", "vpc-123")
+        assert fix is not None
+        assert "aws_flow_log" in fix
+
     def test_no_match_returns_none(self):
         assert _get_hcl_fix("some unrecognized finding text here", "res") is None
 
