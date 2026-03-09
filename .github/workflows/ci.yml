@@ -124,7 +124,11 @@ jobs:
       with:
         fetch-depth: 0
 
+    - name: Install Gitleaks
+      run: |
+        curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.22.1/gitleaks_8.22.1_linux_x64.tar.gz \
+          | tar -xz -C /tmp gitleaks
+        sudo mv /tmp/gitleaks /usr/local/bin/gitleaks
+
     - name: Scan for secrets with Gitleaks
-      uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: gitleaks detect --source . --log-opts="--all" --verbose
