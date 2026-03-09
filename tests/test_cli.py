@@ -12,6 +12,7 @@ from typer.testing import CliRunner
 from aws_lighthouse.cli import (
     _count,
     _dollar,
+    _parse_profiles,
     _parse_remediation_selection,
     _pct_style,
     _scan_scope_key,
@@ -2334,3 +2335,132 @@ class TestShellCommands:
         output = capsys.readouterr().out
         assert "Use /logs to inspect the latest traceback" in output
         mock_exception.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Multi-profile support
+# ---------------------------------------------------------------------------
+
+
+class TestParseProfiles:
+    """Unit tests for _parse_profiles helper."""
+
+    def test_single_profile(self) -> None:
+        assert _parse_profiles("dev") == ["dev"]
+
+    def test_multiple_profiles(self) -> None:
+        assert _parse_profiles("dev,staging,prod") == ["dev", "staging", "prod"]
+
+    def test_strips_whitespace(self) -> None:
+        assert _parse_profiles(" dev , staging ") == ["dev", "staging"]
+
+    def test_deduplicates_preserving_order(self) -> None:
+        assert _parse_profiles("dev,dev,staging") == ["dev", "staging"]
+
+    def test_empty_string_returns_empty(self) -> None:
+        assert _parse_profiles("") == []
+
+    def test_commas_only_returns_empty(self) -> None:
+        assert _parse_profiles(",,,") == []
+
+
+class TestAnalyzeMultiProfile:
+    """Integration tests for analyze --profiles."""
+
+    def test_profiles_flag_runs_per_profile(self) -> None:
+        runner = CliRunner()
+        calls: list[dict] = []
+
+        def fake_cycle(**kwargs: object) -> dict:
+            calls.append(dict(kwargs))
+            return {
+                "v1": {
+                    "account_id": "123456789012",
+                    "security_findings": [],
+                    "iam_findings": [],
+                    "cost_waste": [],
+                    "tagging_findings": [],
+                },
+                "v2": {},
+            }
+
+        with (
+            patch("aws_lighthouse.cli._run_analyze_cycle", side_effect=fake_cycle),
+            patch("aws_lighthouse.cli.profile_context") as mock_ctx,
+            patch.multiple(
+                "aws_lighthouse.cli",
+                **{k.split(".")[-1]: v for k, v in _PATCHES.items()},
+            ),
+        ):
+            mock_ctx.return_value.__enter__ = lambda s: None
+            mock_ctx.return_value.__exit__ = lambda s, *a: False
+            result = runner.invoke(app, ["analyze", "--profiles", "dev,staging"])
+
+        assert result.exit_code == 0, result.output
+        assert len(calls) == 2
+
+    def test_profiles_and_region_are_mutually_exclusive(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(
+            app, ["analyze", "--profiles", "dev", "--region", "us-east-1"]
+        )
+        assert result.exit_code != 0
+
+    def test_profiles_empty_string_is_rejected(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(app, ["analyze", "--profiles", ""])
+        assert result.exit_code != 0
+
+    def test_profiles_json_output_wraps_in_profiles_key(self) -> None:
+        runner = CliRunner()
+
+        def fake_cycle(**kwargs: object) -> dict:
+            return {
+                "v1": {
+                    "account_id": "111111111111",
+                    "security_findings": [],
+                    "iam_findings": [],
+                    "cost_waste": [],
+                    "tagging_findings": [],
+                },
+                "v2": {},
+            }
+
+        with (
+            patch("aws_lighthouse.cli._run_analyze_cycle", side_effect=fake_cycle),
+            patch("aws_lighthouse.cli.profile_context") as mock_ctx,
+            patch.multiple(
+                "aws_lighthouse.cli",
+                **{k.split(".")[-1]: v for k, v in _PATCHES.items()},
+            ),
+        ):
+            mock_ctx.return_value.__enter__ = lambda s: None
+            mock_ctx.return_value.__exit__ = lambda s, *a: False
+            result = runner.invoke(
+                app, ["analyze", "--profiles", "dev", "--output", "json"]
+            )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert "profiles" in data
+        assert data["profiles"][0]["profile"] == "dev"
+
+    def test_profiles_failed_profile_shows_error_in_summary(self) -> None:
+        runner = CliRunner()
+
+        def fake_cycle(**kwargs: object) -> dict:
+            raise RuntimeError("NoCredentialsError")
+
+        with (
+            patch("aws_lighthouse.cli._run_analyze_cycle", side_effect=fake_cycle),
+            patch("aws_lighthouse.cli.profile_context") as mock_ctx,
+            patch.multiple(
+                "aws_lighthouse.cli",
+                **{k.split(".")[-1]: v for k, v in _PATCHES.items()},
+            ),
+        ):
+            mock_ctx.return_value.__enter__ = lambda s: None
+            mock_ctx.return_value.__exit__ = lambda s, *a: False
+            result = runner.invoke(app, ["analyze", "--profiles", "bad-profile"])
+
+        assert result.exit_code == 0, result.output
