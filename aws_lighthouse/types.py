@@ -245,3 +245,24 @@ class OpportunityEvent(TypedDict):
     event_type: OpportunityEventType
     timestamp: str
     data: dict[str, Any]
+
+
+class TerraformResourceInfo(TypedDict):
+    """A Terraform resource block that matched a scan finding."""
+
+    resource_type: str  # e.g. "aws_s3_bucket"
+    resource_name: str  # Terraform logical name
+    tf_file: str  # filename e.g. "main.tf"
+
+
+class TerraformDriftFinding(TypedDict):
+    """One classified finding from classify_findings_by_iac()."""
+
+    source_kind: str
+    resource_id: str
+    finding: str
+    severity: str | None
+    iac_managed: bool
+    shadow_infra: bool
+    tf_resource: TerraformResourceInfo | None
+    hcl_fix: str | None

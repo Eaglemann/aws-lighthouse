@@ -57,6 +57,7 @@ from .tools.ri_sp_coverage import get_ri_sp_coverage
 from .tools.security_scan import run_security_scan
 from .tools.sg_blast_radius import get_sg_blast_radius
 from .tools.tagging import check_tagging_compliance
+from .tools.terraform_drift import classify_findings_by_iac
 from .types import (
     CostFinding,
     OpportunitySourceKind,
@@ -2566,6 +2567,99 @@ def _render_multi_profile_summary_panel(
     c.print()
 
 
+def _render_terraform_drift_panel(
+    c: Console,
+    drift_result: ScanResult,
+    tf_directory: str,
+) -> None:
+    """Render IaC-managed vs shadow-infra classification for security findings."""
+    if not drift_result["ok"]:
+        errors = drift_result["errors"]
+        msg = errors[0]["message"] if errors else "Unknown error"
+        c.print(
+            Panel(
+                f"[yellow]{msg}[/yellow]",
+                title="[bold dim]🏗️ Terraform Drift[/bold dim]",
+                border_style="yellow",
+                padding=(0, 1),
+            )
+        )
+        c.print()
+        return
+
+    findings: list[dict[str, Any]] = cast(list[dict[str, Any]], drift_result["data"])
+    if not findings:
+        return
+
+    iac = [f for f in findings if f.get("iac_managed")]
+    shadow = [f for f in findings if f.get("shadow_infra")]
+
+    content_parts: list[Any] = []
+
+    if iac:
+        iac_table = Table(
+            box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False
+        )
+        iac_table.add_column("Resource", style="dim", no_wrap=True)
+        iac_table.add_column("Finding")
+        iac_table.add_column("TF Resource", style="dim", no_wrap=True)
+        for f in iac:
+            tf = cast(dict[str, Any], f.get("tf_resource")) or {}
+            tf_label = (
+                f"{tf.get('resource_type', '?')}.{tf.get('resource_name', '?')} "
+                f"({tf.get('tf_file', '?')})"
+                if tf
+                else "[dim]found in .tf[/dim]"
+            )
+            iac_table.add_row(
+                str(f.get("resource_id", ""))[:40],
+                str(f.get("finding", ""))[:60],
+                tf_label,
+            )
+        content_parts.append(
+            Text.from_markup("[bold green]IaC Managed — fix in .tf:[/bold green]")
+        )
+        content_parts.append(iac_table)
+
+    if shadow:
+        shadow_table = Table(
+            box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False
+        )
+        shadow_table.add_column("Resource", style="dim", no_wrap=True)
+        shadow_table.add_column("Finding")
+        shadow_table.add_column("HCL Fix", justify="center")
+        for f in shadow:
+            shadow_table.add_row(
+                str(f.get("resource_id", ""))[:40],
+                str(f.get("finding", ""))[:60],
+                "✓" if f.get("hcl_fix") else "—",
+            )
+        content_parts.append(
+            Text.from_markup(
+                "[bold yellow]Shadow Infrastructure — not in .tf:[/bold yellow]"
+            )
+        )
+        content_parts.append(shadow_table)
+
+    if not content_parts:
+        content_parts.append(
+            Text.from_markup("[green]All findings are IaC-managed.[/green]")
+        )
+
+    c.print(
+        Panel(
+            Group(*content_parts),
+            title=(
+                f"[bold cyan]🏗️ Terraform Drift[/bold cyan]  "
+                f"[dim]dir={tf_directory}  iac={len(iac)}  shadow={len(shadow)}[/dim]"
+            ),
+            border_style="cyan",
+            padding=(0, 1),
+        )
+    )
+    c.print()
+
+
 def _run_multi_profile_analyze(
     *,
     profiles: list[str],
@@ -2665,6 +2759,11 @@ def analyze(
         "--profiles",
         help="Comma-separated AWS profile names to scan (e.g. dev,staging,prod). Cannot be combined with --region.",
     ),
+    terraform_dir: str | None = typer.Option(
+        None,
+        "--terraform-dir",
+        help="Path to a Terraform directory. Classifies findings as IaC-managed or shadow infra.",
+    ),
 ) -> None:
     """Retrieve read-only state (inventory, cost, security) and render a dashboard."""
     if profiles is not None and region is not None:
@@ -2698,6 +2797,7 @@ def analyze(
         since_last=since_last,
         config=config,
         interactive=interactive,
+        terraform_dir=terraform_dir,
     )
 
 
@@ -2710,6 +2810,7 @@ def _run_analyze_command(
     since_last: bool,
     config: Path | None,
     interactive: bool,
+    terraform_dir: str | None = None,
 ) -> None:
     """Run the analyze command through the shared validation and execution path."""
     output_mode, schema = _validate_output_options(output, json_schema)
@@ -2723,8 +2824,25 @@ def _run_analyze_command(
             since_last=since_last,
             policy=policy,
         )
+        drift_result: ScanResult | None = None
+        if terraform_dir:
+            security_findings = cast(
+                list[dict[str, Any]], payloads["v1"].get("security_findings", [])
+            )
+            drift_result = classify_findings_by_iac(
+                security_findings, terraform_dir, source_kind="security"
+            )
+            if output_mode == "text":
+                _render_terraform_drift_panel(
+                    logger.console, drift_result, terraform_dir
+                )
         if output_mode == "json":
-            print(json.dumps(payloads[schema], indent=2, default=str))
+            out = dict(payloads[schema])
+            if drift_result is not None:
+                out["terraform_drift"] = (
+                    drift_result["data"] if schema == "v1" else drift_result
+                )
+            print(json.dumps(out, indent=2, default=str))
     except Exception as exc:
         log_path = (
             logger.record_exception("Analyze command failed", exc)
@@ -3071,6 +3189,7 @@ def _run_shell_analyze(c: Console, command_text: str) -> None:  # noqa: S105
     config: Path | None = None
     interactive = False
     profiles: str | None = None
+    terraform_dir: str | None = None
     value_flags = {
         "--days": "days",
         "-d": "days",
@@ -3081,6 +3200,7 @@ def _run_shell_analyze(c: Console, command_text: str) -> None:  # noqa: S105
         "--json-schema": "json_schema",
         "--config": "config",
         "--profiles": "profiles",
+        "--terraform-dir": "terraform_dir",
     }
     boolean_flags = {
         "--since-last": ("since_last", True),
@@ -3115,6 +3235,8 @@ def _run_shell_analyze(c: Console, command_text: str) -> None:  # noqa: S105
                 config = Path(option_value)
             elif option_name == "profiles":
                 profiles = option_value
+            elif option_name == "terraform_dir":
+                terraform_dir = option_value
         elif arg_token in boolean_flags:
             bool_option_name, bool_option_value = boolean_flags[arg_token]
             if bool_option_name == "since_last":
@@ -3150,6 +3272,7 @@ def _run_shell_analyze(c: Console, command_text: str) -> None:  # noqa: S105
         since_last=since_last,
         config=config,
         interactive=interactive,
+        terraform_dir=terraform_dir,
     )
 
 

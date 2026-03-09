@@ -593,6 +593,35 @@ def tool_get_sg_blast_radius(schema_version: Literal["v1", "v2"] = "v1") -> str:
     return _format_scan_payload(result, schema_version)
 
 
+class _TerraformDriftArgs(BaseModel):
+    tf_directory: str = Field(
+        description="Absolute path to a directory containing .tf files."
+    )
+
+
+@tool(args_schema=_TerraformDriftArgs)
+def tool_get_terraform_drift(tf_directory: str) -> str:
+    """Classify current security findings as IaC-managed or shadow infrastructure.
+
+    Reads .tf files from tf_directory, then for each security finding checks
+    whether the affected resource appears in Terraform source. Returns:
+    - iac_managed findings with suggested HCL fix snippets to add to .tf files
+    - shadow_infra findings not tracked in Terraform (need import or API fix)
+    """
+    from .tools.security_scan import run_security_scan as _run_sec
+    from .tools.terraform_drift import classify_findings_by_iac as _classify
+
+    s3_result = _get_s3_inventory()
+    rds_result = _get_rds_inventory()
+    sec = _run_sec(
+        s3s=s3_result["data"] if s3_result["ok"] else [],
+        rdss=rds_result["data"] if rds_result["ok"] else [],
+    )
+    findings = sec["data"] if sec["ok"] else []
+    drift = _classify(findings, tf_directory, source_kind="security")
+    return json.dumps(drift, default=str)
+
+
 @tool(args_schema=_SecurityScanArgs)
 def tool_run_security_scan(
     region: str = "",
@@ -786,6 +815,7 @@ tools = [
     tool_get_cost_attribution,
     tool_plan_remediation,
     tool_get_sg_blast_radius,
+    tool_get_terraform_drift,
     tool_run_cost_scan,
     tool_check_tagging_compliance,
     tool_detect_overpermissive_iam,
@@ -1035,6 +1065,7 @@ SAFE_TOOLS = {
     "tool_get_cost_attribution",
     "tool_plan_remediation",
     "tool_get_sg_blast_radius",
+    "tool_get_terraform_drift",
     "tool_run_cost_scan",
     "tool_check_tagging_compliance",
     "tool_detect_overpermissive_iam",
