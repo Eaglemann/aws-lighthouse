@@ -34,6 +34,7 @@ _SCHEMA_GUARDED_TOOLS: frozenset[str] = frozenset(
         "tool_get_ri_sp_coverage",
         "tool_detect_cost_anomalies",
         "tool_get_cost_attribution",
+        "tool_get_compute_optimizer",
         "tool_plan_remediation",
         "tool_get_sg_blast_radius",
         "tool_run_cost_scan",
@@ -530,6 +531,21 @@ def tool_get_cost_attribution(schema_version: Literal["v1", "v2"] = "v1") -> str
 
 
 @tool
+def tool_get_compute_optimizer(schema_version: Literal["v1", "v2"] = "v1") -> str:
+    """Get AWS Compute Optimizer EC2 rightsizing and Graviton migration recommendations.
+
+    Returns a list of EC2 instances that could be resized or migrated to Graviton
+    for cost savings.  Each recommendation includes current vs recommended instance
+    type, estimated monthly savings, performance risk, and whether the target is a
+    Graviton processor.
+    """
+    from .tools.compute_optimizer import get_compute_optimizer_recommendations as _get
+
+    result = _get()
+    return _format_scan_payload(result, schema_version)
+
+
+@tool
 def tool_plan_remediation(schema_version: Literal["v1", "v2"] = "v1") -> str:
     """Build a risk-tiered batch remediation plan from current scan findings.
 
@@ -813,6 +829,7 @@ tools = [
     tool_get_ri_sp_recommendations,
     tool_detect_cost_anomalies,
     tool_get_cost_attribution,
+    tool_get_compute_optimizer,
     tool_plan_remediation,
     tool_get_sg_blast_radius,
     tool_get_terraform_drift,
@@ -1063,6 +1080,7 @@ SAFE_TOOLS = {
     "tool_get_ri_sp_recommendations",
     "tool_detect_cost_anomalies",
     "tool_get_cost_attribution",
+    "tool_get_compute_optimizer",
     "tool_plan_remediation",
     "tool_get_sg_blast_radius",
     "tool_get_terraform_drift",

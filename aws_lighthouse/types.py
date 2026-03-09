@@ -266,3 +266,19 @@ class TerraformDriftFinding(TypedDict):
     shadow_infra: bool
     tf_resource: TerraformResourceInfo | None
     hcl_fix: str | None
+
+
+class ComputeOptimizerRecommendation(TypedDict):
+    """One EC2 instance recommendation from AWS Compute Optimizer."""
+
+    account_id: str
+    instance_id: str
+    instance_name: str
+    current_type: str
+    recommended_type: str
+    estimated_monthly_savings_usd: float
+    estimated_savings_pct: float
+    performance_risk: str  # "VeryLow" | "Low" | "Medium" | "High"
+    recommendation_reason: str  # human-readable summary
+    is_graviton: bool  # True when recommended type is Graviton
+    region: str | None

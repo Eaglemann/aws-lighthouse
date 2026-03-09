@@ -41,6 +41,7 @@ from .scan_contract import (
 )
 from .tools.cloudtrail_attribution import get_cost_attribution
 from .tools.cloudwatch_scan import detect_cloudwatch_gaps
+from .tools.compute_optimizer import get_compute_optimizer_recommendations
 from .tools.cost import get_cost_forecast, get_monthly_cost_summary
 from .tools.cost_anomaly import detect_cost_anomalies
 from .tools.cost_scan import run_cost_scan
@@ -400,6 +401,7 @@ _SUMMARY_SECTION_LABELS = {
     "sg_blast_radius": "SG Blast Radius",
     "iam_findings": "IAM",
     "cloudwatch_findings": "CloudWatch",
+    "compute_optimizer": "Compute Optimizer",
     "cost_waste": "Cost Waste",
     "tagging_findings": "Tagging",
 }
@@ -1571,6 +1573,80 @@ def _section_ri_sp_advisor(c: Console, render: bool = True) -> dict[str, ScanRes
     return {"ri": ri_result, "sp": sp_result}
 
 
+def _render_compute_optimizer_panel(
+    c: Console,
+    result: ScanResult,
+) -> None:
+    """Render Compute Optimizer EC2 rightsizing recommendations as a panel."""
+    recs = cast(list[dict[str, Any]], result["data"])
+    if not result["ok"] or not recs:
+        return
+
+    _RISK_STYLE = {
+        "VeryLow": "green",
+        "Low": "green",
+        "Medium": "yellow",
+        "High": "red",
+    }
+
+    table = Table(
+        box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False
+    )
+    table.add_column("Instance", style="cyan", no_wrap=True)
+    table.add_column("Current", style="dim", no_wrap=True)
+    table.add_column("Recommended", no_wrap=True)
+    table.add_column("Savings/mo", justify="right", style="bold green")
+    table.add_column("Savings%", justify="right")
+    table.add_column("Risk", no_wrap=True)
+    table.add_column("Graviton", no_wrap=True)
+
+    for rec in recs[:20]:
+        instance_label = (
+            f"{rec['instance_name']} ({rec['instance_id']})"
+            if rec.get("instance_name")
+            else rec["instance_id"]
+        )
+        rec_style = "green" if rec.get("is_graviton") else "cyan"
+        risk_style = _RISK_STYLE.get(rec["performance_risk"], "white")
+        graviton_mark = "[green]\u2713[/green]" if rec.get("is_graviton") else ""
+
+        table.add_row(
+            instance_label,
+            rec["current_type"],
+            f"[{rec_style}]{rec['recommended_type']}[/{rec_style}]",
+            f"${rec['estimated_monthly_savings_usd']:.2f}",
+            f"{rec['estimated_savings_pct']:.1f}%",
+            f"[{risk_style}]{rec['performance_risk']}[/{risk_style}]",
+            graviton_mark,
+        )
+
+    total_savings = sum(r["estimated_monthly_savings_usd"] for r in recs)
+    c.print(
+        Panel(
+            table,
+            title=(
+                f"[bold cyan]Compute Optimizer — {len(recs)} recommendation(s)[/bold cyan]  "
+                f"[dim]potential savings [bold]${total_savings:,.0f}[/bold]/mo[/dim]"
+            ),
+            border_style="cyan",
+            padding=(0, 1),
+        )
+    )
+    c.print()
+
+
+def _section_compute_optimizer(c: Console, render: bool = True) -> ScanResult:
+    """Fetch Compute Optimizer recommendations and optionally render them."""
+    with c.status(
+        "[cyan]Fetching Compute Optimizer recommendations...[/cyan]",
+        spinner="dots",
+    ):
+        result = get_compute_optimizer_recommendations()
+    if render:
+        _render_compute_optimizer_panel(c, result)
+    return result
+
+
 def _section_security(
     c: Console,
     s3s: list,
@@ -2153,6 +2229,13 @@ def _build_sarif_output(payloads: dict[str, Any], account_id: str) -> dict[str, 
             else "Missing CloudWatch alarms"
         )
         raw_findings.append((text, str(f.get("resource_id", "")), None))
+    for f in v1.get("compute_optimizer", []):
+        text = (
+            f"EC2 rightsizing: {f.get('current_type', '')} -> "
+            f"{f.get('recommended_type', '')} "
+            f"(saves ${f.get('estimated_monthly_savings_usd', 0):.2f}/mo)"
+        )
+        raw_findings.append((text, str(f.get("instance_id", "")), None))
 
     # Build unique rules (dedup by rule_id)
     seen_rules: dict[str, dict[str, Any]] = {}
@@ -2358,6 +2441,7 @@ def _run_analyze_cycle(
             )
         )
         advisor_results = _section_ri_sp_advisor(c, render=False)
+        compute_optimizer_result = _section_compute_optimizer(c, render=False)
         sec_result = (
             _section_security(
                 c,
@@ -2413,6 +2497,7 @@ def _run_analyze_cycle(
             "ri_sp_coverage": ri_sp_result,
             "ri_recommendations": advisor_results["ri"],
             "sp_recommendations": advisor_results["sp"],
+            "compute_optimizer": compute_optimizer_result,
             "security_findings": sec_result,
             "sg_blast_radius": sg_blast_result,
             "iam_findings": iam_result,
@@ -2607,6 +2692,7 @@ def _run_analyze_cycle(
                 _render_ri_sp_advisor_panel(
                     c, advisor_results["ri"], advisor_results["sp"]
                 )
+                _render_compute_optimizer_panel(c, compute_optimizer_result)
 
                 if effective_policy.scan_enabled("cost_waste"):
                     _render_cost_waste_panel(
