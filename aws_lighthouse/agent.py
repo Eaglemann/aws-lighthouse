@@ -35,6 +35,7 @@ _SCHEMA_GUARDED_TOOLS: frozenset[str] = frozenset(
         "tool_detect_cost_anomalies",
         "tool_get_cost_attribution",
         "tool_plan_remediation",
+        "tool_get_sg_blast_radius",
         "tool_run_cost_scan",
         "tool_check_tagging_compliance",
         "tool_detect_overpermissive_iam",
@@ -251,6 +252,7 @@ from .tools.ri_sp_advisor import get_sp_recommendations as _get_sp_recommendatio
 from .tools.ri_sp_coverage import get_ri_sp_coverage as _get_ri_sp_coverage
 from .tools.security import s3_block_public_access
 from .tools.security_scan import run_security_scan as _run_security_scan
+from .tools.sg_blast_radius import get_sg_blast_radius as _get_sg_blast_radius
 from .tools.tagging import check_tagging_compliance as _check_tagging_compliance
 from .tools.terraform import parse_terraform_context
 
@@ -564,6 +566,33 @@ def tool_plan_remediation(schema_version: Literal["v1", "v2"] = "v1") -> str:
     return json.dumps(plan, default=str)
 
 
+@tool
+def tool_get_sg_blast_radius(schema_version: Literal["v1", "v2"] = "v1") -> str:
+    """Analyse the blast radius of open security groups.
+
+    Runs the security scan to find open SGs, then for each flagged group
+    determines: attached EC2/RDS/Lambda resources, public IP exposure,
+    VPC Internet Gateway presence, and recent CloudTrail activity.
+    Returns an exposure verdict (INTERNET_EXPOSED | PRIVATE | UNKNOWN)
+    per security group.
+    """
+    s3_result = _get_s3_inventory()
+    rds_result = _get_rds_inventory()
+    sec_result = _run_security_scan(
+        s3s=s3_result["data"],
+        rdss=rds_result["data"],
+    )
+    sg_ids = list(
+        {
+            f["resource"]
+            for f in sec_result.get("data") or []
+            if str(f.get("resource", "")).startswith("sg-")
+        }
+    )
+    result = _get_sg_blast_radius(sg_ids)
+    return _format_scan_payload(result, schema_version)
+
+
 @tool(args_schema=_SecurityScanArgs)
 def tool_run_security_scan(
     region: str = "",
@@ -756,6 +785,7 @@ tools = [
     tool_detect_cost_anomalies,
     tool_get_cost_attribution,
     tool_plan_remediation,
+    tool_get_sg_blast_radius,
     tool_run_cost_scan,
     tool_check_tagging_compliance,
     tool_detect_overpermissive_iam,
@@ -1004,6 +1034,7 @@ SAFE_TOOLS = {
     "tool_detect_cost_anomalies",
     "tool_get_cost_attribution",
     "tool_plan_remediation",
+    "tool_get_sg_blast_radius",
     "tool_run_cost_scan",
     "tool_check_tagging_compliance",
     "tool_detect_overpermissive_iam",

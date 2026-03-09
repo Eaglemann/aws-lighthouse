@@ -35,6 +35,7 @@ from .scan_contract import (
     error_result,
     is_expected_unavailable_scan_error,
     merge_list_results,
+    ok_result,
     scan_error_reason,
 )
 from .tools.cloudtrail_attribution import get_cost_attribution
@@ -54,6 +55,7 @@ from .tools.remediation_plan import build_remediation_plan, parse_phase_selectio
 from .tools.ri_sp_advisor import get_ri_recommendations, get_sp_recommendations
 from .tools.ri_sp_coverage import get_ri_sp_coverage
 from .tools.security_scan import run_security_scan
+from .tools.sg_blast_radius import get_sg_blast_radius
 from .tools.tagging import check_tagging_compliance
 from .types import (
     CostFinding,
@@ -63,6 +65,7 @@ from .types import (
     ScanError,
     ScanResult,
     SecurityFinding,
+    SGBlastRadius,
 )
 
 app = typer.Typer(
@@ -380,6 +383,7 @@ _SUMMARY_SECTION_LABELS = {
     "ri_recommendations": "RI Recommendations",
     "sp_recommendations": "SP Recommendations",
     "security_findings": "Security",
+    "sg_blast_radius": "SG Blast Radius",
     "iam_findings": "IAM",
     "cloudwatch_findings": "CloudWatch",
     "cost_waste": "Cost Waste",
@@ -1587,6 +1591,97 @@ def _section_security(
     return sec_result
 
 
+def _render_sg_blast_radius_panel(
+    c: Console,
+    blast_result: ScanResult,
+) -> None:
+    """Render a panel showing blast-radius details for each open security group."""
+    blast_list = cast(list[SGBlastRadius], blast_result["data"])
+    if not blast_list:
+        return
+
+    _EXPOSURE_STYLE = {
+        "INTERNET_EXPOSED": "bold red",
+        "UNKNOWN": "bold yellow",
+        "PRIVATE": "bold green",
+    }
+
+    groups: list[Any] = []
+    for br in blast_list:
+        exposure = br["exposure"]
+        style = _EXPOSURE_STYLE.get(exposure, "white")
+        header = Text()
+        header.append(br["sg_id"], style="bold cyan")
+        header.append("  ·  ")
+        header.append(exposure, style=style)
+        if br["sg_name"] != br["sg_id"]:
+            header.append(f"  ({br['sg_name']})", style="dim")
+
+        resource_table = Table(
+            box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False
+        )
+        resource_table.add_column("Type", style="dim", no_wrap=True)
+        resource_table.add_column("Resource ID", style="cyan", no_wrap=True)
+        resource_table.add_column("Public IP", no_wrap=True)
+
+        for res in br["attached_resources"]:
+            pub_ip = res["public_ip"] or "[dim]-[/dim]"
+            resource_table.add_row(res["resource_type"], res["resource_id"], pub_ip)
+
+        if not br["attached_resources"]:
+            resource_table.add_row("[dim]none[/dim]", "", "")
+
+        igw_str = "[green]yes[/green]" if br["has_igw"] else "[dim]no[/dim]"
+        ct_str = str(br["recent_connection_count"])
+        ips_str = (
+            ", ".join(br["top_source_ips"]) if br["top_source_ips"] else "[dim]-[/dim]"
+        )
+
+        meta = Text()
+        meta.append(f"IGW: {igw_str}  ")
+        meta.append(f"CT events (30d): {ct_str}  ")
+        meta.append(f"Top IPs: {ips_str}")
+
+        groups.extend([header, resource_table, meta, Text("")])
+
+    if not groups:
+        return
+
+    c.print(
+        Panel(
+            Group(*groups),
+            title="[bold red]🔍 Security Group Blast Radius[/bold red]",
+            border_style="red",
+            padding=(0, 1),
+        )
+    )
+    c.print()
+
+
+def _section_sg_blast_radius(
+    c: Console,
+    sec_result: ScanResult,
+    region: str | None = None,
+    render: bool = True,
+) -> ScanResult:
+    """Enrich open-SG findings with blast radius data and optionally render."""
+    sg_ids = list(
+        dict.fromkeys(
+            f["resource"]
+            for f in (sec_result.get("data") or [])
+            if str(f.get("resource", "")).startswith("sg-")
+        )
+    )
+    if not sg_ids:
+        return ok_result([])
+
+    with c.status("[cyan]🔍  Analysing SG blast radius...[/cyan]", spinner="dots"):
+        blast_result = get_sg_blast_radius(sg_ids, region=region)
+    if render:
+        _render_sg_blast_radius_panel(c, blast_result)
+    return blast_result
+
+
 def _section_iam(c: Console, render: bool = True) -> ScanResult:
     """Scan for over-permissive IAM policies and render findings panel."""
     with c.status("[cyan]🔑  Scanning IAM policies...[/cyan]", spinner="dots"):
@@ -2167,6 +2262,9 @@ def _run_analyze_cycle(
             if effective_policy.scan_enabled("tagging")
             else _skipped_result(c, "[bold dim]🏷️ Tagging Compliance[/bold dim]", [])
         )
+        sg_blast_result = _section_sg_blast_radius(
+            c, sec_result, region=region, render=False
+        )
         sec_findings: list[SecurityFinding] = sec_result["data"]
         cost_findings: list[CostFinding] = cost_waste_result["data"]
 
@@ -2180,6 +2278,7 @@ def _run_analyze_cycle(
             "ri_recommendations": advisor_results["ri"],
             "sp_recommendations": advisor_results["sp"],
             "security_findings": sec_result,
+            "sg_blast_radius": sg_blast_result,
             "iam_findings": iam_result,
             "cloudwatch_findings": cw_result,
             "cost_waste": cost_waste_result,
@@ -2335,6 +2434,7 @@ def _run_analyze_cycle(
             else:
                 if effective_policy.scan_enabled("security"):
                     _render_security_panel(c, sec_result, multi_region=multi_region)
+                    _render_sg_blast_radius_panel(c, sg_blast_result)
                 else:
                     _render_skipped_panel(c, "[bold dim]🛡️ Security[/bold dim]")
 

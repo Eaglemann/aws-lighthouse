@@ -186,6 +186,30 @@ class RemediationPlan(TypedDict):
     total: int
 
 
+class SGAttachedResource(TypedDict):
+    """One resource attached to a security group via an ENI."""
+
+    resource_type: str  # "EC2" | "RDS" | "Lambda" | "Other"
+    resource_id: str
+    resource_name: str
+    private_ip: str
+    public_ip: str | None
+
+
+class SGBlastRadius(TypedDict):
+    """Blast-radius analysis for one open security group."""
+
+    sg_id: str
+    sg_name: str
+    region: str | None
+    attached_resources: list[SGAttachedResource]
+    has_public_ip: bool
+    has_igw: bool
+    exposure: str  # "INTERNET_EXPOSED" | "PRIVATE" | "UNKNOWN"
+    recent_connection_count: int  # CloudTrail events found in lookback window
+    top_source_ips: list[str]  # up to 3 most frequent source IPs from CT
+
+
 class Opportunity(TypedDict):
     """One persistent local opportunity synced from scan findings."""
 
