@@ -1216,7 +1216,8 @@ class TestAnalyzeJsonOutput:
         plain = _strip_ansi(result.output).lower()
         assert "output" in plain
         assert (
-            "--output must be either 'text' or 'json'" in plain
+            "--output must be 'text', 'json', or 'sarif'" in plain
+            or "--output must be either 'text' or 'json'" in plain
             or "invalid value for '--output'" in plain
         )
 
@@ -2544,3 +2545,199 @@ class TestAnalyzeTerraformDir:
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
         assert "terraform_drift" not in data
+
+
+# ---------------------------------------------------------------------------
+# SARIF 2.1.0 output
+# ---------------------------------------------------------------------------
+
+
+class TestAnalyzeSarifOutput:
+    def _run(self, extra_args=None):
+        runner = CliRunner()
+        patches = {**_PATCHES, "aws_lighthouse.cli.get_aws_session": _mock_session}
+        with patch.multiple(
+            "aws_lighthouse.cli",
+            **{k.split(".")[-1]: v for k, v in patches.items()},
+        ):
+            return runner.invoke(
+                app, ["analyze", "--output", "sarif"] + (extra_args or [])
+            )
+
+    def test_sarif_exits_zero(self):
+        result = self._run()
+        assert result.exit_code == 0, result.output
+
+    def test_sarif_is_valid_json(self):
+        result = self._run()
+        data = json.loads(result.output)
+        assert isinstance(data, dict)
+
+    def test_sarif_has_required_top_level_keys(self):
+        result = self._run()
+        data = json.loads(result.output)
+        assert data["version"] == "2.1.0"
+        assert "$schema" in data
+        assert "runs" in data
+        assert len(data["runs"]) == 1
+
+    def test_sarif_run_has_tool_and_results(self):
+        result = self._run()
+        run = json.loads(result.output)["runs"][0]
+        assert "tool" in run
+        assert "results" in run
+        assert run["tool"]["driver"]["name"] == "aws-lighthouse"
+
+    def test_sarif_with_security_findings(self):
+        # Patch run_security_scan to return a HIGH finding
+        patches = {
+            **_PATCHES,
+            "aws_lighthouse.cli.get_aws_session": _mock_session,
+            "aws_lighthouse.cli.run_security_scan": lambda **kw: {
+                "ok": True,
+                "data": [
+                    {
+                        "severity": "HIGH",
+                        "resource": "my-bucket",
+                        "finding": "S3 bucket has no public access block",
+                    }
+                ],
+                "errors": [],
+            },
+        }
+        runner = CliRunner()
+        with patch.multiple(
+            "aws_lighthouse.cli",
+            **{k.split(".")[-1]: v for k, v in patches.items()},
+        ):
+            result = runner.invoke(app, ["analyze", "--output", "sarif"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        results = data["runs"][0]["results"]
+        assert len(results) == 1
+        assert results[0]["level"] == "error"
+        assert results[0]["message"]["text"] == "S3 bucket has no public access block"
+        loc = results[0]["locations"][0]["logicalLocations"][0]
+        assert loc["name"] == "my-bucket"
+
+    def test_sarif_invalid_output_rejected(self):
+        runner = CliRunner()
+        result = runner.invoke(app, ["analyze", "--output", "yaml"])
+        assert result.exit_code != 0
+
+    def test_sarif_high_severity_maps_to_error(self):
+        from aws_lighthouse.cli import _build_sarif_output
+
+        payloads = {
+            "v1": {
+                "account_id": "123456789012",
+                "security_findings": [
+                    {
+                        "severity": "HIGH",
+                        "resource": "res",
+                        "finding": "some high finding",
+                    }
+                ],
+                "iam_findings": [],
+                "cost_waste": [],
+                "tagging_findings": [],
+                "cloudwatch_findings": [],
+            }
+        }
+        sarif = _build_sarif_output(payloads, "123456789012")
+        assert sarif["runs"][0]["results"][0]["level"] == "error"
+
+    def test_sarif_medium_severity_maps_to_warning(self):
+        from aws_lighthouse.cli import _build_sarif_output
+
+        payloads = {
+            "v1": {
+                "account_id": "123456789012",
+                "security_findings": [
+                    {
+                        "severity": "MEDIUM",
+                        "resource": "res",
+                        "finding": "some medium finding",
+                    }
+                ],
+                "iam_findings": [],
+                "cost_waste": [],
+                "tagging_findings": [],
+                "cloudwatch_findings": [],
+            }
+        }
+        sarif = _build_sarif_output(payloads, "123456789012")
+        assert sarif["runs"][0]["results"][0]["level"] == "warning"
+
+    def test_sarif_cost_waste_maps_to_warning(self):
+        from aws_lighthouse.cli import _build_sarif_output
+
+        payloads = {
+            "v1": {
+                "account_id": "123456789012",
+                "security_findings": [],
+                "iam_findings": [],
+                "cost_waste": [
+                    {"resource": "vol-123", "finding": "Unattached EBS volume"}
+                ],
+                "tagging_findings": [],
+                "cloudwatch_findings": [],
+            }
+        }
+        sarif = _build_sarif_output(payloads, "123456789012")
+        assert sarif["runs"][0]["results"][0]["level"] == "warning"
+
+    def test_sarif_rules_deduplicated(self):
+        from aws_lighthouse.cli import _build_sarif_output
+
+        payloads = {
+            "v1": {
+                "account_id": "123456789012",
+                "security_findings": [
+                    {
+                        "severity": "HIGH",
+                        "resource": "b1",
+                        "finding": "S3 bucket has no public access block",
+                    },
+                    {
+                        "severity": "HIGH",
+                        "resource": "b2",
+                        "finding": "S3 bucket has no public access block",
+                    },
+                ],
+                "iam_findings": [],
+                "cost_waste": [],
+                "tagging_findings": [],
+                "cloudwatch_findings": [],
+            }
+        }
+        sarif = _build_sarif_output(payloads, "123456789012")
+        rules = sarif["runs"][0]["tool"]["driver"]["rules"]
+        assert len(rules) == 1  # deduped
+        assert len(sarif["runs"][0]["results"]) == 2  # 2 results for same rule
+
+    def test_sarif_fully_qualified_name_includes_account(self):
+        from aws_lighthouse.cli import _build_sarif_output
+
+        payloads = {
+            "v1": {
+                "account_id": "999888777666",
+                "security_findings": [
+                    {
+                        "severity": "LOW",
+                        "resource": "my-res",
+                        "finding": "some finding",
+                    }
+                ],
+                "iam_findings": [],
+                "cost_waste": [],
+                "tagging_findings": [],
+                "cloudwatch_findings": [],
+            }
+        }
+        sarif = _build_sarif_output(payloads, "999888777666")
+        fqn = sarif["runs"][0]["results"][0]["locations"][0]["logicalLocations"][0][
+            "fullyQualifiedName"
+        ]
+        assert "999888777666" in fqn
+        assert "my-res" in fqn
