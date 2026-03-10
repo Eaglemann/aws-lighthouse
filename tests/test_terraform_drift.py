@@ -118,6 +118,13 @@ class TestGetHclFix:
         assert fix is not None
         assert "aws_lb" in fix or "load balancer" in fix.lower() or "Remove" in fix
 
+    def test_rds_no_connections(self):
+        fix = _get_hcl_fix(
+            "RDS instance db-prod has had no connections in 7 days", "db-prod"
+        )
+        assert fix is not None
+        assert "db-prod" in fix or "aws_db_instance" in fix
+
     def test_no_match_returns_none(self):
         assert _get_hcl_fix("some unrecognized finding text here", "res") is None
 
