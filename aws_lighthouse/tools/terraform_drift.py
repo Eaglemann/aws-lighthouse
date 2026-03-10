@@ -92,6 +92,16 @@ _FINDING_TO_HCL: list[tuple[str, str]] = [
         "# In your aws_db_instance for {resource_id}:\n  publicly_accessible = false",
     ),
     (
+        "NAT Gateway",
+        "# Remove the aws_nat_gateway resource for {resource_id} from your .tf files\n"
+        "# Also release the associated aws_eip if no longer needed",
+    ),
+    (
+        "Load balancer",
+        "# Remove the aws_lb (or aws_alb) resource for {resource_id} from your .tf files\n"
+        "# Also remove associated aws_lb_listener and aws_lb_target_group resources",
+    ),
+    (
         "flow logs",
         'resource "aws_flow_log" "{name}" {{\n'
         '  vpc_id          = "{resource_id}"\n'
