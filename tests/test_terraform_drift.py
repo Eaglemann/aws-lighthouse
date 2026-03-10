@@ -104,6 +104,20 @@ class TestGetHclFix:
         assert fix is not None
         assert "aws_flow_log" in fix
 
+    def test_nat_gateway(self):
+        fix = _get_hcl_fix(
+            "NAT Gateway nat-123 has had no traffic in 7 days", "nat-123"
+        )
+        assert fix is not None
+        assert "aws_nat_gateway" in fix or "Remove" in fix
+
+    def test_load_balancer(self):
+        fix = _get_hcl_fix(
+            "Load balancer my-alb has had no requests in 7 days", "my-alb"
+        )
+        assert fix is not None
+        assert "aws_lb" in fix or "load balancer" in fix.lower() or "Remove" in fix
+
     def test_no_match_returns_none(self):
         assert _get_hcl_fix("some unrecognized finding text here", "res") is None
 
