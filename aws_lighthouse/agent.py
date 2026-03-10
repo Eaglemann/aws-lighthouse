@@ -12,6 +12,7 @@ from langchain_core.tools import tool
 from langchain_ollama import ChatOllama
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
+from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel, ConfigDict, Field
 
 from .db import db_manager
@@ -940,7 +941,7 @@ def _normalize_schema_like_args(
     return normalized, None
 
 
-def _normalize_safe_tool_calls(state: AgentState) -> dict | None:
+def _normalize_safe_tool_calls(state: AgentState) -> dict[str, Any] | None:
     """Repair safe tool calls in-place before ToolNode executes them."""
     if not state["messages"]:
         return None
@@ -994,7 +995,7 @@ def _normalize_safe_tool_calls(state: AgentState) -> dict | None:
     return None
 
 
-def tools_node(state: AgentState) -> dict:
+def tools_node(state: AgentState) -> dict[str, Any]:
     """Execute tools then persist execution outcomes in the audit log."""
     normalization_result = _normalize_safe_tool_calls(state)
     if normalization_result is not None:
@@ -1005,7 +1006,7 @@ def tools_node(state: AgentState) -> dict:
     return output
 
 
-def approval_node(state: AgentState) -> dict:
+def approval_node(state: AgentState) -> dict[str, Any]:
     """The Human-in-the-loop intercept node.
 
     Sets state["approved"] = True on approval, False on denial.
@@ -1149,7 +1150,7 @@ def should_require_approval(state: AgentState) -> str:
     return "tools"
 
 
-def create_agent_graph():
+def create_agent_graph() -> CompiledStateGraph:
     """Instantiate and compile the baseline LangGraph agent with a memory checkpointer."""
     from langgraph.checkpoint.memory import MemorySaver
 
@@ -1162,7 +1163,7 @@ def create_agent_graph():
     )
     llm_with_tools = llm.bind_tools(tools)
 
-    def agent_node(state: AgentState):
+    def agent_node(state: AgentState) -> dict[str, Any]:
         """The primary reasoning node."""
         logger.action_start("Agent is thinking...")
         response = llm_with_tools.invoke(state["messages"])
