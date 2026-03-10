@@ -111,6 +111,14 @@ _FINDING_TO_HCL: list[tuple[str, str]] = [
         "# }}",
     ),
     (
+        "not been invoked",
+        "# Remove the aws_lambda_function resource for {resource_id}:\n"
+        '# resource "aws_lambda_function" "{name}" {{\n'
+        "#   ... existing config ...\n"
+        "# }}\n"
+        "# Also remove associated aws_iam_role, aws_cloudwatch_log_group, and triggers.",
+    ),
+    (
         "flow logs",
         'resource "aws_flow_log" "{name}" {{\n'
         '  vpc_id          = "{resource_id}"\n'
