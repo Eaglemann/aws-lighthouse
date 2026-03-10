@@ -328,7 +328,7 @@ class TestGetSgBlastRadius:
 
         assert result["ok"] is True
         br = result["data"][0]
-        # 2 event_names × 1 event each = 2
+        # 2 event_names x 1 event each = 2
         assert br["recent_connection_count"] == 2
         assert "203.0.113.45" in br["top_source_ips"]
 

@@ -352,7 +352,7 @@ def test_read_file_max_lines_none_returns_all(tmp_path):
     f = tmp_path / "small.txt"
     f.write_text("a\nb\nc\n")
     result = read_file(ReadFileInput(filepath=str(f), max_lines=None))
-    assert "a\nb\nc\n" == result
+    assert result == "a\nb\nc\n"
 
 
 def test_read_file_permission_denied_returns_error(tmp_path):

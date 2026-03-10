@@ -259,7 +259,7 @@ class TestSectionCostAnomalies:
     def test_renders_degraded_panel_when_scanner_logs_errors(self):
         c, buf = _console()
 
-        def _side_effect(threshold_pct=50.0):  # noqa: ARG001
+        def _side_effect(threshold_pct=50.0):
             return _err([], "Cost Explorer throttled")
 
         with patch(
@@ -533,7 +533,7 @@ class TestSectionCostWaste:
         assert "Region" in buf.getvalue()
 
     def test_returns_empty_list_when_no_findings(self):
-        c, buf = _console()
+        c, _buf = _console()
         with patch("aws_lighthouse.cli.run_cost_scan", return_value=_ok([])):
             result = _section_cost_waste(c, [None], multi_region=False)
         assert result["data"] == []
@@ -582,7 +582,7 @@ class TestSectionSecurity:
 
     def test_global_checks_only_on_first_region(self):
         """include_global must be True only for the first region in the loop."""
-        c, buf = _console()
+        c, _buf = _console()
         calls = []
 
         def capture(**kwargs):
@@ -625,7 +625,7 @@ class TestSectionSecurity:
     def test_renders_degraded_panel_when_scan_logs_errors(self):
         c, buf = _console()
 
-        def _side_effect(**kwargs):  # noqa: ARG001
+        def _side_effect(**kwargs):
             return _err([], "AccessDenied on guardduty")
 
         with patch("aws_lighthouse.cli.run_security_scan", side_effect=_side_effect):
@@ -760,6 +760,7 @@ _PATCHES = {
     "aws_lighthouse.cli.get_sp_recommendations": lambda **kw: _ok([]),
     "aws_lighthouse.cli.get_compute_optimizer_recommendations": lambda **kw: _ok([]),
     "aws_lighthouse.cli.get_untagged_spend": lambda **kw: _ok([]),
+    "aws_lighthouse.cli.get_effective_rates": lambda **kw: _ok([]),
     "aws_lighthouse.cli.run_security_scan": lambda **kwargs: _ok([]),
     "aws_lighthouse.cli.detect_overpermissive_iam": lambda: _ok([]),
     "aws_lighthouse.cli.detect_cloudwatch_gaps": lambda region=None: _ok([]),
@@ -827,6 +828,7 @@ class TestAnalyzeJsonOutput:
             "cloudwatch_findings",
             "cost_waste",
             "tagging_findings",
+            "effective_rate",
         }
 
     def test_since_last_v1_adds_delta_object(self):
@@ -999,7 +1001,7 @@ class TestAnalyzeJsonOutput:
             },
         }
 
-        def _security_now(**kwargs):  # noqa: ARG001
+        def _security_now(**kwargs):
             return _ok(
                 [
                     {
@@ -1070,6 +1072,7 @@ class TestAnalyzeJsonOutput:
             "cloudwatch_findings",
             "cost_waste",
             "tagging_findings",
+            "effective_rate",
         }
         assert expected_keys == set(data.keys())
 
@@ -1143,7 +1146,7 @@ class TestAnalyzeJsonOutput:
         runner = CliRunner()
         patches = {**_PATCHES, "aws_lighthouse.cli.get_aws_session": _mock_session}
 
-        def degraded_security_scan(**kwargs):  # noqa: ARG001
+        def degraded_security_scan(**kwargs):
             return _err([], "security scan degraded")
 
         with patch.multiple(
@@ -1169,7 +1172,7 @@ class TestAnalyzeJsonOutput:
         runner = CliRunner()
         patches = {**_PATCHES, "aws_lighthouse.cli.get_aws_session": _mock_session}
 
-        def degraded_security_scan(**kwargs):  # noqa: ARG001
+        def degraded_security_scan(**kwargs):
             return _err([], "security scan degraded")
 
         with patch.multiple(

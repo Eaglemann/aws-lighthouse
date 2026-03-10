@@ -210,7 +210,7 @@ def test_ri_recommendations_api_error_returns_partial(
     mock_get_client.return_value = ce
 
     # EC2 succeeds, others raise ClientError
-    def _side_effect(Service, **_kwargs):  # noqa: N803
+    def _side_effect(Service, **_kwargs):
         if Service == "AmazonEC2":
             return _ri_response()
         raise _client_error()

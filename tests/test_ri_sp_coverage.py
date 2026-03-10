@@ -215,7 +215,7 @@ def test_unexpected_future_exception_preserves_partial_results():
     """An unexpected exception in one fetcher does not discard remaining futures."""
     mock_ce = _make_ce()
 
-    def _boom(ce, period):  # noqa: ARG001
+    def _boom(ce, period):
         raise RuntimeError("unexpected kaboom")
 
     patched_fetchers = [
