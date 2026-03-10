@@ -71,8 +71,11 @@ markers = [
 ]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "B", "S", "UP", "I"]
+select = ["E", "F", "W", "B", "S", "UP", "I", "C90", "SIM", "RUF"]
 ignore = ["E501"]  # line-length enforced by formatter, not linter
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101"]  # assert is idiomatic in pytest
