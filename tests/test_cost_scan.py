@@ -4,6 +4,8 @@ from unittest.mock import MagicMock, patch
 from botocore.exceptions import ClientError
 
 from aws_lighthouse.tools.cost_scan import (
+    _check_idle_load_balancers,
+    _check_idle_nat_gateways,
     _check_old_snapshots,
     _check_stopped_ec2,
     _check_unassociated_eips,
@@ -239,12 +241,31 @@ def _make_clean_ec2():
     ec2 = MagicMock()
     ec2.get_paginator.side_effect = _get_paginator
     ec2.describe_addresses.return_value = {"Addresses": []}
+    ec2.describe_nat_gateways.return_value = {"NatGateways": []}
     return ec2
+
+
+def _make_clean_cw():
+    cw = MagicMock()
+    cw.get_metric_statistics.return_value = {"Datapoints": []}
+    return cw
+
+
+def _make_clean_elbv2():
+    elbv2 = MagicMock()
+    elbv2.describe_load_balancers.return_value = {"LoadBalancers": []}
+    return elbv2
 
 
 def test_run_cost_scan_clean_returns_empty():
     ec2 = _make_clean_ec2()
-    with patch(f"{MOD}.get_client", return_value=ec2):
+    cw = _make_clean_cw()
+    elbv2 = _make_clean_elbv2()
+
+    def _get_client(service, region=None):
+        return {"ec2": ec2, "cloudwatch": cw, "elbv2": elbv2}[service]
+
+    with patch(f"{MOD}.get_client", side_effect=_get_client):
         result = run_cost_scan()
     assert result["ok"] is True
     assert result["data"] == []
@@ -286,7 +307,14 @@ def test_run_cost_scan_aggregates_all_checks():
     ec2.describe_addresses.return_value = {
         "Addresses": [{"AllocationId": "eipalloc-ddd", "PublicIp": "1.2.3.4"}]
     }
-    with patch(f"{MOD}.get_client", return_value=ec2):
+    ec2.describe_nat_gateways.return_value = {"NatGateways": []}
+    cw = _make_clean_cw()
+    elbv2 = _make_clean_elbv2()
+
+    def _get_client(service, region=None):
+        return {"ec2": ec2, "cloudwatch": cw, "elbv2": elbv2}[service]
+
+    with patch(f"{MOD}.get_client", side_effect=_get_client):
         result = run_cost_scan()
 
     resources = [f["resource"] for f in result["data"]]
@@ -312,3 +340,149 @@ def test_snapshot_age_env_var_overrides_default(monkeypatch):
     monkeypatch.delenv("LIGHTHOUSE_SNAPSHOT_AGE_DAYS", raising=False)
     importlib.reload(mod)
     assert mod._SNAPSHOT_AGE_DAYS == 90
+
+
+# ── _check_idle_nat_gateways ────────────────────────────────────────────────
+
+
+class TestCheckIdleNatGateways:
+    def _make_clients(self, nat_ids, bytes_out_map=None):
+        ec2 = MagicMock()
+        cw = MagicMock()
+        ec2.describe_nat_gateways.return_value = {
+            "NatGateways": [{"NatGatewayId": nid} for nid in nat_ids]
+        }
+        if bytes_out_map is None:
+            cw.get_metric_statistics.return_value = {"Datapoints": []}
+        else:
+
+            def get_metric_stats(**kwargs):
+                nat_id = kwargs["Dimensions"][0]["Value"]
+                val = bytes_out_map.get(nat_id, 0)
+                return {"Datapoints": [{"Sum": val}] if val > 0 else []}
+
+            cw.get_metric_statistics.side_effect = get_metric_stats
+        return ec2, cw
+
+    def test_no_nat_gateways_returns_empty(self):
+        ec2, cw = self._make_clients([])
+        assert _data(_check_idle_nat_gateways(ec2, cw, "us-east-1")) == []
+
+    def test_nat_with_no_traffic_flagged(self):
+        ec2, cw = self._make_clients(["nat-111"])
+        result = _data(_check_idle_nat_gateways(ec2, cw, "us-east-1"))
+        assert len(result) == 1
+        assert result[0]["resource"] == "nat-111"
+        assert "no traffic" in result[0]["finding"]
+        assert result[0]["remediation_type"] == "delete_nat_gateway"
+
+    def test_nat_with_traffic_not_flagged(self):
+        ec2, cw = self._make_clients(["nat-222"], bytes_out_map={"nat-222": 1024})
+        assert _data(_check_idle_nat_gateways(ec2, cw, "us-east-1")) == []
+
+    def test_mixed_nat_gateways(self):
+        ec2, cw = self._make_clients(
+            ["nat-ok", "nat-bad"], bytes_out_map={"nat-ok": 500}
+        )
+        result = _data(_check_idle_nat_gateways(ec2, cw, "us-east-1"))
+        assert len(result) == 1
+        assert result[0]["resource"] == "nat-bad"
+
+    def test_client_error_returns_empty(self):
+        ec2 = MagicMock()
+        ec2.describe_nat_gateways.side_effect = ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": "denied"}},
+            "DescribeNatGateways",
+        )
+        result = _check_idle_nat_gateways(ec2, MagicMock(), "us-east-1")
+        assert result["ok"] is False
+        assert result["data"] == []
+
+    def test_pagination(self):
+        ec2 = MagicMock()
+        cw = MagicMock()
+        ec2.describe_nat_gateways.side_effect = [
+            {
+                "NatGateways": [{"NatGatewayId": "nat-p1"}],
+                "NextToken": "tok",
+            },
+            {"NatGateways": [{"NatGatewayId": "nat-p2"}]},
+        ]
+        cw.get_metric_statistics.return_value = {"Datapoints": []}
+        result = _data(_check_idle_nat_gateways(ec2, cw, "us-east-1"))
+        assert len(result) == 2
+        resources = {f["resource"] for f in result}
+        assert resources == {"nat-p1", "nat-p2"}
+
+
+# ── _check_idle_load_balancers ──────────────────────────────────────────────
+
+
+class TestCheckIdleLoadBalancers:
+    def _make_clients(self, lbs, request_count_map=None):
+        elbv2 = MagicMock()
+        cw = MagicMock()
+        elbv2.describe_load_balancers.return_value = {"LoadBalancers": lbs}
+        if request_count_map is None:
+            cw.get_metric_statistics.return_value = {"Datapoints": []}
+        else:
+
+            def get_metric_stats(**kwargs):
+                lb_dim = kwargs["Dimensions"][0]["Value"]
+                val = request_count_map.get(lb_dim, 0)
+                return {"Datapoints": [{"Sum": val}] if val > 0 else []}
+
+            cw.get_metric_statistics.side_effect = get_metric_stats
+        return elbv2, cw
+
+    def _lb(self, name, lb_type="application", state="active"):
+        return {
+            "LoadBalancerName": name,
+            "LoadBalancerArn": (
+                f"arn:aws:elasticloadbalancing:us-east-1:123:"
+                f"loadbalancer/app/{name}/abc123"
+            ),
+            "Type": lb_type,
+            "State": {"Code": state},
+        }
+
+    def test_no_load_balancers_returns_empty(self):
+        elbv2, cw = self._make_clients([])
+        assert _data(_check_idle_load_balancers(elbv2, cw, "us-east-1")) == []
+
+    def test_idle_alb_flagged(self):
+        elbv2, cw = self._make_clients([self._lb("my-alb", "application")])
+        result = _data(_check_idle_load_balancers(elbv2, cw, "us-east-1"))
+        assert len(result) == 1
+        assert result[0]["resource"] == "my-alb"
+        assert result[0]["remediation_type"] == "delete_load_balancer"
+
+    def test_active_alb_not_flagged(self):
+        lb = self._lb("busy-alb", "application")
+        lb_dim = lb["LoadBalancerArn"].split("loadbalancer/", 1)[-1]
+        elbv2, cw = self._make_clients([lb], request_count_map={lb_dim: 1000})
+        assert _data(_check_idle_load_balancers(elbv2, cw, "us-east-1")) == []
+
+    def test_inactive_lb_skipped(self):
+        elbv2, cw = self._make_clients([self._lb("prov-alb", state="provisioning")])
+        assert _data(_check_idle_load_balancers(elbv2, cw, "us-east-1")) == []
+
+    def test_gateway_lb_skipped(self):
+        elbv2, cw = self._make_clients([self._lb("my-gwlb", "gateway")])
+        assert _data(_check_idle_load_balancers(elbv2, cw, "us-east-1")) == []
+
+    def test_nlb_uses_network_namespace(self):
+        elbv2, cw = self._make_clients([self._lb("my-nlb", "network")])
+        _check_idle_load_balancers(elbv2, cw, "us-east-1")
+        call_args = cw.get_metric_statistics.call_args
+        assert call_args.kwargs["Namespace"] == "AWS/NetworkELB"
+
+    def test_client_error_returns_empty(self):
+        elbv2 = MagicMock()
+        elbv2.describe_load_balancers.side_effect = ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": "denied"}},
+            "DescribeLoadBalancers",
+        )
+        result = _check_idle_load_balancers(elbv2, MagicMock(), "us-east-1")
+        assert result["ok"] is False
+        assert result["data"] == []
