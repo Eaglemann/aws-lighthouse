@@ -102,6 +102,15 @@ _FINDING_TO_HCL: list[tuple[str, str]] = [
         "# Also remove associated aws_lb_listener and aws_lb_target_group resources",
     ),
     (
+        "no connections",
+        "# Your aws_db_instance for {resource_id} appears idle.\n"
+        "# Consider stopping it or setting deletion_protection = false before removing:\n"
+        '# resource "aws_db_instance" "{name}" {{\n'
+        "#   ... existing config ...\n"
+        "#   deletion_protection = false\n"
+        "# }}",
+    ),
+    (
         "flow logs",
         'resource "aws_flow_log" "{name}" {{\n'
         '  vpc_id          = "{resource_id}"\n'
