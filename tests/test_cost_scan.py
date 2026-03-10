@@ -6,6 +6,7 @@ from botocore.exceptions import ClientError
 from aws_lighthouse.tools.cost_scan import (
     _check_idle_load_balancers,
     _check_idle_nat_gateways,
+    _check_idle_rds_instances,
     _check_old_snapshots,
     _check_stopped_ec2,
     _check_unassociated_eips,
@@ -257,13 +258,20 @@ def _make_clean_elbv2():
     return elbv2
 
 
+def _make_clean_rds():
+    rds = MagicMock()
+    rds.describe_db_instances.return_value = {"DBInstances": []}
+    return rds
+
+
 def test_run_cost_scan_clean_returns_empty():
     ec2 = _make_clean_ec2()
     cw = _make_clean_cw()
     elbv2 = _make_clean_elbv2()
+    rds = _make_clean_rds()
 
     def _get_client(service, region=None):
-        return {"ec2": ec2, "cloudwatch": cw, "elbv2": elbv2}[service]
+        return {"ec2": ec2, "cloudwatch": cw, "elbv2": elbv2, "rds": rds}[service]
 
     with patch(f"{MOD}.get_client", side_effect=_get_client):
         result = run_cost_scan()
@@ -310,9 +318,10 @@ def test_run_cost_scan_aggregates_all_checks():
     ec2.describe_nat_gateways.return_value = {"NatGateways": []}
     cw = _make_clean_cw()
     elbv2 = _make_clean_elbv2()
+    rds = _make_clean_rds()
 
     def _get_client(service, region=None):
-        return {"ec2": ec2, "cloudwatch": cw, "elbv2": elbv2}[service]
+        return {"ec2": ec2, "cloudwatch": cw, "elbv2": elbv2, "rds": rds}[service]
 
     with patch(f"{MOD}.get_client", side_effect=_get_client):
         result = run_cost_scan()
@@ -486,3 +495,109 @@ class TestCheckIdleLoadBalancers:
         result = _check_idle_load_balancers(elbv2, MagicMock(), "us-east-1")
         assert result["ok"] is False
         assert result["data"] == []
+
+
+# ── _check_idle_rds_instances ───────────────────────────────────────────────
+
+
+class TestCheckIdleRdsInstances:
+    def _make_clients(self, instances, max_connections_map=None):
+        """instances: list of dicts with DBInstanceIdentifier, DBInstanceStatus, Engine"""
+        rds = MagicMock()
+        cw = MagicMock()
+        rds.describe_db_instances.return_value = {"DBInstances": instances}
+
+        if max_connections_map is None:
+            cw.get_metric_statistics.return_value = {"Datapoints": []}
+        else:
+
+            def get_metric_stats(**kwargs):
+                db_id = kwargs["Dimensions"][0]["Value"]
+                val = max_connections_map.get(db_id, 0)
+                return {"Datapoints": [{"Maximum": val}] if val > 0 else []}
+
+            cw.get_metric_statistics.side_effect = get_metric_stats
+        return rds, cw
+
+    def _db(self, db_id, status="available", engine="mysql"):
+        return {
+            "DBInstanceIdentifier": db_id,
+            "DBInstanceStatus": status,
+            "Engine": engine,
+        }
+
+    def test_no_instances_returns_empty(self):
+        rds, cw = self._make_clients([])
+        assert _data(_check_idle_rds_instances(rds, cw, "us-east-1")) == []
+
+    def test_idle_instance_flagged(self):
+        rds, cw = self._make_clients([self._db("db-prod")])
+        result = _data(_check_idle_rds_instances(rds, cw, "us-east-1"))
+        assert len(result) == 1
+        assert result[0]["resource"] == "db-prod"
+        assert "no connections" in result[0]["finding"]
+        assert result[0]["remediation_type"] == "stop_rds_instance"
+
+    def test_active_instance_not_flagged(self):
+        rds, cw = self._make_clients(
+            [self._db("db-active")],
+            max_connections_map={"db-active": 5},
+        )
+        assert _data(_check_idle_rds_instances(rds, cw, "us-east-1")) == []
+
+    def test_non_available_instance_skipped(self):
+        rds, cw = self._make_clients([self._db("db-stopped", status="stopped")])
+        assert _data(_check_idle_rds_instances(rds, cw, "us-east-1")) == []
+
+    def test_engine_included_in_finding(self):
+        rds, cw = self._make_clients([self._db("db-pg", engine="postgres")])
+        result = _data(_check_idle_rds_instances(rds, cw, "us-east-1"))
+        assert "postgres" in result[0]["finding"]
+
+    def test_mixed_instances(self):
+        rds, cw = self._make_clients(
+            [self._db("db-ok"), self._db("db-idle")],
+            max_connections_map={"db-ok": 10},
+        )
+        result = _data(_check_idle_rds_instances(rds, cw, "us-east-1"))
+        assert len(result) == 1
+        assert result[0]["resource"] == "db-idle"
+
+    def test_client_error_returns_empty(self):
+        rds = MagicMock()
+        rds.describe_db_instances.side_effect = ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": "denied"}},
+            "DescribeDBInstances",
+        )
+        result = _check_idle_rds_instances(rds, MagicMock(), "us-east-1")
+        assert result["ok"] is False
+        assert result["data"] == []
+
+    def test_pagination_fetches_all_instances(self):
+        rds = MagicMock()
+        cw = MagicMock()
+        cw.get_metric_statistics.return_value = {"Datapoints": []}
+        rds.describe_db_instances.side_effect = [
+            {
+                "DBInstances": [
+                    {
+                        "DBInstanceIdentifier": "db-1",
+                        "DBInstanceStatus": "available",
+                        "Engine": "mysql",
+                    }
+                ],
+                "Marker": "token",
+            },
+            {
+                "DBInstances": [
+                    {
+                        "DBInstanceIdentifier": "db-2",
+                        "DBInstanceStatus": "available",
+                        "Engine": "mysql",
+                    }
+                ]
+            },
+        ]
+        result = _data(_check_idle_rds_instances(rds, cw, "us-east-1"))
+        assert len(result) == 2
+        assert rds.describe_db_instances.call_count == 2
