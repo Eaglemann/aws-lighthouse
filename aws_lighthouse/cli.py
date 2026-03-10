@@ -45,6 +45,7 @@ from .tools.compute_optimizer import get_compute_optimizer_recommendations
 from .tools.cost import get_cost_forecast, get_monthly_cost_summary
 from .tools.cost_anomaly import detect_cost_anomalies
 from .tools.cost_scan import run_cost_scan
+from .tools.effective_rate import get_effective_rates
 from .tools.iam_scan import detect_overpermissive_iam
 from .tools.inventory import (
     get_ec2_inventory,
@@ -317,7 +318,7 @@ def _render_skipped_panel(c: Console, title: str) -> None:
     c.print()
 
 
-def _skipped_result(c: Console, title: str, data: Any) -> ScanResult:  # noqa: ARG001
+def _skipped_result(c: Console, title: str, data: Any) -> ScanResult:
     return error_result(data=data, errors=[])
 
 
@@ -405,6 +406,7 @@ _SUMMARY_SECTION_LABELS = {
     "cloudwatch_findings": "CloudWatch",
     "compute_optimizer": "Compute Optimizer",
     "tag_cost_coverage": "Tag Cost Coverage",
+    "effective_rate": "Effective Rate Analysis",
     "cost_waste": "Cost Waste",
     "tagging_findings": "Tagging",
 }
@@ -1650,6 +1652,63 @@ def _section_compute_optimizer(c: Console, render: bool = True) -> ScanResult:
     return result
 
 
+def _render_effective_rate_panel(entries: list[Any], console: Console) -> None:
+    """Render a table of effective rates with optional discount percentages."""
+    if not entries:
+        console.print("[dim]  No usage data found.[/dim]")
+        return
+    table = Table(box=box.SIMPLE_HEAD, show_lines=False, padding=(0, 1))
+    table.add_column("Usage Type", style="cyan", no_wrap=True)
+    table.add_column("Spend", justify="right")
+    table.add_column("Units", justify="right", style="dim")
+    table.add_column("Eff. Rate", justify="right")
+    table.add_column("List Rate", justify="right", style="dim")
+    table.add_column("Discount", justify="right")
+    for e in entries:
+        discount = e.get("discount_pct")
+        if discount is None:
+            disc_str = "[dim]---[/dim]"
+        elif discount >= 20:
+            disc_str = f"[green]{discount:.1f}%[/green]"
+        elif discount >= 5:
+            disc_str = f"[yellow]{discount:.1f}%[/yellow]"
+        else:
+            disc_str = f"[dim]{discount:.1f}%[/dim]"
+        list_rate = e.get("list_rate")
+        list_str = f"${list_rate:.5f}" if list_rate else "[dim]---[/dim]"
+        table.add_row(
+            e["usage_type"][-40:],
+            f"${e['total_cost_usd']:,.2f}",
+            f"{e['usage_quantity']:,.1f}",
+            f"${e['effective_rate']:.5f}",
+            list_str,
+            disc_str,
+        )
+    console.print(
+        Panel(
+            table,
+            title="[bold cyan]Effective Rate Analysis[/bold cyan]",
+            border_style="cyan",
+            padding=(0, 1),
+        )
+    )
+    console.print()
+
+
+def _section_effective_rate(
+    c: Console, region: str | None = None, days: int = 30, render: bool = True
+) -> ScanResult:
+    """Fetch effective rate analysis and optionally render the panel."""
+    with c.status(
+        "[cyan]Computing effective rates...[/cyan]",
+        spinner="dots",
+    ):
+        result = get_effective_rates(days=days, region=region)
+    if render and result["ok"]:
+        _render_effective_rate_panel(cast(list[Any], result["data"]), c)
+    return result
+
+
 def _render_tag_cost_panel(c: Console, result: ScanResult) -> None:
     """Render cost allocation tag coverage as a panel."""
     rows = result["data"] if result["ok"] else []
@@ -1716,10 +1775,12 @@ def _section_security(
         return _sec
 
     region_args = [(reg, i == 0) for i, reg in enumerate(regions)]
-    with c.status("[cyan]🛡️   Running security checks...[/cyan]", spinner="dots"):
-        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-            for result in pool.map(_sec_region, region_args):
-                sec_results.append(result)
+    with (
+        c.status("[cyan]🛡️   Running security checks...[/cyan]", spinner="dots"),
+        ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool,
+    ):
+        for result in pool.map(_sec_region, region_args):
+            sec_results.append(result)
     sec_result = merge_list_results(sec_results)
     if render:
         _render_security_panel(c, sec_result, multi_region=multi_region)
@@ -1842,12 +1903,14 @@ def _section_cloudwatch(
                 f["region"] = reg
         return cast(ScanResult, _cw)
 
-    with c.status(
-        "[cyan]📡  Checking CloudWatch alarm coverage...[/cyan]", spinner="dots"
+    with (
+        c.status(
+            "[cyan]📡  Checking CloudWatch alarm coverage...[/cyan]", spinner="dots"
+        ),
+        ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool,
     ):
-        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-            for result in pool.map(_cw_region, regions):
-                cw_results.append(result)
+        for result in pool.map(_cw_region, regions):
+            cw_results.append(result)
     cw_result = merge_list_results(cw_results)
     if render:
         _render_cloudwatch_panel(c, cw_result, multi_region=multi_region)
@@ -1870,10 +1933,12 @@ def _section_cost_waste(
                 f["region"] = reg
         return cast(ScanResult, _cost)
 
-    with c.status("[cyan]🗑️   Scanning for cost waste...[/cyan]", spinner="dots"):
-        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-            for result in pool.map(_cost_region, regions):
-                cost_results.append(result)
+    with (
+        c.status("[cyan]🗑️   Scanning for cost waste...[/cyan]", spinner="dots"),
+        ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool,
+    ):
+        for result in pool.map(_cost_region, regions):
+            cost_results.append(result)
     cost_result = merge_list_results(cost_results)
     if render:
         _render_cost_waste_panel(c, cost_result, multi_region=multi_region)
@@ -1904,10 +1969,12 @@ def _section_tagging(
         return cast(ScanResult, _tag)
 
     tag_args = [(reg, i == 0) for i, reg in enumerate(regions)]
-    with c.status("[cyan]🏷️   Checking tag compliance...[/cyan]", spinner="dots"):
-        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-            for result in pool.map(_tag_region, tag_args):
-                tag_results.append(result)
+    with (
+        c.status("[cyan]🏷️   Checking tag compliance...[/cyan]", spinner="dots"),
+        ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool,
+    ):
+        for result in pool.map(_tag_region, tag_args):
+            tag_results.append(result)
     tag_result = merge_list_results(tag_results)
     if render:
         _render_tagging_panel(c, tag_result, multi_region=multi_region)
@@ -2057,7 +2124,7 @@ def _render_remediation_preview(c: Console, selections: list[dict[str, Any]]) ->
     c.print()
 
 
-def _section_remediation(
+def _section_remediation(  # noqa: C901
     c: Console,
     sec_findings: list[SecurityFinding],
     cost_findings: list[CostFinding],
@@ -2236,7 +2303,7 @@ def _severity_to_sarif_level(severity: str | None) -> str:
     return "warning"
 
 
-def _build_sarif_output(payloads: dict[str, Any], account_id: str) -> dict[str, Any]:
+def _build_sarif_output(payloads: dict[str, Any], account_id: str) -> dict[str, Any]:  # noqa: C901
     """Build a SARIF 2.1.0 document from scan payloads."""
     v1 = payloads.get("v1", {})
 
@@ -2366,7 +2433,7 @@ def _validate_watch_view(view: str) -> str:
     return normalized
 
 
-def _run_analyze_cycle(
+def _run_analyze_cycle(  # noqa: C901
     *,
     days: int,
     region: str | None,
@@ -2434,10 +2501,7 @@ def _run_analyze_cycle(
                     raise typer.BadParameter(
                         f"--config region filter error: {exc}"
                     ) from exc
-            if raw_regions:
-                regions = list(raw_regions)
-            else:
-                regions = [None]
+            regions = list(raw_regions) if raw_regions else [None]
 
         multi_region = len(regions) > 1
         if multi_region:
@@ -2494,6 +2558,9 @@ def _run_analyze_cycle(
         )
         advisor_results = _section_ri_sp_advisor(c, render=False)
         compute_optimizer_result = _section_compute_optimizer(c, render=False)
+        effective_rate_result = _section_effective_rate(
+            c, region=region, days=days, render=False
+        )
         tag_cost_result = _section_tag_cost(c, render=False)
         sec_result = (
             _section_security(
@@ -2552,6 +2619,7 @@ def _run_analyze_cycle(
             "sp_recommendations": advisor_results["sp"],
             "compute_optimizer": compute_optimizer_result,
             "tag_cost_coverage": tag_cost_result,
+            "effective_rate": effective_rate_result,
             "security_findings": sec_result,
             "sg_blast_radius": sg_blast_result,
             "iam_findings": iam_result,
@@ -3462,7 +3530,7 @@ def _translate_shell_command(user_input: str) -> tuple[str, str | None]:
     return "agent", user_input
 
 
-def _run_shell_analyze(c: Console, command_text: str) -> None:  # noqa: S105
+def _run_shell_analyze(c: Console, command_text: str) -> None:  # noqa: C901
     """Parse and run analyze inside the shell without using the LLM path."""
     try:
         argv = shlex.split(command_text)
@@ -3657,7 +3725,7 @@ def logs(
 
 
 @app.command()
-def shell() -> None:
+def shell() -> None:  # noqa: C901
     """Start the interactive AI agent shell."""
     from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -3785,7 +3853,7 @@ def shell() -> None:
             # Stream agent events
             try:
                 c.print("\n[dim]  phase: reasoning[/dim]")
-                for event in graph.stream({"messages": messages}, config=config):
+                for event in graph.stream({"messages": messages}, config=config):  # type: ignore[arg-type]
                     if "agent" in event:
                         msg = event["agent"]["messages"][-1]
                         if msg.content:

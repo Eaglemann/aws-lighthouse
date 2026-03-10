@@ -293,3 +293,22 @@ class UntaggedSpend(TypedDict):
     total_usd: float
     untagged_pct: float
     period_days: int
+
+
+class EffectiveRateEntry(TypedDict):
+    """One entry from the effective rate analysis.
+
+    Compares actual amortized spend rate to on-demand list price to derive
+    the real discount percentage.
+    """
+
+    service: str
+    usage_type: str  # e.g. "USE1-BoxUsage:m5.large"
+    instance_type: str | None  # parsed from usage_type; None if not EC2
+    total_cost_usd: float  # AmortizedCost over the period
+    usage_quantity: float  # UsageQuantity (hours for EC2)
+    effective_rate: float  # total_cost_usd / usage_quantity (0.0 if qty is 0)
+    list_rate: float | None  # on-demand hourly from Pricing API; None if unavailable
+    discount_pct: (
+        float | None
+    )  # (1 - effective_rate/list_rate)*100; None if no list_rate

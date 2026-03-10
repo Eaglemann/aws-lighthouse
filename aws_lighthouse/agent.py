@@ -37,6 +37,7 @@ _SCHEMA_GUARDED_TOOLS: frozenset[str] = frozenset(
         "tool_get_cost_attribution",
         "tool_get_compute_optimizer",
         "tool_get_tag_cost_coverage",
+        "tool_get_effective_rates",
         "tool_plan_remediation",
         "tool_get_sg_blast_radius",
         "tool_run_cost_scan",
@@ -563,6 +564,20 @@ def tool_get_tag_cost_coverage(schema_version: Literal["v1", "v2"] = "v1") -> st
 
 
 @tool
+def tool_get_effective_rates(schema_version: Literal["v1", "v2"] = "v1") -> str:
+    """Get effective AWS rate analysis -- compares actual amortized spend rates to on-demand list prices.
+
+    Returns top usage types by spend with the effective hourly rate (post-EDP/RI/SP
+    discounts), the on-demand list price for EC2 instances, and the real discount
+    percentage.  Useful for understanding how much you actually save vs. list prices.
+    """
+    from .tools.effective_rate import get_effective_rates as _get
+
+    result = _get()
+    return _format_scan_payload(result, schema_version)
+
+
+@tool
 def tool_plan_remediation(schema_version: Literal["v1", "v2"] = "v1") -> str:
     """Build a risk-tiered batch remediation plan from current scan findings.
 
@@ -848,6 +863,7 @@ tools = [
     tool_get_cost_attribution,
     tool_get_compute_optimizer,
     tool_get_tag_cost_coverage,
+    tool_get_effective_rates,
     tool_plan_remediation,
     tool_get_sg_blast_radius,
     tool_get_terraform_drift,
@@ -1100,6 +1116,7 @@ SAFE_TOOLS = {
     "tool_get_cost_attribution",
     "tool_get_compute_optimizer",
     "tool_get_tag_cost_coverage",
+    "tool_get_effective_rates",
     "tool_plan_remediation",
     "tool_get_sg_blast_radius",
     "tool_get_terraform_drift",

@@ -182,7 +182,7 @@ class DatabaseManager:
             self._clear_health_issue("initialize")
         except (sqlite3.Error, OSError) as e:
             self._record_health_issue("initialize", e)
-            logger.error(f"Failed to initialize SQLite database: {str(e)}")
+            logger.error(f"Failed to initialize SQLite database: {e!s}")
 
     def _ensure_audit_log_columns(self, cursor: sqlite3.Cursor) -> None:
         """Apply additive audit_log schema migrations for older local DB files."""
@@ -274,7 +274,7 @@ class DatabaseManager:
             self._clear_health_issue("record_cost_snapshot")
         except sqlite3.Error as e:
             self._record_health_issue("record_cost_snapshot", e)
-            logger.error(f"Failed to record cost snapshot: {str(e)}")
+            logger.error(f"Failed to record cost snapshot: {e!s}")
 
     def _prune_old_cost_snapshots(
         self, cursor: sqlite3.Cursor, account_id: str
@@ -317,7 +317,7 @@ class DatabaseManager:
                 return None
         except sqlite3.Error as e:
             self._record_health_issue("get_latest_cost_snapshot", e)
-            logger.error(f"Failed to retrieve latest cost snapshot: {str(e)}")
+            logger.error(f"Failed to retrieve latest cost snapshot: {e!s}")
             return None
 
     def record_scan_snapshot(
@@ -344,7 +344,7 @@ class DatabaseManager:
             self._clear_health_issue("record_scan_snapshot")
         except sqlite3.Error as e:
             self._record_health_issue("record_scan_snapshot", e)
-            logger.error(f"Failed to record scan snapshot: {str(e)}")
+            logger.error(f"Failed to record scan snapshot: {e!s}")
 
     def _prune_old_scan_snapshots(
         self, cursor: sqlite3.Cursor, account_id: str, scope_key: str
@@ -397,7 +397,7 @@ class DatabaseManager:
                 return None
         except sqlite3.Error as e:
             self._record_health_issue("get_latest_scan_snapshot", e)
-            logger.error(f"Failed to retrieve latest scan snapshot: {str(e)}")
+            logger.error(f"Failed to retrieve latest scan snapshot: {e!s}")
             return None
 
     def get_previous_scan_snapshot(
@@ -425,7 +425,7 @@ class DatabaseManager:
                 return None
         except sqlite3.Error as e:
             self._record_health_issue("get_previous_scan_snapshot", e)
-            logger.error(f"Failed to retrieve previous scan snapshot: {str(e)}")
+            logger.error(f"Failed to retrieve previous scan snapshot: {e!s}")
             return None
 
     def get_latest_scan_activity(
@@ -467,7 +467,7 @@ class DatabaseManager:
                 return None
         except sqlite3.Error as e:
             self._record_health_issue("get_latest_scan_activity", e)
-            logger.error(f"Failed to retrieve latest scan activity: {str(e)}")
+            logger.error(f"Failed to retrieve latest scan activity: {e!s}")
             return None
 
     def record_audit_log(
@@ -507,7 +507,7 @@ class DatabaseManager:
             self._clear_health_issue("record_audit_log")
         except sqlite3.Error as e:
             self._record_health_issue("record_audit_log", e)
-            logger.error(f"Failed to record audit log entry: {str(e)}")
+            logger.error(f"Failed to record audit log entry: {e!s}")
 
     def update_audit_log_result(
         self,
@@ -536,7 +536,7 @@ class DatabaseManager:
             self._clear_health_issue("update_audit_log_result")
         except sqlite3.Error as e:
             self._record_health_issue("update_audit_log_result", e)
-            logger.error(f"Failed to update audit log result: {str(e)}")
+            logger.error(f"Failed to update audit log result: {e!s}")
 
     def get_audit_log(
         self,
@@ -578,7 +578,7 @@ class DatabaseManager:
             return [dict(r) for r in rows]
         except sqlite3.Error as e:
             self._record_health_issue("get_audit_log", e)
-            logger.error(f"Failed to read audit log: {str(e)}")
+            logger.error(f"Failed to read audit log: {e!s}")
             return []
 
     def sync_opportunities(
@@ -838,7 +838,7 @@ class DatabaseManager:
                 }
         except sqlite3.Error as e:
             self._record_health_issue("sync_opportunities", e)
-            logger.error(f"Failed to sync opportunities: {str(e)}")
+            logger.error(f"Failed to sync opportunities: {e!s}")
             return {"created": 0, "reopened": 0, "resolved": 0, "still_open": 0}
 
     def list_opportunities(
@@ -913,7 +913,7 @@ class DatabaseManager:
                 return [self._row_to_opportunity(row) for row in rows]
         except sqlite3.Error as e:
             self._record_health_issue("list_opportunities", e)
-            logger.error(f"Failed to list opportunities: {str(e)}")
+            logger.error(f"Failed to list opportunities: {e!s}")
             return []
 
     def summarize_opportunities(
@@ -976,7 +976,7 @@ class DatabaseManager:
                 }
         except sqlite3.Error as e:
             self._record_health_issue("summarize_opportunities", e)
-            logger.error(f"Failed to summarize opportunities: {str(e)}")
+            logger.error(f"Failed to summarize opportunities: {e!s}")
             return {"total": 0, "by_source": {}, "by_severity": {}, "by_status": {}}
 
     def get_opportunity(
@@ -1019,7 +1019,7 @@ class DatabaseManager:
                 return self._row_to_opportunity(rows[0])
         except sqlite3.Error as e:
             self._record_health_issue("get_opportunity", e)
-            logger.error(f"Failed to get opportunity: {str(e)}")
+            logger.error(f"Failed to get opportunity: {e!s}")
             return None
 
     def get_opportunity_events(
@@ -1059,10 +1059,10 @@ class DatabaseManager:
                 return [self._row_to_opportunity_event(row) for row in rows]
         except sqlite3.Error as e:
             self._record_health_issue("get_opportunity_events", e)
-            logger.error(f"Failed to get opportunity events: {str(e)}")
+            logger.error(f"Failed to get opportunity events: {e!s}")
             return []
 
-    def update_opportunity_state(
+    def update_opportunity_state(  # noqa: C901
         self,
         *,
         fingerprint: str,
@@ -1219,7 +1219,7 @@ class DatabaseManager:
             self._clear_health_issue("update_opportunity_state")
         except sqlite3.Error as e:
             self._record_health_issue("update_opportunity_state", e)
-            logger.error(f"Failed to update opportunity state: {str(e)}")
+            logger.error(f"Failed to update opportunity state: {e!s}")
             return None
 
         return self.get_opportunity(
