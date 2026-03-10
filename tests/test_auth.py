@@ -2,6 +2,7 @@
 
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import boto3
@@ -59,10 +60,10 @@ class TestGetSessionConcurrent:
         with (
             patch("boto3.Session", return_value=good),
             patch("aws_lighthouse.auth.logger"),
+            ThreadPoolExecutor(max_workers=10) as executor,
         ):
-            with ThreadPoolExecutor(max_workers=10) as executor:
-                futures = [executor.submit(_get) for _ in range(10)]
-                results = [f.result() for f in as_completed(futures)]
+            futures = [executor.submit(_get) for _ in range(10)]
+            results = [f.result() for f in as_completed(futures)]
 
         assert all(r is good for r in results)
         # STS was called exactly once — authenticate() never ran twice
@@ -351,3 +352,101 @@ class TestSessionRefresh:
         assert client is fresh_client
         assert client is not stale_client
         fresh_session.client.assert_called_once_with("ec2", config=_RETRY_CONFIG)
+
+
+# ---------------------------------------------------------------------------
+# _is_session_expired — STS assumed-role credential expiry
+# ---------------------------------------------------------------------------
+
+
+class TestSessionExpiry:
+    def test_no_expiry_returns_false(self):
+        """Fresh AuthManager with no role assumed returns False."""
+        manager = AuthManager()
+        assert manager._session_expiry is None
+        assert manager._is_session_expired() is False
+
+    def test_expired_session_returns_true(self):
+        """Expiry in the past returns True."""
+        manager = AuthManager()
+        manager._session_expiry = datetime.now(UTC) - timedelta(minutes=10)
+        assert manager._is_session_expired() is True
+
+    def test_near_expiry_returns_true(self):
+        """Expiry within the 5-minute buffer returns True."""
+        manager = AuthManager()
+        manager._session_expiry = datetime.now(UTC) + timedelta(minutes=3)
+        assert manager._is_session_expired() is True
+
+    def test_valid_session_returns_false(self):
+        """Expiry well in the future returns False."""
+        manager = AuthManager()
+        manager._session_expiry = datetime.now(UTC) + timedelta(minutes=30)
+        assert manager._is_session_expired() is False
+
+    def test_exactly_five_minutes_returns_true(self):
+        """Expiry at exactly the 5-minute boundary is treated as expired."""
+        manager = AuthManager()
+        manager._session_expiry = datetime.now(UTC) + timedelta(minutes=5)
+        assert manager._is_session_expired() is True
+
+    def test_get_session_clears_state_on_sts_expiry(self):
+        """get_session() clears session, expiry, and clients when STS creds expire."""
+        manager = AuthManager()
+        manager._session = MagicMock(spec=boto3.Session)
+        manager._session_expiry = datetime.now(UTC) - timedelta(minutes=1)
+        manager._clients = {("ec2", None): MagicMock()}
+
+        fresh = MagicMock(spec=boto3.Session)
+
+        with (
+            patch.object(manager, "authenticate") as mock_auth,
+            patch("aws_lighthouse.auth.logger"),
+        ):
+            mock_auth.side_effect = lambda: (
+                setattr(manager, "_session", fresh),
+                setattr(manager, "_session_expiry", None),
+            )
+            session = manager.get_session()
+
+        assert session is fresh
+        assert manager._clients == {}
+        assert mock_auth.call_count == 1
+
+    def test_authenticate_stores_expiry_on_assume_role(self):
+        """When assume_role is used, _session_expiry is set from response."""
+        manager = AuthManager()
+
+        expiry_dt = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+        sts_mock = MagicMock()
+        sts_mock.assume_role.return_value = {
+            "Credentials": {
+                "AccessKeyId": "AKIA...",
+                "SecretAccessKey": "secret",
+                "SessionToken": "token",
+                "Expiration": expiry_dt,
+            },
+            "AssumedRoleUser": {"Arn": "arn:aws:sts::123:assumed-role/r/s"},
+        }
+        # First Session() fails (implicit), second succeeds (interactive),
+        # third is the new session built from assumed-role creds.
+        bad_session = _failing_session(NoCredentialsError())
+        interactive_session = MagicMock(spec=boto3.Session)
+        interactive_session.client.return_value = sts_mock
+
+        final_session = _make_session()
+
+        with (
+            patch(
+                "boto3.Session",
+                side_effect=[bad_session, interactive_session, final_session],
+            ),
+            patch("aws_lighthouse.auth.logger"),
+            patch(
+                "typer.prompt",
+                side_effect=["my-profile", "us-east-1", "arn:aws:iam::123:role/r"],
+            ),
+        ):
+            manager.authenticate()
+
+        assert manager._session_expiry is expiry_dt
