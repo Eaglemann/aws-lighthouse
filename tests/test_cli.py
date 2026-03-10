@@ -761,6 +761,7 @@ _PATCHES = {
     "aws_lighthouse.cli.get_compute_optimizer_recommendations": lambda **kw: _ok([]),
     "aws_lighthouse.cli.get_untagged_spend": lambda **kw: _ok([]),
     "aws_lighthouse.cli.get_effective_rates": lambda **kw: _ok([]),
+    "aws_lighthouse.cli.get_scenario_plan": lambda **kw: _ok({}),
     "aws_lighthouse.cli.run_security_scan": lambda **kwargs: _ok([]),
     "aws_lighthouse.cli.detect_overpermissive_iam": lambda: _ok([]),
     "aws_lighthouse.cli.detect_cloudwatch_gaps": lambda region=None: _ok([]),
@@ -829,6 +830,7 @@ class TestAnalyzeJsonOutput:
             "cost_waste",
             "tagging_findings",
             "effective_rate",
+            "scenario_plan",
         }
 
     def test_since_last_v1_adds_delta_object(self):
@@ -1073,6 +1075,7 @@ class TestAnalyzeJsonOutput:
             "cost_waste",
             "tagging_findings",
             "effective_rate",
+            "scenario_plan",
         }
         assert expected_keys == set(data.keys())
 
