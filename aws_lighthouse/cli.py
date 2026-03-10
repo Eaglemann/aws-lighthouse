@@ -3604,6 +3604,46 @@ def _render_ollama_alert(c: Console, runtime_status: Mapping[str, Any]) -> None:
 
 
 @app.command()
+def audit(
+    limit: int = typer.Option(50, "--limit", "-n", help="Max rows to show."),
+    since: str | None = typer.Option(
+        None,
+        "--since",
+        help="Show entries after this ISO timestamp (e.g. 2026-03-01T00:00:00).",
+    ),
+) -> None:
+    """Show the tool-call audit log."""
+    rows = db_manager.get_audit_log(limit=limit, since=since)
+    c = logger.console
+    if not rows:
+        c.print("[dim]No audit entries found.[/dim]")
+        return
+    table = Table(title="Audit Log", box=box.SIMPLE_HEAD, show_lines=False)
+    table.add_column("Time", style="dim", no_wrap=True)
+    table.add_column("Tool", style="cyan")
+    table.add_column("Decision", no_wrap=True)
+    table.add_column("Status", no_wrap=True)
+    table.add_column("Args", overflow="fold")
+    _DECISION_STYLE = {
+        "approved": "green",
+        "auto_approved": "yellow",
+        "denied": "red",
+    }
+    for row in rows:
+        decision = row["decision"]
+        style = _DECISION_STYLE.get(decision, "white")
+        status = row.get("execution_status") or ""
+        table.add_row(
+            row["timestamp"][:19],
+            row["tool_name"],
+            f"[{style}]{decision}[/{style}]",
+            status,
+            (row["args_json"] or "")[:120],
+        )
+    c.print(table)
+
+
+@app.command()
 def logs(
     lines: int = typer.Option(
         80,

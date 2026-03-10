@@ -538,6 +538,49 @@ class DatabaseManager:
             self._record_health_issue("update_audit_log_result", e)
             logger.error(f"Failed to update audit log result: {str(e)}")
 
+    def get_audit_log(
+        self,
+        limit: int = 50,
+        since: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return audit_log rows newest-first.
+
+        *since* is an ISO 8601 timestamp string; only rows after that time are
+        returned.  Returns an empty list on DB errors (never raises).
+        """
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.row_factory = sqlite3.Row
+                if since:
+                    rows = conn.execute(
+                        """
+                        SELECT id, timestamp, tool_call_id, tool_name, args_json,
+                               decision, execution_status, result, error
+                        FROM audit_log
+                        WHERE timestamp > ?
+                        ORDER BY id DESC
+                        LIMIT ?
+                        """,
+                        (since, limit),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT id, timestamp, tool_call_id, tool_name, args_json,
+                               decision, execution_status, result, error
+                        FROM audit_log
+                        ORDER BY id DESC
+                        LIMIT ?
+                        """,
+                        (limit,),
+                    ).fetchall()
+            self._clear_health_issue("get_audit_log")
+            return [dict(r) for r in rows]
+        except sqlite3.Error as e:
+            self._record_health_issue("get_audit_log", e)
+            logger.error(f"Failed to read audit log: {str(e)}")
+            return []
+
     def sync_opportunities(
         self,
         *,
