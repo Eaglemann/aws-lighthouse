@@ -70,7 +70,7 @@ def _build_alarm_index(cw, region: str | None = None):
     return ok_result(index)
 
 
-def detect_cloudwatch_gaps(region: str | None = None):
+def detect_cloudwatch_gaps(region: str | None = None):  # noqa: C901
     """
     Find resources that have no CloudWatch alarm for one or more key metrics:
 

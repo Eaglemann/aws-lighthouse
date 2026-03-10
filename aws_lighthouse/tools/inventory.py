@@ -29,7 +29,7 @@ def get_s3_inventory() -> ScanResult:
             )
         return ok_result(buckets)
     except (ClientError, BotoCoreError) as e:
-        logger.error(f"Failed to list S3 buckets: {str(e)}")
+        logger.error(f"Failed to list S3 buckets: {e!s}")
         return error_result(
             data=buckets,
             errors=[
@@ -72,7 +72,7 @@ def get_ec2_inventory(region: str | None = None) -> ScanResult:
                     )
         return ok_result(instances)
     except (ClientError, BotoCoreError) as e:
-        logger.error(f"Failed to list EC2 instances: {str(e)}")
+        logger.error(f"Failed to list EC2 instances: {e!s}")
         return error_result(
             data=instances,
             errors=[
@@ -105,7 +105,7 @@ def get_rds_inventory(region: str | None = None) -> ScanResult:
                 )
         return ok_result(instances)
     except (ClientError, BotoCoreError) as e:
-        logger.error(f"Failed to list RDS instances: {str(e)}")
+        logger.error(f"Failed to list RDS instances: {e!s}")
         return error_result(
             data=instances,
             errors=[
@@ -153,7 +153,7 @@ def get_lambda_inventory(region: str | None = None) -> ScanResult:
                 )
         return ok_result(functions)
     except (ClientError, BotoCoreError) as e:
-        logger.error(f"Failed to list Lambda functions: {str(e)}")
+        logger.error(f"Failed to list Lambda functions: {e!s}")
         return error_result(
             data=functions,
             errors=[

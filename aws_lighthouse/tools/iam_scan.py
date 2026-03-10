@@ -78,7 +78,7 @@ def _parse_inline_doc(raw_doc: Any) -> Any:
     return raw_doc
 
 
-def detect_overpermissive_iam():
+def detect_overpermissive_iam():  # noqa: C901
     """
     Scan IAM users, roles, and groups for policies that grant
     Action:* on Resource:* (HIGH) or Action:<svc>:* on Resource:* (MEDIUM).

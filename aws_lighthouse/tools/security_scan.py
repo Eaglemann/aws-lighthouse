@@ -21,7 +21,7 @@ from ..types import ScanResult, SecurityFinding
 def _get_credential_report(iam) -> ScanResult:
     """Generate and return the IAM credential report as a list of row dicts.
 
-    Polls generate_credential_report until State == COMPLETE (max 10 × 2 s).
+    Polls generate_credential_report until State == COMPLETE (max 10 x 2 s).
     Returns an empty list on timeout or API error.
     """
     try:
@@ -714,7 +714,7 @@ def run_security_scan(
     if include_global:
         results.append(_check_root_mfa())
         # Generate the credential report once and share it between both checks
-        # to avoid 2× the polling overhead (up to 40 s each).
+        # to avoid 2x the polling overhead (up to 40 s each).
         _shared_cred_report = _get_credential_report(get_aws_client("iam"))
         results.append(_check_iam_users_mfa(_shared_cred_report))
         results.append(_check_iam_key_age(_shared_cred_report))

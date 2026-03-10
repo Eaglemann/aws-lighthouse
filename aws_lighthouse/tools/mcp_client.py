@@ -31,16 +31,18 @@ class AWSMCPManager:
         )
         try:
             # We use langchain-mcp-adapters for rapid, clean tool parsing
-            async with stdio_client(self._server_params) as (read, write):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    self.tools = await load_mcp_tools(session)
-                    logger.success(
-                        f"Successfully loaded {len(self.tools)} tools from AWS MCP."
-                    )
-                    return self.tools
+            async with (
+                stdio_client(self._server_params) as (read, write),
+                ClientSession(read, write) as session,
+            ):
+                await session.initialize()
+                self.tools = await load_mcp_tools(session)
+                logger.success(
+                    f"Successfully loaded {len(self.tools)} tools from AWS MCP."
+                )
+                return self.tools
         except (OSError, RuntimeError, ValueError) as e:
-            logger.error(f"Failed to initialize AWS MCP Server: {str(e)}")
+            logger.error(f"Failed to initialize AWS MCP Server: {e!s}")
             return []
 
 
@@ -86,7 +88,7 @@ def _run_coro_in_new_thread(
         )
         return []
     if error:
-        logger.error(f"AWS MCP initialization failed: {str(error)}")
+        logger.error(f"AWS MCP initialization failed: {error!s}")
         return []
     return result
 
@@ -103,7 +105,7 @@ def get_mcp_tools() -> list[BaseTool]:
                 )
             )
         except Exception as exc:
-            logger.error(f"AWS MCP initialization failed: {str(exc)}")
+            logger.error(f"AWS MCP initialization failed: {exc!s}")
             return []
 
     return _run_coro_in_new_thread(

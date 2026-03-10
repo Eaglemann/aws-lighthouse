@@ -1,5 +1,6 @@
 """Terraform drift detection: classify scan findings as IaC-managed or shadow infrastructure."""
 
+import contextlib
 import re
 from pathlib import Path
 from typing import Any
@@ -257,10 +258,8 @@ def classify_findings_by_iac(
     # Concatenate all .tf content for fast substring search
     tf_content_all = ""
     for tf_file in tf_files:
-        try:
+        with contextlib.suppress(OSError):
             tf_content_all += tf_file.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            pass
 
     drift_findings: list[dict[str, Any]] = []
     for f in findings:

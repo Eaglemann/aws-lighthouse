@@ -44,8 +44,8 @@ def terminate_ec2(args: TerminateEC2Input) -> str:
         )
         return f"Terminated {len(term_instances)} instances."
     except (ClientError, BotoCoreError) as e:
-        logger.error(f"Failed to terminate EC2 instances: {str(e)}")
-        return f"Error: {str(e)}"
+        logger.error(f"Failed to terminate EC2 instances: {e!s}")
+        return f"Error: {e!s}"
 
 
 class DeleteEBSInput(BaseModel):

@@ -167,7 +167,7 @@ def read_file(args: ReadFileInput) -> str:
                 return "".join(lines[: args.max_lines]) + "\n...[TRUNCATED]..."
             return "".join(lines)
     except (OSError, UnicodeDecodeError) as e:
-        return f"Error reading file '{args.filepath}': {str(e)}"
+        return f"Error reading file '{args.filepath}': {e!s}"
 
 
 class WriteFileInput(BaseModel):
@@ -194,7 +194,7 @@ def write_file(args: WriteFileInput) -> str:
             f.write(args.content)
         return f"Successfully wrote to {args.filepath}"
     except OSError as e:
-        return f"Error writing file '{args.filepath}': {str(e)}"
+        return f"Error writing file '{args.filepath}': {e!s}"
 
 
 class ExecuteBashInput(BaseModel):

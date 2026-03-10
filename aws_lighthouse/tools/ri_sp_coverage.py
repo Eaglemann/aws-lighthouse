@@ -137,7 +137,7 @@ def get_ri_sp_coverage(days: int = 30) -> ScanResult:
     AWS Cost Explorer for the given look-back window.
 
     The four CE API calls are issued in parallel (ThreadPoolExecutor, 4 workers)
-    so total latency is bounded by the slowest single call (~1.5–3 s saved).
+    so total latency is bounded by the slowest single call (~1.5-3 s saved).
 
     Returned keys (all floats, or None on API error):
       ri_coverage_pct      — % of eligible instance-hours covered by RIs

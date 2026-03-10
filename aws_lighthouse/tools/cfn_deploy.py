@@ -44,7 +44,7 @@ def deploy_cur_template(
             "BucketAlreadyOwnedByYou",
             "BucketAlreadyExists",
         ]:
-            logger.error(f"Failed to create bucket: {str(e)}")
+            logger.error(f"Failed to create bucket: {e!s}")
             return False
 
     # Block all public access — bucket must never be publicly readable
@@ -59,7 +59,7 @@ def deploy_cur_template(
             },
         )
     except ClientError as e:
-        logger.error(f"Failed to block public access on bucket: {str(e)}")
+        logger.error(f"Failed to block public access on bucket: {e!s}")
         return False
 
     # Enable server-side encryption at rest (AES-256)
@@ -73,7 +73,7 @@ def deploy_cur_template(
             },
         )
     except ClientError as e:
-        logger.error(f"Failed to enable bucket encryption: {str(e)}")
+        logger.error(f"Failed to enable bucket encryption: {e!s}")
         return False
 
     # 4. Upload Dummy SubAccount Template (satisfies StackSet validation)
@@ -99,7 +99,7 @@ Resources:
             Body=dummy_template.encode("utf-8"),
         )
     except ClientError as e:
-        logger.error(f"Failed to upload dummy template: {str(e)}")
+        logger.error(f"Failed to upload dummy template: {e!s}")
         return False
 
     sub_url = f"https://{s3_bucket}.s3.amazonaws.com/subaccounts_dummy.yaml"
@@ -112,7 +112,7 @@ Resources:
             Bucket=s3_bucket, Key="cur.yaml", Body=template_body.encode("utf-8")
         )
     except ClientError as e:
-        logger.error(f"Failed to upload template: {str(e)}")
+        logger.error(f"Failed to upload template: {e!s}")
         return False
 
     template_url = f"https://{s3_bucket}.s3.amazonaws.com/cur.yaml"
@@ -148,8 +148,8 @@ Resources:
                 if "No updates are to be performed" in str(ue):
                     logger.success("Stack is already up to date.")
                     return True
-                logger.error(f"Stack update failed: {str(ue)}")
+                logger.error(f"Stack update failed: {ue!s}")
         else:
-            logger.error(f"Stack creation failed: {str(e)}")
+            logger.error(f"Stack creation failed: {e!s}")
 
         return False

@@ -281,7 +281,7 @@ def get_sg_blast_radius(
                         region=region,
                     )
                 )
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.error(f"Unexpected error analysing SG {sg_id}: {e}")
                 errors.append(
                     {

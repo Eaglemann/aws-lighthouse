@@ -39,7 +39,7 @@ def parse_terraform_context(args: ParseTerraformInput) -> str:
                 content = file.read()
                 context += f"--- {f} ---\n{content}\n\n"
         except OSError as e:
-            context += f"Error reading {f}: {str(e)}\n\n"
+            context += f"Error reading {f}: {e!s}\n\n"
 
     # Truncate if insanely large to protect context window
     if len(context) > 100000:

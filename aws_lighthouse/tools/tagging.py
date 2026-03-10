@@ -9,7 +9,7 @@ from ..types import ScanError, ScanResult, TagFinding
 DEFAULT_REQUIRED_TAGS = ["Environment", "Owner"]
 
 
-def check_tagging_compliance(
+def check_tagging_compliance(  # noqa: C901
     required_tags: list[str] | None = None,
     region: str | None = None,
     include_s3: bool = True,

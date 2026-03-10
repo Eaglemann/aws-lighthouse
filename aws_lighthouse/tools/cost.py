@@ -57,7 +57,7 @@ def get_monthly_cost_summary(days: int = 14) -> ScanResult:
         return ok_result(data)
 
     except (ClientError, BotoCoreError) as e:
-        logger.error(f"Failed to retrieve cost explorer metrics: {str(e)}")
+        logger.error(f"Failed to retrieve cost explorer metrics: {e!s}")
         return error_result(
             data=base_data,
             errors=[
