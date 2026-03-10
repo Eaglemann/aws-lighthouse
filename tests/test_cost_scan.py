@@ -8,6 +8,7 @@ from aws_lighthouse.tools.cost_scan import (
     _check_idle_load_balancers,
     _check_idle_nat_gateways,
     _check_idle_rds_instances,
+    _check_log_group_retention,
     _check_old_snapshots,
     _check_stopped_ec2,
     _check_unassociated_eips,
@@ -271,12 +272,19 @@ def _make_clean_lambda():
     return lmb
 
 
+def _make_clean_logs():
+    logs = MagicMock()
+    logs.describe_log_groups.return_value = {"logGroups": []}
+    return logs
+
+
 def test_run_cost_scan_clean_returns_empty():
     ec2 = _make_clean_ec2()
     cw = _make_clean_cw()
     elbv2 = _make_clean_elbv2()
     rds = _make_clean_rds()
     lmb = _make_clean_lambda()
+    logs = _make_clean_logs()
 
     def _get_client(service, region=None):
         return {
@@ -285,6 +293,7 @@ def test_run_cost_scan_clean_returns_empty():
             "elbv2": elbv2,
             "rds": rds,
             "lambda": lmb,
+            "logs": logs,
         }[service]
 
     with patch(f"{MOD}.get_client", side_effect=_get_client):
@@ -334,6 +343,7 @@ def test_run_cost_scan_aggregates_all_checks():
     elbv2 = _make_clean_elbv2()
     rds = _make_clean_rds()
     lmb = _make_clean_lambda()
+    logs = _make_clean_logs()
 
     def _get_client(service, region=None):
         return {
@@ -342,6 +352,7 @@ def test_run_cost_scan_aggregates_all_checks():
             "elbv2": elbv2,
             "rds": rds,
             "lambda": lmb,
+            "logs": logs,
         }[service]
 
     with patch(f"{MOD}.get_client", side_effect=_get_client):
@@ -711,3 +722,76 @@ class TestCheckIdleLambdaFunctions:
         call_args = cw.get_metric_statistics.call_args
         assert call_args.kwargs["Namespace"] == "AWS/Lambda"
         assert call_args.kwargs["MetricName"] == "Invocations"
+
+
+# ── _check_log_group_retention ────────────────────────────────────────────────
+
+
+class TestCheckLogGroupRetention:
+    def _lg(self, name, retention=None):
+        """Build a log group dict; omit retentionInDays when None."""
+        lg = {"logGroupName": name}
+        if retention is not None:
+            lg["retentionInDays"] = retention
+        return lg
+
+    def _make_logs(self, groups):
+        logs = MagicMock()
+        logs.describe_log_groups.return_value = {"logGroups": groups}
+        return logs
+
+    def test_no_groups_returns_empty(self):
+        logs = self._make_logs([])
+        assert _data(_check_log_group_retention(logs)) == []
+
+    def test_group_without_retention_flagged(self):
+        logs = self._make_logs([self._lg("/aws/lambda/my-fn")])
+        result = _data(_check_log_group_retention(logs, "us-east-1"))
+        assert len(result) == 1
+        assert result[0]["resource"] == "/aws/lambda/my-fn"
+        assert "retention policy" in result[0]["finding"]
+
+    def test_group_with_retention_not_flagged(self):
+        logs = self._make_logs([self._lg("/aws/lambda/my-fn", retention=90)])
+        assert _data(_check_log_group_retention(logs)) == []
+
+    def test_mixed_groups(self):
+        logs = self._make_logs(
+            [
+                self._lg("/app/server"),
+                self._lg("/app/worker", retention=30),
+                self._lg("/app/cron"),
+            ]
+        )
+        result = _data(_check_log_group_retention(logs))
+        names = [f["resource"] for f in result]
+        assert "/app/server" in names
+        assert "/app/cron" in names
+        assert "/app/worker" not in names
+
+    def test_remediation_fields_set(self):
+        logs = self._make_logs([self._lg("/my/group")])
+        result = _data(_check_log_group_retention(logs, "eu-west-1"))
+        assert result[0]["remediation_type"] == "set_log_retention"
+        assert "/my/group" in result[0]["remediation_label"]
+        assert result[0]["region"] == "eu-west-1"
+
+    def test_client_error_returns_error_result(self):
+        logs = MagicMock()
+        logs.describe_log_groups.side_effect = ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": "denied"}},
+            "DescribeLogGroups",
+        )
+        result = _check_log_group_retention(logs, "us-east-1")
+        assert result["ok"] is False
+        assert result["data"] == []
+
+    def test_pagination(self):
+        logs = MagicMock()
+        logs.describe_log_groups.side_effect = [
+            {"logGroups": [self._lg("/g1")], "nextToken": "tok"},
+            {"logGroups": [self._lg("/g2")]},
+        ]
+        result = _data(_check_log_group_retention(logs))
+        assert len(result) == 2
+        assert logs.describe_log_groups.call_count == 2
