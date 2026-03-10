@@ -296,6 +296,58 @@ def _check_idle_rds_instances(rds, cw, region: str | None = None):
     return ok_result(findings)
 
 
+def _check_idle_lambda_functions(lmb, cw, region: str | None = None):
+    """Flag Lambda functions with zero invocations over the past 30 days."""
+    findings: list[CostFinding] = []
+    try:
+        kwargs: dict[str, Any] = {}
+        functions: list[dict[str, Any]] = []
+        while True:
+            resp = lmb.list_functions(**kwargs)
+            functions.extend(resp.get("Functions", []))
+            if "NextMarker" not in resp:
+                break
+            kwargs["Marker"] = resp["NextMarker"]
+
+        for fn in functions:
+            fn_name = fn["FunctionName"]
+            runtime = fn.get("Runtime", "unknown")
+            metrics = cw.get_metric_statistics(
+                Namespace="AWS/Lambda",
+                MetricName="Invocations",
+                Dimensions=[{"Name": "FunctionName", "Value": fn_name}],
+                StartTime=datetime.now(UTC) - timedelta(days=30),
+                EndTime=datetime.now(UTC),
+                Period=2_592_000,  # 30 days in seconds
+                Statistics=["Sum"],
+            )
+            total_invocations = sum(dp["Sum"] for dp in metrics.get("Datapoints", []))
+            if total_invocations == 0:
+                findings.append(
+                    {
+                        "resource": fn_name,
+                        "finding": f"Lambda function {fn_name} has not been invoked in 30 days (runtime: {runtime})",
+                        "remediation_type": "delete_lambda_function",
+                        "remediation_label": f"Delete idle Lambda function {fn_name}",
+                        "region": region or "",
+                    }
+                )
+    except (ClientError, BotoCoreError) as e:
+        logger.error(f"Failed to check idle Lambda functions: {e}")
+        return error_result(
+            data=findings,
+            errors=[
+                scan_error_from_exception(
+                    service="lambda",
+                    operation="ListFunctions",
+                    exc=e,
+                    region=region,
+                )
+            ],
+        )
+    return ok_result(findings)
+
+
 def _check_unassociated_eips(ec2, region: str | None = None):
     """Flag Elastic IPs that are allocated but not associated with any resource."""
     findings: list[CostFinding] = []
@@ -333,6 +385,7 @@ def run_cost_scan(region: str | None = None):
     cw = get_client("cloudwatch", region)
     elbv2 = get_client("elbv2", region)
     rds = get_client("rds", region)
+    lmb = get_client("lambda", region)
     return merge_list_results(
         [
             _check_unattached_ebs(ec2, region),
@@ -342,5 +395,6 @@ def run_cost_scan(region: str | None = None):
             _check_idle_nat_gateways(ec2, cw, region),
             _check_idle_load_balancers(elbv2, cw, region),
             _check_idle_rds_instances(rds, cw, region),
+            _check_idle_lambda_functions(lmb, cw, region),
         ]
     )
