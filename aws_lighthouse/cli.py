@@ -58,6 +58,7 @@ from .tools.ri_sp_advisor import get_ri_recommendations, get_sp_recommendations
 from .tools.ri_sp_coverage import get_ri_sp_coverage
 from .tools.security_scan import run_security_scan
 from .tools.sg_blast_radius import get_sg_blast_radius
+from .tools.tag_cost_enforcer import get_untagged_spend
 from .tools.tagging import check_tagging_compliance
 from .tools.terraform_drift import classify_findings_by_iac
 from .types import (
@@ -402,6 +403,7 @@ _SUMMARY_SECTION_LABELS = {
     "iam_findings": "IAM",
     "cloudwatch_findings": "CloudWatch",
     "compute_optimizer": "Compute Optimizer",
+    "tag_cost_coverage": "Tag Cost Coverage",
     "cost_waste": "Cost Waste",
     "tagging_findings": "Tagging",
 }
@@ -1647,6 +1649,48 @@ def _section_compute_optimizer(c: Console, render: bool = True) -> ScanResult:
     return result
 
 
+def _render_tag_cost_panel(c: Console, result: ScanResult) -> None:
+    """Render cost allocation tag coverage as a panel."""
+    rows = result["data"] if result["ok"] else []
+    if not rows:
+        c.print(
+            Panel(
+                "[dim]No spend data available[/dim]",
+                title="Cost Allocation Tag Coverage",
+            )
+        )
+        return
+    table = Table(show_header=True, header_style="bold", box=None, padding=(0, 1))
+    table.add_column("Tag Key", style="bold")
+    table.add_column("Untagged", justify="right")
+    table.add_column("Tagged", justify="right")
+    table.add_column("Total", justify="right")
+    table.add_column("% Untagged", justify="right")
+    for row in rows:
+        pct = row["untagged_pct"]
+        pct_style = "red" if pct >= 50 else ("yellow" if pct >= 20 else "green")
+        table.add_row(
+            row["tag_key"],
+            f"${row['untagged_usd']:,.2f}",
+            f"${row['tagged_usd']:,.2f}",
+            f"${row['total_usd']:,.2f}",
+            f"[{pct_style}]{pct:.1f}%[/{pct_style}]",
+        )
+    c.print(Panel(table, title="Cost Allocation Tag Coverage"))
+
+
+def _section_tag_cost(c: Console, render: bool = True) -> ScanResult:
+    """Fetch untagged spend data and optionally render the panel."""
+    with c.status(
+        "[cyan]Checking cost allocation tag coverage...[/cyan]",
+        spinner="dots",
+    ):
+        result = get_untagged_spend()
+    if render:
+        _render_tag_cost_panel(c, result)
+    return result
+
+
 def _section_security(
     c: Console,
     s3s: list,
@@ -2236,6 +2280,13 @@ def _build_sarif_output(payloads: dict[str, Any], account_id: str) -> dict[str, 
             f"(saves ${f.get('estimated_monthly_savings_usd', 0):.2f}/mo)"
         )
         raw_findings.append((text, str(f.get("instance_id", "")), None))
+    for f in v1.get("tag_cost_coverage", []):
+        if f.get("untagged_pct", 0) > 20:
+            text = (
+                f"Tag '{f['tag_key']}' missing on {f['untagged_pct']:.1f}% of spend"
+                f" (${f['untagged_usd']:.2f} untagged)"
+            )
+            raw_findings.append((text, f["tag_key"], None))
 
     # Build unique rules (dedup by rule_id)
     seen_rules: dict[str, dict[str, Any]] = {}
@@ -2442,6 +2493,7 @@ def _run_analyze_cycle(
         )
         advisor_results = _section_ri_sp_advisor(c, render=False)
         compute_optimizer_result = _section_compute_optimizer(c, render=False)
+        tag_cost_result = _section_tag_cost(c, render=False)
         sec_result = (
             _section_security(
                 c,
@@ -2498,6 +2550,7 @@ def _run_analyze_cycle(
             "ri_recommendations": advisor_results["ri"],
             "sp_recommendations": advisor_results["sp"],
             "compute_optimizer": compute_optimizer_result,
+            "tag_cost_coverage": tag_cost_result,
             "security_findings": sec_result,
             "sg_blast_radius": sg_blast_result,
             "iam_findings": iam_result,
@@ -2693,6 +2746,7 @@ def _run_analyze_cycle(
                     c, advisor_results["ri"], advisor_results["sp"]
                 )
                 _render_compute_optimizer_panel(c, compute_optimizer_result)
+                _render_tag_cost_panel(c, tag_cost_result)
 
                 if effective_policy.scan_enabled("cost_waste"):
                     _render_cost_waste_panel(

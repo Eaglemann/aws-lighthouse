@@ -282,3 +282,14 @@ class ComputeOptimizerRecommendation(TypedDict):
     recommendation_reason: str  # human-readable summary
     is_graviton: bool  # True when recommended type is Graviton
     region: str | None
+
+
+class UntaggedSpend(TypedDict):
+    """Untagged spend for one required tag key."""
+
+    tag_key: str
+    untagged_usd: float
+    tagged_usd: float
+    total_usd: float
+    untagged_pct: float
+    period_days: int
