@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 from botocore.exceptions import ClientError
 
 from aws_lighthouse.tools.cost_scan import (
+    _check_idle_lambda_functions,
     _check_idle_load_balancers,
     _check_idle_nat_gateways,
     _check_idle_rds_instances,
@@ -264,14 +265,27 @@ def _make_clean_rds():
     return rds
 
 
+def _make_clean_lambda():
+    lmb = MagicMock()
+    lmb.list_functions.return_value = {"Functions": []}
+    return lmb
+
+
 def test_run_cost_scan_clean_returns_empty():
     ec2 = _make_clean_ec2()
     cw = _make_clean_cw()
     elbv2 = _make_clean_elbv2()
     rds = _make_clean_rds()
+    lmb = _make_clean_lambda()
 
     def _get_client(service, region=None):
-        return {"ec2": ec2, "cloudwatch": cw, "elbv2": elbv2, "rds": rds}[service]
+        return {
+            "ec2": ec2,
+            "cloudwatch": cw,
+            "elbv2": elbv2,
+            "rds": rds,
+            "lambda": lmb,
+        }[service]
 
     with patch(f"{MOD}.get_client", side_effect=_get_client):
         result = run_cost_scan()
@@ -319,9 +333,16 @@ def test_run_cost_scan_aggregates_all_checks():
     cw = _make_clean_cw()
     elbv2 = _make_clean_elbv2()
     rds = _make_clean_rds()
+    lmb = _make_clean_lambda()
 
     def _get_client(service, region=None):
-        return {"ec2": ec2, "cloudwatch": cw, "elbv2": elbv2, "rds": rds}[service]
+        return {
+            "ec2": ec2,
+            "cloudwatch": cw,
+            "elbv2": elbv2,
+            "rds": rds,
+            "lambda": lmb,
+        }[service]
 
     with patch(f"{MOD}.get_client", side_effect=_get_client):
         result = run_cost_scan()
@@ -601,3 +622,92 @@ class TestCheckIdleRdsInstances:
         result = _data(_check_idle_rds_instances(rds, cw, "us-east-1"))
         assert len(result) == 2
         assert rds.describe_db_instances.call_count == 2
+
+
+# ── _check_idle_lambda_functions ──────────────────────────────────────────
+
+
+class TestCheckIdleLambdaFunctions:
+    def _make_clients(self, functions, invocations_map=None):
+        lmb = MagicMock()
+        cw = MagicMock()
+        lmb.list_functions.return_value = {"Functions": functions}
+        if invocations_map is None:
+            cw.get_metric_statistics.return_value = {"Datapoints": []}
+        else:
+
+            def get_metric_stats(**kwargs):
+                fn_name = kwargs["Dimensions"][0]["Value"]
+                val = invocations_map.get(fn_name, 0)
+                return {"Datapoints": [{"Sum": val}] if val > 0 else []}
+
+            cw.get_metric_statistics.side_effect = get_metric_stats
+        return lmb, cw
+
+    def _fn(self, name, runtime="python3.12"):
+        return {"FunctionName": name, "Runtime": runtime}
+
+    def test_no_functions_returns_empty(self):
+        lmb, cw = self._make_clients([])
+        assert _data(_check_idle_lambda_functions(lmb, cw, "us-east-1")) == []
+
+    def test_idle_function_flagged(self):
+        lmb, cw = self._make_clients([self._fn("my-fn")])
+        result = _data(_check_idle_lambda_functions(lmb, cw, "us-east-1"))
+        assert len(result) == 1
+        assert result[0]["resource"] == "my-fn"
+        assert "not been invoked" in result[0]["finding"]
+        assert result[0]["remediation_type"] == "delete_lambda_function"
+
+    def test_active_function_not_flagged(self):
+        lmb, cw = self._make_clients(
+            [self._fn("active-fn")],
+            invocations_map={"active-fn": 42},
+        )
+        assert _data(_check_idle_lambda_functions(lmb, cw, "us-east-1")) == []
+
+    def test_runtime_included_in_finding(self):
+        lmb, cw = self._make_clients([self._fn("fn", runtime="nodejs20.x")])
+        result = _data(_check_idle_lambda_functions(lmb, cw, "us-east-1"))
+        assert "nodejs20.x" in result[0]["finding"]
+
+    def test_mixed_functions(self):
+        lmb, cw = self._make_clients(
+            [self._fn("fn-ok"), self._fn("fn-idle")],
+            invocations_map={"fn-ok": 100},
+        )
+        result = _data(_check_idle_lambda_functions(lmb, cw, "us-east-1"))
+        assert len(result) == 1
+        assert result[0]["resource"] == "fn-idle"
+
+    def test_client_error_returns_empty(self):
+        lmb = MagicMock()
+        lmb.list_functions.side_effect = ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": "denied"}},
+            "ListFunctions",
+        )
+        result = _check_idle_lambda_functions(lmb, MagicMock(), "us-east-1")
+        assert result["ok"] is False
+        assert result["data"] == []
+
+    def test_pagination_fetches_all_functions(self):
+        lmb = MagicMock()
+        cw = MagicMock()
+        cw.get_metric_statistics.return_value = {"Datapoints": []}
+        lmb.list_functions.side_effect = [
+            {
+                "Functions": [{"FunctionName": "fn-1", "Runtime": "python3.12"}],
+                "NextMarker": "tok",
+            },
+            {"Functions": [{"FunctionName": "fn-2", "Runtime": "python3.12"}]},
+        ]
+        result = _data(_check_idle_lambda_functions(lmb, cw, "us-east-1"))
+        assert len(result) == 2
+        assert lmb.list_functions.call_count == 2
+
+    def test_cw_uses_lambda_namespace(self):
+        lmb, cw = self._make_clients([self._fn("fn-check")])
+        _check_idle_lambda_functions(lmb, cw, "us-east-1")
+        call_args = cw.get_metric_statistics.call_args
+        assert call_args.kwargs["Namespace"] == "AWS/Lambda"
+        assert call_args.kwargs["MetricName"] == "Invocations"
