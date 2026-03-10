@@ -495,6 +495,50 @@ class TestAuditLog:
         assert rows[1]["result"] == "[]"
 
 
+class TestGetAuditLog:
+    def test_returns_empty_list_on_fresh_db(self, db):
+        assert db.get_audit_log() == []
+
+    def test_round_trip(self, db):
+        db.record_audit_log("terminate_ec2", '{"ids": ["i-1"]}', "approved")
+        rows = db.get_audit_log()
+        assert len(rows) == 1
+        assert rows[0]["tool_name"] == "terminate_ec2"
+        assert rows[0]["decision"] == "approved"
+
+    def test_newest_first(self, db):
+        db.record_audit_log("tool_a", "{}", "approved")
+        db.record_audit_log("tool_b", "{}", "denied")
+        db.record_audit_log("tool_c", "{}", "auto_approved")
+        rows = db.get_audit_log()
+        assert [r["tool_name"] for r in rows] == ["tool_c", "tool_b", "tool_a"]
+
+    def test_limit_respected(self, db):
+        for i in range(10):
+            db.record_audit_log(f"tool_{i}", "{}", "approved")
+        rows = db.get_audit_log(limit=3)
+        assert len(rows) == 3
+
+    def test_since_filter(self, db, tmp_path):
+        # Insert rows with explicit timestamps so the filter is deterministic.
+        with sqlite3.connect(tmp_path / "test.db") as conn:
+            conn.executemany(
+                "INSERT INTO audit_log (tool_name, args_json, decision, timestamp) VALUES (?, ?, ?, ?)",
+                [
+                    ("old_tool", "{}", "approved", "2026-01-01 00:00:00"),
+                    ("new_tool", "{}", "denied", "2026-03-10 12:00:00"),
+                ],
+            )
+        rows = db.get_audit_log(since="2026-03-01T00:00:00")
+        assert len(rows) == 1
+        assert rows[0]["tool_name"] == "new_tool"
+
+    def test_handles_db_error_without_raising(self, db, tmp_path, monkeypatch):
+        monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "gone" / "x.db")
+        result = db.get_audit_log()
+        assert result == []
+
+
 class TestCostSnapshotRetention:
     def test_prunes_old_snapshots_per_account(self, tmp_path, monkeypatch):
         monkeypatch.setattr(db_module, "DB_DIR", tmp_path)

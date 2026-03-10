@@ -2747,3 +2747,71 @@ class TestAnalyzeSarifOutput:
         ]
         assert "999888777666" in fqn
         assert "my-res" in fqn
+
+
+# ---------------------------------------------------------------------------
+# audit command
+# ---------------------------------------------------------------------------
+
+
+class TestAuditCommand:
+    def test_audit_empty(self):
+        runner = CliRunner()
+        with patch.object(
+            __import__("aws_lighthouse.db", fromlist=["db_manager"]).db_manager,
+            "get_audit_log",
+            return_value=[],
+        ):
+            result = runner.invoke(app, ["audit"])
+        assert result.exit_code == 0
+        assert "No audit entries found" in result.output
+
+    def test_audit_with_rows(self):
+        rows = [
+            {
+                "id": 2,
+                "timestamp": "2026-03-10 12:00:00",
+                "tool_call_id": "call-2",
+                "tool_name": "delete_ebs",
+                "args_json": '{"vol": "v1"}',
+                "decision": "denied",
+                "execution_status": "denied",
+                "result": None,
+                "error": None,
+            },
+            {
+                "id": 1,
+                "timestamp": "2026-03-10 11:00:00",
+                "tool_call_id": "call-1",
+                "tool_name": "scan",
+                "args_json": "{}",
+                "decision": "auto_approved",
+                "execution_status": "executed",
+                "result": None,
+                "error": None,
+            },
+        ]
+        runner = CliRunner()
+        with patch.object(
+            __import__("aws_lighthouse.db", fromlist=["db_manager"]).db_manager,
+            "get_audit_log",
+            return_value=rows,
+        ):
+            result = runner.invoke(app, ["audit"])
+        assert result.exit_code == 0
+        assert "delete_ebs" in result.output
+        assert "scan" in result.output
+        assert "denied" in result.output
+        assert "auto_approved" in result.output
+
+    def test_audit_passes_limit_and_since(self):
+        runner = CliRunner()
+        with patch.object(
+            __import__("aws_lighthouse.db", fromlist=["db_manager"]).db_manager,
+            "get_audit_log",
+            return_value=[],
+        ) as mock_get:
+            runner.invoke(
+                app, ["audit", "--limit", "10", "--since", "2026-03-01T00:00:00"]
+            )
+        mock_get.assert_called_once_with(limit=10, since="2026-03-01T00:00:00")
