@@ -1,7 +1,7 @@
 import contextlib
 import threading
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import boto3
 import typer
@@ -20,6 +20,7 @@ class AuthManager:
 
     def __init__(self):
         self._session = None
+        self._session_expiry: datetime | None = None
         self._lock = threading.Lock()
         self._clients: dict = {}
         self._clients_lock = threading.Lock()
@@ -52,15 +53,33 @@ class AuthManager:
             expiry_time = expiry_time.replace(tzinfo=UTC)
         return bool(expiry_time <= datetime.now(UTC))
 
+    def _is_session_expired(self) -> bool:
+        """Return True when STS assumed-role credentials are near expiry.
+
+        Returns False when no role was assumed (``_session_expiry`` is None).
+        Uses a 5-minute buffer so callers refresh *before* the hard deadline.
+        """
+        if self._session_expiry is None:
+            return False
+        return datetime.now(UTC) + timedelta(minutes=5) >= self._session_expiry
+
     def get_session(self) -> boto3.Session:
         """Returns the active boto3 session, authenticating if necessary.
 
         Uses double-checked locking so concurrent callers (e.g. parallel region
         scans) never call authenticate() more than once.
         """
-        if self._session is None or self._credentials_expired():
+        if (
+            self._session is None
+            or self._credentials_expired()
+            or self._is_session_expired()
+        ):
             with self._lock:
-                if self._session is None or self._credentials_expired():
+                if (
+                    self._session is None
+                    or self._credentials_expired()
+                    or self._is_session_expired()
+                ):
                     if self._session is not None:
                         logger.warn(
                             "AWS session credentials expired; re-authenticating..."
@@ -68,6 +87,7 @@ class AuthManager:
                         with self._clients_lock:
                             self._clients.clear()
                         self._session = None
+                        self._session_expiry = None
                     self.authenticate()
         return self._session
 
@@ -112,6 +132,7 @@ class AuthManager:
                     RoleArn=role_arn, RoleSessionName="aws-lighthouse-session"
                 )
                 credentials = assumed_role["Credentials"]
+                self._session_expiry = credentials.get("Expiration")
                 session = boto3.Session(
                     aws_access_key_id=credentials["AccessKeyId"],
                     aws_secret_access_key=credentials["SecretAccessKey"],
@@ -126,7 +147,7 @@ class AuthManager:
             logger.success(f"Successfully authenticated as: {identity['Arn']}")
 
         except (ClientError, BotoCoreError, ValueError) as e:
-            logger.error(f"Authentication failed: {str(e)}")
+            logger.error(f"Authentication failed: {e!s}")
             raise typer.Exit(code=1) from e
 
     def get_client(self, service_name: str, region: str | None = None):
@@ -190,10 +211,13 @@ def profile_context(profile_name: str) -> Iterator[None]:
     """
     saved_session = auth_manager._session
     saved_clients = dict(auth_manager._clients)
+    saved_expiry = auth_manager._session_expiry
     try:
         auth_manager._session = boto3.Session(profile_name=profile_name)
         auth_manager._clients = {}
+        auth_manager._session_expiry = None
         yield
     finally:
         auth_manager._session = saved_session
         auth_manager._clients = saved_clients
+        auth_manager._session_expiry = saved_expiry
