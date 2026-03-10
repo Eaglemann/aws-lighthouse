@@ -132,6 +132,14 @@ class TestGetHclFix:
         assert fix is not None
         assert "db-prod" in fix or "aws_db_instance" in fix
 
+    def test_log_group_retention(self):
+        fix = _get_hcl_fix(
+            "CloudWatch log group /aws/lambda/my-fn has no retention policy",
+            "/aws/lambda/my-fn",
+        )
+        assert fix is not None
+        assert "aws_cloudwatch_log_group" in fix or "retention_in_days" in fix
+
     def test_no_match_returns_none(self):
         assert _get_hcl_fix("some unrecognized finding text here", "res") is None
 
