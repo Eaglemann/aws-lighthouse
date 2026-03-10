@@ -127,6 +127,13 @@ _FINDING_TO_HCL: list[tuple[str, str]] = [
         "  log_destination = aws_cloudwatch_log_group.flow_log.arn\n"
         "}}",
     ),
+    (
+        "retention policy",
+        'resource "aws_cloudwatch_log_group" "{name}" {{\n'
+        '  name              = "{resource_id}"\n'
+        "  retention_in_days = 90\n"
+        "}}",
+    ),
 ]
 
 # ---------------------------------------------------------------------------
