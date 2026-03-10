@@ -295,6 +295,51 @@ class UntaggedSpend(TypedDict):
     period_days: int
 
 
+class ScenarioEntry(TypedDict):
+    """One entry in a cost scenario plan (e.g., Graviton migration)."""
+
+    current_instance_type: str
+    target_instance_type: str
+    usage_hours: float
+    current_rate: float
+    target_rate: float | None
+    current_monthly_cost: float
+    projected_monthly_cost: float | None
+    monthly_savings: float | None
+    savings_pct: float | None
+
+
+class ScenarioPlan(TypedDict):
+    """Full cost scenario plan with projected savings."""
+
+    scenario: str
+    total_current_cost: float
+    total_projected_cost: float | None
+    total_monthly_savings: float | None
+    entries: list[ScenarioEntry]
+
+
+class ResourceEstimate(TypedDict):
+    """One resource line in a pre-build cost estimate."""
+
+    resource_type: str  # "ec2", "rds", "lambda", etc.
+    label: str  # human label e.g. "m5.large x2"
+    count: int
+    unit_monthly_cost: float | None  # per-instance monthly cost
+    total_monthly_cost: float | None  # count * unit_monthly_cost
+    pricing_note: str  # e.g. "on-demand Linux" or "assumed 730 hrs/mo"
+
+
+class CostEstimate(TypedDict):
+    """Full pre-build cost estimate with Terraform scaffold."""
+
+    resources: list[ResourceEstimate]
+    total_monthly_cost: float | None
+    total_annual_cost: float | None
+    terraform_scaffold: str  # HCL string
+    currency: str  # "USD"
+
+
 class EffectiveRateEntry(TypedDict):
     """One entry from the effective rate analysis.
 

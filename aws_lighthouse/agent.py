@@ -578,6 +578,65 @@ def tool_get_effective_rates(schema_version: Literal["v1", "v2"] = "v1") -> str:
 
 
 @tool
+def tool_get_scenario_plan(
+    scenario: str = "graviton", schema_version: Literal["v1", "v2"] = "v1"
+) -> str:
+    """Model cost impact of migrating EC2 instances to a different type (e.g., Graviton).
+
+    Reads current EC2 usage from Cost Explorer, maps each instance type to the
+    target alternative (Graviton or latest-gen), looks up on-demand prices via
+    the Pricing API, and computes projected monthly savings per instance type.
+
+    Args:
+        scenario: Scenario to model -- ``"graviton"`` or ``"latest-gen"``.
+    """
+    from .tools.scenario_planner import get_scenario_plan as _get
+
+    result = _get(scenario=scenario)
+    return _format_scan_payload(result, schema_version)
+
+
+class CostEstimateInput(BaseModel):
+    """Input schema for tool_estimate_build_cost."""
+
+    resources: str = Field(
+        description=(
+            "Comma-separated resource specs: "
+            "'ec2:m5.large:2,rds:db.t3.medium:1,lambda::3'"
+        )
+    )
+
+
+@tool
+def tool_estimate_build_cost(params: CostEstimateInput) -> str:
+    """Estimate monthly AWS costs and generate Terraform for a proposed architecture.
+
+    Accepts a comma-separated resource spec string and returns a cost
+    breakdown plus a ready-to-use Terraform scaffold.
+    """
+    from .tools.cost_estimator import estimate_build_cost as _estimate
+
+    resource_list: list[dict[str, Any]] = []
+    for part in params.resources.split(","):
+        parts = part.strip().split(":")
+        if not parts:
+            continue
+        rtype = parts[0].strip().lower()
+        instance = parts[1].strip() if len(parts) > 1 else ""
+        count = (
+            int(parts[2].strip())
+            if len(parts) > 2 and parts[2].strip().isdigit()
+            else 1
+        )
+        spec: dict[str, Any] = {"type": rtype, "count": count}
+        if instance:
+            spec["instance_type" if rtype != "rds" else "instance_class"] = instance
+        resource_list.append(spec)
+    result = _estimate(resource_list)
+    return json.dumps(result["data"], default=str)
+
+
+@tool
 def tool_plan_remediation(schema_version: Literal["v1", "v2"] = "v1") -> str:
     """Build a risk-tiered batch remediation plan from current scan findings.
 
@@ -864,6 +923,8 @@ tools = [
     tool_get_compute_optimizer,
     tool_get_tag_cost_coverage,
     tool_get_effective_rates,
+    tool_get_scenario_plan,
+    tool_estimate_build_cost,
     tool_plan_remediation,
     tool_get_sg_blast_radius,
     tool_get_terraform_drift,
@@ -1117,6 +1178,8 @@ SAFE_TOOLS = {
     "tool_get_compute_optimizer",
     "tool_get_tag_cost_coverage",
     "tool_get_effective_rates",
+    "tool_get_scenario_plan",
+    "tool_estimate_build_cost",
     "tool_plan_remediation",
     "tool_get_sg_blast_radius",
     "tool_get_terraform_drift",

@@ -44,6 +44,7 @@ from .tools.cloudwatch_scan import detect_cloudwatch_gaps
 from .tools.compute_optimizer import get_compute_optimizer_recommendations
 from .tools.cost import get_cost_forecast, get_monthly_cost_summary
 from .tools.cost_anomaly import detect_cost_anomalies
+from .tools.cost_estimator import estimate_build_cost
 from .tools.cost_scan import run_cost_scan
 from .tools.effective_rate import get_effective_rates
 from .tools.iam_scan import detect_overpermissive_iam
@@ -58,6 +59,7 @@ from .tools.notify import build_alert_payload, send_webhook, should_alert
 from .tools.remediation_plan import build_remediation_plan, parse_phase_selection
 from .tools.ri_sp_advisor import get_ri_recommendations, get_sp_recommendations
 from .tools.ri_sp_coverage import get_ri_sp_coverage
+from .tools.scenario_planner import get_scenario_plan
 from .tools.security_scan import run_security_scan
 from .tools.sg_blast_radius import get_sg_blast_radius
 from .tools.tag_cost_enforcer import get_untagged_spend
@@ -407,6 +409,7 @@ _SUMMARY_SECTION_LABELS = {
     "compute_optimizer": "Compute Optimizer",
     "tag_cost_coverage": "Tag Cost Coverage",
     "effective_rate": "Effective Rate Analysis",
+    "scenario_plan": "Cost Scenario Plan",
     "cost_waste": "Cost Waste",
     "tagging_findings": "Tagging",
 }
@@ -1709,6 +1712,67 @@ def _section_effective_rate(
     return result
 
 
+def _render_scenario_plan_panel(plan: dict[str, Any], console: Console) -> None:
+    """Render a cost scenario plan table."""
+    if not plan or not plan.get("entries"):
+        console.print("[dim]  No mappable EC2 instances found for this scenario.[/dim]")
+        return
+    scenario = plan.get("scenario", "")
+    total_savings = plan.get("total_monthly_savings")
+    savings_str = (
+        f"[green]${total_savings:,.2f}/mo[/green]"
+        if total_savings
+        else "[dim]---[/dim]"
+    )
+    console.print(
+        f"  Scenario: [bold]{scenario}[/bold]  |  Projected savings: {savings_str}"
+    )
+    table = Table(box=box.SIMPLE_HEAD, show_lines=False, padding=(0, 1))
+    table.add_column("Current", style="cyan")
+    table.add_column("Target")
+    table.add_column("Hours", justify="right", style="dim")
+    table.add_column("Current Cost", justify="right")
+    table.add_column("Projected", justify="right")
+    table.add_column("Savings", justify="right")
+    for e in plan.get("entries", []):
+        sav = e.get("monthly_savings")
+        if sav and sav > 0:
+            sav_str = f"[green]${sav:,.2f}[/green]"
+        elif sav is not None:
+            sav_str = f"[red]${sav:,.2f}[/red]"
+        else:
+            sav_str = "[dim]---[/dim]"
+        proj = e.get("projected_monthly_cost")
+        proj_str = f"${proj:,.2f}" if proj is not None else "[dim]---[/dim]"
+        table.add_row(
+            e["current_instance_type"],
+            e["target_instance_type"],
+            f"{e['usage_hours']:,.0f}",
+            f"${e['current_monthly_cost']:,.2f}",
+            proj_str,
+            sav_str,
+        )
+    console.print(table)
+
+
+def _section_scenario_plan(
+    c: Console,
+    region: str | None = None,
+    days: int = 30,
+    scenario: str = "graviton",
+    render: bool = True,
+) -> ScanResult:
+    """Fetch cost scenario plan and optionally render the panel."""
+    with c.status(
+        "[cyan]Computing scenario plan...[/cyan]",
+        spinner="dots",
+    ):
+        result = get_scenario_plan(scenario=scenario, days=days, region=region)
+    if render and result["ok"]:
+        _render_scenario_plan_panel(cast(dict[str, Any], result["data"]), c)
+    return result
+
+
 def _render_tag_cost_panel(c: Console, result: ScanResult) -> None:
     """Render cost allocation tag coverage as a panel."""
     rows = result["data"] if result["ok"] else []
@@ -2561,6 +2625,9 @@ def _run_analyze_cycle(  # noqa: C901
         effective_rate_result = _section_effective_rate(
             c, region=region, days=days, render=False
         )
+        scenario_plan_result = _section_scenario_plan(
+            c, region=region, days=days, render=False
+        )
         tag_cost_result = _section_tag_cost(c, render=False)
         sec_result = (
             _section_security(
@@ -2620,6 +2687,7 @@ def _run_analyze_cycle(  # noqa: C901
             "compute_optimizer": compute_optimizer_result,
             "tag_cost_coverage": tag_cost_result,
             "effective_rate": effective_rate_result,
+            "scenario_plan": scenario_plan_result,
             "security_findings": sec_result,
             "sg_blast_radius": sg_blast_result,
             "iam_findings": iam_result,
@@ -3669,6 +3737,90 @@ def _render_ollama_alert(c: Console, runtime_status: Mapping[str, Any]) -> None:
         )
     )
     c.print()
+
+
+@app.command()
+def estimate(
+    resources: str = typer.Argument(
+        ...,
+        help="Resource spec: 'ec2:m5.large:2,rds:db.t3.medium:1,lambda::3'",
+    ),
+    region: str | None = typer.Option(None, "--region", "-r"),
+    output: str = typer.Option(
+        "text", "--output", "-o", help="Output format: text or json"
+    ),
+) -> None:
+    """Estimate monthly AWS costs and generate a Terraform scaffold for a proposed architecture."""
+    resource_list: list[dict[str, Any]] = []
+    for part in resources.split(","):
+        parts = part.strip().split(":")
+        if not parts:
+            continue
+        rtype = parts[0].strip().lower()
+        instance = parts[1].strip() if len(parts) > 1 else ""
+        count = (
+            int(parts[2].strip())
+            if len(parts) > 2 and parts[2].strip().isdigit()
+            else 1
+        )
+        spec: dict[str, Any] = {"type": rtype, "count": count}
+        if instance:
+            if rtype == "rds":
+                spec["instance_class"] = instance
+            else:
+                spec["instance_type"] = instance
+        resource_list.append(spec)
+
+    result = estimate_build_cost(resource_list, region=region)
+    c = logger.console
+    if not result["ok"]:
+        c.print("[red]Estimation failed.[/red]")
+        raise typer.Exit(1)
+
+    data = result["data"]
+
+    if output == "json":
+        c.print(json.dumps(data, indent=2, default=str))
+        return
+
+    # Text output
+    c.print(Panel("[bold]Cost Estimate[/bold]", style="blue"))
+    table = Table(box=box.SIMPLE_HEAD, show_lines=False, padding=(0, 1))
+    table.add_column("Resource")
+    table.add_column("Count", justify="right")
+    table.add_column("Unit/Month", justify="right")
+    table.add_column("Total/Month", justify="right")
+    table.add_column("Note", style="dim")
+    for e in data.get("resources", []):
+        unit = (
+            f"${e['unit_monthly_cost']:,.2f}"
+            if e["unit_monthly_cost"] is not None
+            else "\u2014"
+        )
+        total = (
+            f"${e['total_monthly_cost']:,.2f}"
+            if e["total_monthly_cost"] is not None
+            else "\u2014"
+        )
+        table.add_row(e["label"], str(e["count"]), unit, total, e["pricing_note"])
+    c.print(table)
+    total_monthly = data.get("total_monthly_cost")
+    if total_monthly is not None:
+        c.print(
+            f"\n  [bold]Total: ${total_monthly:,.2f}/month"
+            f"  (${data['total_annual_cost']:,.2f}/year)[/bold]"
+        )
+    c.print("\n[bold dim]Terraform Scaffold:[/bold dim]")
+    from rich.syntax import Syntax
+
+    c.print(
+        Syntax(
+            data.get("terraform_scaffold", ""),
+            "hcl",
+            theme="monokai",
+            line_numbers=False,
+        )
+    )
 
 
 @app.command()
