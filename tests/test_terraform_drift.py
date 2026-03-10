@@ -118,6 +118,13 @@ class TestGetHclFix:
         assert fix is not None
         assert "aws_lb" in fix or "load balancer" in fix.lower() or "Remove" in fix
 
+    def test_lambda_not_invoked(self):
+        fix = _get_hcl_fix(
+            "Lambda function my-fn has not been invoked in 30 days", "my-fn"
+        )
+        assert fix is not None
+        assert "aws_lambda_function" in fix or "my-fn" in fix
+
     def test_rds_no_connections(self):
         fix = _get_hcl_fix(
             "RDS instance db-prod has had no connections in 7 days", "db-prod"
