@@ -53,6 +53,7 @@ from .tools.inventory import (
     get_s3_inventory,
 )
 from .tools.multi_region import get_enabled_regions
+from .tools.notify import build_alert_payload, send_webhook, should_alert
 from .tools.remediation_plan import build_remediation_plan, parse_phase_selection
 from .tools.ri_sp_advisor import get_ri_recommendations, get_sp_recommendations
 from .tools.ri_sp_coverage import get_ri_sp_coverage
@@ -3168,6 +3169,12 @@ def watch(
         "--view",
         help="Text rendering mode for watch: compact (default) or full.",
     ),
+    notify_webhook: str | None = typer.Option(
+        None,
+        "--notify-webhook",
+        envvar="LIGHTHOUSE_NOTIFY_WEBHOOK",
+        help="Webhook URL to POST alerts when new HIGH/CRITICAL findings are detected.",
+    ),
 ) -> None:
     """Continuously run non-interactive analyze cycles and emit deltas."""
     if interval_hours <= 0:
@@ -3198,6 +3205,26 @@ def watch(
                     logger.console.print(
                         f"[dim]Next scan in {interval_hours:g}h. Press Ctrl+C to stop.[/dim]"
                     )
+                if notify_webhook:
+                    delta_data = payloads["v1"].get("delta")
+                    if delta_data and should_alert(delta_data):
+                        sections = delta_data.get("sections", {})
+                        alert = build_alert_payload(
+                            account_id=str(payloads["v1"].get("account_id", "unknown")),
+                            new_security=sections.get("security_findings", {}).get(
+                                "new", []
+                            ),
+                            new_iam=sections.get("iam_findings", {}).get("new", []),
+                            new_cost_waste=sections.get("cost_waste", {}).get(
+                                "new", []
+                            ),
+                        )
+                        sent = send_webhook(notify_webhook, alert)
+                        if output_mode == "text":
+                            status = "sent" if sent else "failed"
+                            logger.console.print(
+                                f"[dim]Webhook notification {status}.[/dim]"
+                            )
             except Exception as e:
                 log_path = (
                     logger.record_exception(f"Watch cycle {cycle} failed", e)
