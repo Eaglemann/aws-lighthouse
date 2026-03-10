@@ -1,5 +1,6 @@
 import os
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -239,6 +240,62 @@ def _check_idle_load_balancers(elbv2, cw, region: str | None = None):
     return ok_result(findings)
 
 
+def _check_idle_rds_instances(rds, cw, region: str | None = None):
+    """Flag RDS instances with no database connections in the past 7 days."""
+    findings: list[CostFinding] = []
+    try:
+        kwargs: dict[str, Any] = {}
+        instances: list[dict[str, Any]] = []
+        while True:
+            resp = rds.describe_db_instances(**kwargs)
+            instances.extend(resp.get("DBInstances", []))
+            if "Marker" not in resp:
+                break
+            kwargs["Marker"] = resp["Marker"]
+
+        for db in instances:
+            if db.get("DBInstanceStatus") != "available":
+                continue
+            db_id = db["DBInstanceIdentifier"]
+            engine = db.get("Engine", "unknown")
+            metrics = cw.get_metric_statistics(
+                Namespace="AWS/RDS",
+                MetricName="DatabaseConnections",
+                Dimensions=[{"Name": "DBInstanceIdentifier", "Value": db_id}],
+                StartTime=datetime.now(UTC) - timedelta(days=7),
+                EndTime=datetime.now(UTC),
+                Period=604_800,
+                Statistics=["Maximum"],
+            )
+            max_connections = max(
+                (dp["Maximum"] for dp in metrics.get("Datapoints", [])), default=0
+            )
+            if max_connections == 0:
+                findings.append(
+                    {
+                        "resource": db_id,
+                        "finding": f"RDS instance {db_id} has had no connections in 7 days (engine: {engine})",
+                        "remediation_type": "stop_rds_instance",
+                        "remediation_label": f"Stop or delete idle RDS instance {db_id}",
+                        "region": region or "",
+                    }
+                )
+    except (ClientError, BotoCoreError) as e:
+        logger.error(f"Failed to check idle RDS instances: {e}")
+        return error_result(
+            data=findings,
+            errors=[
+                scan_error_from_exception(
+                    service="rds",
+                    operation="DescribeDBInstances",
+                    exc=e,
+                    region=region,
+                )
+            ],
+        )
+    return ok_result(findings)
+
+
 def _check_unassociated_eips(ec2, region: str | None = None):
     """Flag Elastic IPs that are allocated but not associated with any resource."""
     findings: list[CostFinding] = []
@@ -275,6 +332,7 @@ def run_cost_scan(region: str | None = None):
     ec2 = get_client("ec2", region)
     cw = get_client("cloudwatch", region)
     elbv2 = get_client("elbv2", region)
+    rds = get_client("rds", region)
     return merge_list_results(
         [
             _check_unattached_ebs(ec2, region),
@@ -283,5 +341,6 @@ def run_cost_scan(region: str | None = None):
             _check_unassociated_eips(ec2, region),
             _check_idle_nat_gateways(ec2, cw, region),
             _check_idle_load_balancers(elbv2, cw, region),
+            _check_idle_rds_instances(rds, cw, region),
         ]
     )
