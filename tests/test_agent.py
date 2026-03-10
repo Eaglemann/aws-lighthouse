@@ -296,9 +296,11 @@ def test_check_ollama_runtime_reports_ready_when_model_is_present():
     )
     response.status = 200
 
-    with patch.dict("os.environ", {"OLLAMA_HOST": "http://localhost:11434"}):
-        with patch("aws_lighthouse.agent.urlopen", return_value=response):
-            status = check_ollama_runtime()
+    with (
+        patch.dict("os.environ", {"OLLAMA_HOST": "http://localhost:11434"}),
+        patch("aws_lighthouse.agent.urlopen", return_value=response),
+    ):
+        status = check_ollama_runtime()
 
     assert status["ok"] is True
     assert status["reason"] == "ok"
@@ -311,9 +313,11 @@ def test_check_ollama_runtime_reports_missing_model_when_not_installed():
     response.read.return_value = b'{"models":[{"name":"llama3.2:latest"}]}'
     response.status = 200
 
-    with patch.dict("os.environ", {"OLLAMA_HOST": "http://localhost:11434"}):
-        with patch("aws_lighthouse.agent.urlopen", return_value=response):
-            status = check_ollama_runtime()
+    with (
+        patch.dict("os.environ", {"OLLAMA_HOST": "http://localhost:11434"}),
+        patch("aws_lighthouse.agent.urlopen", return_value=response),
+    ):
+        status = check_ollama_runtime()
 
     assert status["ok"] is False
     assert status["reason"] == "model_missing"
@@ -321,12 +325,14 @@ def test_check_ollama_runtime_reports_missing_model_when_not_installed():
 
 
 def test_check_ollama_runtime_reports_unavailable_when_runtime_is_down():
-    with patch.dict("os.environ", {"OLLAMA_HOST": "http://localhost:11434"}):
-        with patch(
+    with (
+        patch.dict("os.environ", {"OLLAMA_HOST": "http://localhost:11434"}),
+        patch(
             "aws_lighthouse.agent.urlopen",
             side_effect=OSError("Connection refused"),
-        ):
-            status = check_ollama_runtime()
+        ),
+    ):
+        status = check_ollama_runtime()
 
     assert status["ok"] is False
     assert status["reason"] == "unavailable"
