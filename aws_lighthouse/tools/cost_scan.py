@@ -126,6 +126,119 @@ def _check_old_snapshots(ec2, region: str | None = None):
     return ok_result(findings)
 
 
+def _check_idle_nat_gateways(ec2, cw, region: str | None = None):
+    """Flag NAT Gateways with zero outbound traffic over the past 7 days."""
+    findings: list[CostFinding] = []
+    try:
+        kwargs: dict[str, object] = {
+            "Filter": [{"Name": "state", "Values": ["available"]}]
+        }
+        while True:
+            resp = ec2.describe_nat_gateways(**kwargs)
+            for gw in resp.get("NatGateways", []):
+                nat_id = gw["NatGatewayId"]
+                metrics = cw.get_metric_statistics(
+                    Namespace="AWS/NatGateway",
+                    MetricName="BytesOutToDestination",
+                    Dimensions=[{"Name": "NatGatewayId", "Value": nat_id}],
+                    StartTime=datetime.now(UTC) - timedelta(days=7),
+                    EndTime=datetime.now(UTC),
+                    Period=604_800,
+                    Statistics=["Sum"],
+                )
+                total_bytes = sum(dp["Sum"] for dp in metrics.get("Datapoints", []))
+                if total_bytes == 0:
+                    findings.append(
+                        {
+                            "resource": nat_id,
+                            "finding": f"NAT Gateway {nat_id} has had no traffic in 7 days",
+                            "remediation_type": "delete_nat_gateway",
+                            "remediation_label": f"Delete idle NAT Gateway {nat_id}",
+                            "region": region or "",
+                        }
+                    )
+            token = resp.get("NextToken")
+            if not token:
+                break
+            kwargs["NextToken"] = token
+    except (ClientError, BotoCoreError) as e:
+        logger.error(f"Failed to check idle NAT Gateways: {e}")
+        return error_result(
+            data=findings,
+            errors=[
+                scan_error_from_exception(
+                    service="ec2",
+                    operation="DescribeNatGateways",
+                    exc=e,
+                    region=region,
+                )
+            ],
+        )
+    return ok_result(findings)
+
+
+def _check_idle_load_balancers(elbv2, cw, region: str | None = None):
+    """Flag ALBs/NLBs with zero requests over the past 7 days."""
+    _NS_MAP = {
+        "application": "AWS/ApplicationELB",
+        "network": "AWS/NetworkELB",
+    }
+    findings: list[CostFinding] = []
+    try:
+        kwargs: dict[str, object] = {}
+        while True:
+            resp = elbv2.describe_load_balancers(**kwargs)
+            for lb in resp.get("LoadBalancers", []):
+                lb_type = lb.get("Type", "")
+                if lb_type not in _NS_MAP:
+                    continue
+                if lb.get("State", {}).get("Code") != "active":
+                    continue
+                namespace = _NS_MAP[lb_type]
+                lb_dimension = lb["LoadBalancerArn"].split("loadbalancer/", 1)[-1]
+                metrics = cw.get_metric_statistics(
+                    Namespace=namespace,
+                    MetricName="RequestCount",
+                    Dimensions=[{"Name": "LoadBalancer", "Value": lb_dimension}],
+                    StartTime=datetime.now(UTC) - timedelta(days=7),
+                    EndTime=datetime.now(UTC),
+                    Period=604_800,
+                    Statistics=["Sum"],
+                )
+                total_requests = sum(dp["Sum"] for dp in metrics.get("Datapoints", []))
+                if total_requests == 0:
+                    findings.append(
+                        {
+                            "resource": lb["LoadBalancerName"],
+                            "finding": (
+                                f"Load balancer {lb['LoadBalancerName']} ({lb_type})"
+                                " has had no requests in 7 days"
+                            ),
+                            "remediation_type": "delete_load_balancer",
+                            "remediation_label": f"Delete idle load balancer {lb['LoadBalancerName']}",
+                            "region": region or "",
+                        }
+                    )
+            token = resp.get("NextMarker")
+            if not token:
+                break
+            kwargs["Marker"] = token
+    except (ClientError, BotoCoreError) as e:
+        logger.error(f"Failed to check idle load balancers: {e}")
+        return error_result(
+            data=findings,
+            errors=[
+                scan_error_from_exception(
+                    service="elbv2",
+                    operation="DescribeLoadBalancers",
+                    exc=e,
+                    region=region,
+                )
+            ],
+        )
+    return ok_result(findings)
+
+
 def _check_unassociated_eips(ec2, region: str | None = None):
     """Flag Elastic IPs that are allocated but not associated with any resource."""
     findings: list[CostFinding] = []
@@ -160,11 +273,15 @@ def _check_unassociated_eips(ec2, region: str | None = None):
 def run_cost_scan(region: str | None = None):
     """Run all cost waste checks and return a unified list of findings."""
     ec2 = get_client("ec2", region)
+    cw = get_client("cloudwatch", region)
+    elbv2 = get_client("elbv2", region)
     return merge_list_results(
         [
             _check_unattached_ebs(ec2, region),
             _check_stopped_ec2(ec2, region),
             _check_old_snapshots(ec2, region),
             _check_unassociated_eips(ec2, region),
+            _check_idle_nat_gateways(ec2, cw, region),
+            _check_idle_load_balancers(elbv2, cw, region),
         ]
     )
