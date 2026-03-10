@@ -348,6 +348,45 @@ def _check_idle_lambda_functions(lmb, cw, region: str | None = None):
     return ok_result(findings)
 
 
+def _check_log_group_retention(logs_client, region: str | None = None):
+    """Flag CloudWatch log groups that have no retention policy (logs kept forever)."""
+    findings: list[CostFinding] = []
+    try:
+        kwargs: dict[str, Any] = {}
+        while True:
+            resp = logs_client.describe_log_groups(**kwargs)
+            for lg in resp.get("logGroups", []):
+                if "retentionInDays" not in lg:
+                    name = lg["logGroupName"]
+                    findings.append(
+                        {
+                            "resource": name,
+                            "finding": f"CloudWatch log group {name} has no retention policy (logs kept forever)",
+                            "remediation_type": "set_log_retention",
+                            "remediation_label": f"Set retention policy for {name}",
+                            "region": region or "",
+                        }
+                    )
+            token = resp.get("nextToken")
+            if not token:
+                break
+            kwargs["nextToken"] = token
+    except (ClientError, BotoCoreError) as e:
+        logger.error(f"Failed to check log group retention: {e}")
+        return error_result(
+            data=findings,
+            errors=[
+                scan_error_from_exception(
+                    service="logs",
+                    operation="DescribeLogGroups",
+                    exc=e,
+                    region=region,
+                )
+            ],
+        )
+    return ok_result(findings)
+
+
 def _check_unassociated_eips(ec2, region: str | None = None):
     """Flag Elastic IPs that are allocated but not associated with any resource."""
     findings: list[CostFinding] = []
@@ -386,6 +425,7 @@ def run_cost_scan(region: str | None = None):
     elbv2 = get_client("elbv2", region)
     rds = get_client("rds", region)
     lmb = get_client("lambda", region)
+    logs = get_client("logs", region)
     return merge_list_results(
         [
             _check_unattached_ebs(ec2, region),
@@ -396,5 +436,6 @@ def run_cost_scan(region: str | None = None):
             _check_idle_load_balancers(elbv2, cw, region),
             _check_idle_rds_instances(rds, cw, region),
             _check_idle_lambda_functions(lmb, cw, region),
+            _check_log_group_retention(logs, region),
         ]
     )
