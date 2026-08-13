@@ -73,21 +73,20 @@ def get_monthly_cost_summary(days: int = 14) -> ScanResult:
 def get_cost_forecast(forecast_days: int = 30) -> ScanResult:
     """Retrieve a 30-day cost forecast using AWS Cost Explorer's ML model.
 
-    Calls ``GetCostForecast`` with UNBLENDED_COST at MONTHLY granularity.
-    The forecast start is tomorrow (CE requires future dates); end is
-    ``forecast_days`` days from today.
+    Calls ``GetCostForecast`` with UNBLENDED_COST at MONTHLY granularity and
+    requests an 80% prediction interval. Cost Explorer requires the forecast
+    to start on the current date; the end is ``forecast_days`` days from today.
 
     Returns:
         ScanResult with data dict containing:
           ``forecast_start``  — ISO date the forecast period begins
           ``forecast_end``    — ISO date the forecast period ends
           ``total_usd``       — mean point estimate for the period ($)
-          ``lower_bound_usd`` — lower confidence bound ($)
-          ``upper_bound_usd`` — upper confidence bound ($)
+          ``lower_bound_usd`` — sum of per-period lower interval bounds ($)
+          ``upper_bound_usd`` — sum of per-period upper interval bounds ($)
     """
     today = datetime.now(UTC).date()
-    # CE forecast start must be a future date (tomorrow at earliest)
-    forecast_start = today + timedelta(days=1)
+    forecast_start = today
     forecast_end = today + timedelta(days=forecast_days)
     base_data: dict[str, object] = {
         "forecast_start": forecast_start.isoformat(),
@@ -105,11 +104,19 @@ def get_cost_forecast(forecast_days: int = 30) -> ScanResult:
             },
             Metric="UNBLENDED_COST",
             Granularity="MONTHLY",
+            PredictionIntervalLevel=80,
         )
         total = response.get("Total", {})
         prediction = response.get("ForecastResultsByTime", [])
-        lower = min((float(p.get("MeanValue", 0)) for p in prediction), default=0.0)
-        upper = max((float(p.get("MeanValue", 0)) for p in prediction), default=0.0)
+
+        def _sum_interval(key: str) -> float | None:
+            values = [period.get(key) for period in prediction]
+            if not values or any(value is None for value in values):
+                return None
+            return sum(float(value) for value in values)
+
+        lower = _sum_interval("PredictionIntervalLowerBound")
+        upper = _sum_interval("PredictionIntervalUpperBound")
         return ok_result(
             {
                 **base_data,

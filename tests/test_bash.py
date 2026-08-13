@@ -215,23 +215,28 @@ def test_execute_bash_allowlist_blocks_unlisted_binary(command):
 def test_execute_bash_error_message_lists_allowed_commands():
     result = execute_bash(ExecuteBashInput(command="python3 -c 'pass'"))
     # The stderr message must name the allowed commands so the user knows what's permitted.
-    for name in ("aws", "terraform", "uv", "git"):
+    for name in ("echo", "ls", "df", "which", "pwd"):
         assert name in result["stderr"], (
             f"Expected allowed command '{name}' to appear in the error message."
         )
 
 
-def test_execute_bash_allowlist_permits_aws():
-    # aws is in _ALLOWED_COMMANDS — it must reach subprocess (fail on missing creds,
-    # not on the allowlist).
-    result = execute_bash(ExecuteBashInput(command="aws --version"))
-    # May succeed or fail depending on the environment, but must NOT be allowlist-blocked.
-    assert "allowlist" not in (result.get("error") or "").lower()
-
-
-def test_execute_bash_allowlist_permits_terraform():
-    result = execute_bash(ExecuteBashInput(command="terraform version"))
-    assert "allowlist" not in (result.get("error") or "").lower()
+@pytest.mark.parametrize(
+    "command",
+    [
+        "aws --version",
+        "terraform version",
+        "kubectl version",
+        "helm version",
+        "uv run python -c 'print(1)'",
+        "git -c alias.escape='!sh -c id' escape",
+        "find . -exec sh -c id ';'",
+    ],
+)
+def test_execute_bash_blocks_tools_that_can_dispatch_code(command):
+    result = execute_bash(ExecuteBashInput(command=command))
+    assert result["returncode"] == -1
+    assert "allowlist" in result["error"].lower()
 
 
 def test_execute_bash_malformed_quote_is_blocked():
