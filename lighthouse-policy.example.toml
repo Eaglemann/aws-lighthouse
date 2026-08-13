@@ -1,0 +1,17 @@
+# Copy to a non-secret local file and pass with --config.
+required_tags = ["Owner", "Environment", "CostCenter"]
+cost_anomaly_threshold_pct = 50
+
+[regions]
+# Leave both empty to scan every enabled region.
+include = []
+exclude = []
+
+[scans]
+cost_anomalies = true
+ri_sp_coverage = true
+security = true
+iam = true
+cloudwatch = true
+cost_waste = true
+tagging = true

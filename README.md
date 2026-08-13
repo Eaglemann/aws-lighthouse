@@ -1,594 +1,94 @@
 # AWS Lighthouse
 
-**AWS Lighthouse** is a terminal-first FinOps, Security, and Cloud Infrastructure Agent. It gives you a complete read-only picture of your AWS estate in one command, flags misconfigurations and cost waste across every enabled region, and lets you remediate findings or deploy infrastructure through a conversational AI agent — all from the CLI, with your credentials never leaving your machine.
+AWS Lighthouse is a terminal-first AWS FinOps and security scanner with a local
+Ollama/LangGraph assistant. It inventories enabled regions, detects cost and
+security opportunities, persists local history, emits JSON or SARIF, and can
+apply a small set of remediations only after explicit confirmation.
 
-Built on **LangGraph**, **LangChain**, **Ollama**, **Rich**, and **Typer**. Strictly enforces a **Human-in-the-Loop "Plan → Approve → Execute"** workflow so you remain in full control at every step.
+> Status: alpha. Use a dedicated read-only role or sandbox first. Review every
+> requested mutation and never treat a degraded scan as complete evidence.
 
----
+## What it does
 
-## Table of Contents
+- Multi-region EC2, RDS, Lambda, and global S3 inventory.
+- Cost summaries, anomaly detection, forecasts, waste checks, RI/SP analysis,
+  Compute Optimizer recommendations, tag-cost coverage, and scenario planning.
+- Security, IAM, CloudWatch, tagging, and security-group blast-radius checks.
+- Fail-closed deltas: partial scans may add observed findings, but cannot resolve
+  findings in failed sections or regions.
+- Local opportunity lifecycle, audit history, policy-scoped baselines, webhook
+  alerts, JSON v1/v2, and SARIF 2.1.0.
+- Optional local AI shell using Ollama model `gpt-oss:120b-cloud`.
 
-1. [Prerequisites](#prerequisites)
-2. [Installation](#installation)
-3. [Quick Start](#quick-start)
-4. [Commands](#commands)
-   - [analyze](#analyze--the-finops-dashboard)
-   - [watch](#watch--continuous-delta-monitoring)
-   - [shell](#shell--the-interactive-agent)
-5. [Dashboard Panels](#dashboard-panels)
-6. [Agent Tools Reference](#agent-tools-reference)
-7. [Human-in-the-Loop Approval](#human-in-the-loop-approval)
-8. [AWS Authentication](#aws-authentication)
-9. [Local State Database](#local-state-database)
-10. [Architecture](#architecture)
-11. [Project Structure](#project-structure)
-12. [Development](#development)
+## Quick start
 
----
-
-## Prerequisites
-
-| Requirement | Notes |
-|---|---|
-| **Python 3.12+** | Required for `str \| None` union syntax and modern typing |
-| **[uv](https://github.com/astral-sh/uv)** | Fast dependency manager — replaces pip/poetry |
-| **[Ollama](https://ollama.ai)** | Local LLM runtime, must be running before starting the shell |
-| **`gpt-oss:120b-cloud` model** | The reasoning model used by the agent |
-| **AWS Credentials** | Any standard method: `~/.aws/credentials`, `AWS_PROFILE`, env vars, IAM role, SSO |
-
-Pull the model once:
-```bash
-ollama pull gpt-oss:120b-cloud
-```
-
----
-
-## Installation
+Requirements: Python 3.12+, [uv](https://docs.astral.sh/uv/), AWS credentials,
+and Ollama only if using `shell`.
 
 ```bash
 git clone https://github.com/Eaglemann/aws-lighthouse.git
 cd aws-lighthouse
-uv sync
+uv sync --dev
+
+AWS_PROFILE=my-read-only-profile uv run aws-lighthouse analyze
 ```
 
----
-
-## Quick Start
+Common commands:
 
 ```bash
-# Full multi-region dashboard (auto-detects all enabled regions)
-uv run aws-lighthouse analyze
+# Single region, machine-readable v2 envelopes
+uv run aws-lighthouse analyze --region eu-west-1 --output json --json-schema v2
 
-# Apply an explicit repo-local policy file
-uv run aws-lighthouse analyze --config ./lighthouse-policy.toml
+# Compare with the last compatible scope and config
+uv run aws-lighthouse analyze --since-last --config lighthouse-policy.example.toml
 
-# Adjust cost look-back window
-uv run aws-lighthouse analyze --days 30
+# Continuous compact monitoring; mutation prompts are disabled
+uv run aws-lighthouse watch --interval-hours 4 --notify-webhook "$LIGHTHOUSE_NOTIFY_WEBHOOK"
 
-# Delta mode: compare against previous scan in the same scope
-uv run aws-lighthouse analyze --since-last
-
-# Continuous non-interactive monitoring
-uv run aws-lighthouse watch --interval-hours 4
-
-# Interactive AI agent shell
-uv run aws-lighthouse shell
-
-# Running with no subcommand opens the shell directly
-uv run aws-lighthouse
+# Local assistant; verifies Ollama before starting
+OLLAMA_HOST=http://localhost:11434 uv run aws-lighthouse shell
 ```
 
----
+`analyze` is non-interactive by default. `--interactive` enables CUR and
+remediation prompts; selected remediations still require one confirmation per
+resource. `watch` never enables mutation prompts.
 
-## Commands
+## Documentation
 
-### `analyze` — The FinOps Dashboard
+- [Architecture](docs/ARCHITECTURE.md)
+- [CLI and output contracts](docs/CLI_REFERENCE.md)
+- [Agent tools and approval policy](docs/AGENT_TOOLS.md)
+- [Local database schema](docs/DATABASE_SCHEMA.md)
+- [Operations and live qualification](docs/OPERATIONS.md)
+- [Security policy and threat model](SECURITY.md)
+- [Contributing](CONTRIBUTING.md)
+- [Changelog](CHANGELOG.md)
+- [Example policy](lighthouse-policy.example.toml)
 
-Runs a comprehensive, **read-only** scan of your entire AWS estate and renders a Rich terminal dashboard. No changes are made to your account.
+## Development gate
 
 ```bash
-uv run aws-lighthouse analyze [--days N]
-```
-
-**Options:**
-
-| Flag | Default | Description |
-|---|---|---|
-| `--days`, `-d` | `14` | Cost Explorer look-back window in days |
-| `--output`, `-o` | `text` | Output format: `text` or `json` |
-| `--json-schema` | `v1` | JSON contract for `--output json`: `v1` legacy payloads, `v2` typed envelopes |
-| `--since-last` | `off` | Compute and render deltas against the previous snapshot in the same scope |
-| `--config` | _unset_ | Explicit path to a TOML policy file for scan behavior |
-| `--interactive` | `off` | Enable remediation and CUR deployment prompts after the scan |
-
-Machine-output examples:
-```bash
-# Backward-compatible payloads (default)
-uv run aws-lighthouse analyze --output json
-
-# Explicit v1
-uv run aws-lighthouse analyze --output json --json-schema v1
-
-# Envelope output (ok/data/errors per section + overall)
-uv run aws-lighthouse analyze --output json --json-schema v2
-
-# Additive delta payload (v1) when explicitly requested
-uv run aws-lighthouse analyze --output json --json-schema v1 --since-last
-
-# Delta envelope (v2) when explicitly requested
-uv run aws-lighthouse analyze --output json --json-schema v2 --since-last
-```
-
-**What it does, step by step:**
-
-1. **Authenticates** — validates credentials via STS `GetCallerIdentity`
-2. **Detects regions** — calls `describe_regions` to find every opted-in region in your account; runs all subsequent regional scans across all of them automatically
-3. **Scans inventory** — EC2, RDS, Lambda, S3 fetched in parallel per region with live `"Scanning us-east-1..."` spinner updates
-4. **Fetches costs** — Cost Explorer `GetCostAndUsage` for the requested window; saves a snapshot to SQLite for trend tracking
-5. **Detects cost anomalies** — compares last 7 days vs prior 7-day baseline per service; flags >50% spikes
-6. **RI / Savings Plan coverage** — coverage % and utilization for both Reserved Instances and Savings Plans; highlights under-utilised commitments and uncovered on-demand spend
-7. **Security scan** — eleven checks across all regions (see [Dashboard Panels](#dashboard-panels))
-8. **IAM over-permissive scan** — inspects every user, role, and group for dangerous policies (global)
-9. **CloudWatch alarm gaps** — finds EC2/RDS instances missing alarms on key metrics per region
-10. **Cost waste scan** — unattached EBS, stopped EC2, stale snapshots, unassociated EIPs per region
-11. **Tagging compliance** — EC2/RDS/S3 resources missing required tags
-12. **Lambda inventory** — full function list with runtime, memory, code size, staleness flag
-13. **One-click remediation** — numbered menu of auto-fixable findings; confirm each fix individually before it runs
-14. **CUR upsell** — prompts to deploy the Cost & Usage Report CloudFormation stack if not already active
-
----
-
-### `watch` — Continuous Delta Monitoring
-
-Runs `analyze` continuously in non-interactive mode and always computes deltas against the previous snapshot in the same scope.
-
-```bash
-uv run aws-lighthouse watch [--interval-hours N] [--days N]
-```
-
-**Options:**
-
-| Flag | Default | Description |
-|---|---|---|
-| `--interval-hours` | `4` | Hours to wait between scan cycles |
-| `--days`, `-d` | `14` | Cost Explorer look-back window per cycle |
-| `--region`, `-r` | _all enabled_ | Restrict watch to a single region |
-| `--output`, `-o` | `text` | Output format: `text` or `json` |
-| `--json-schema` | `v1` | JSON contract for `--output json`: `v1` legacy payloads, `v2` typed envelopes |
-| `--config` | _unset_ | Explicit path to a TOML policy file for scan behavior |
-
-For `--output json`, `watch` emits one JSON object per line (JSON Lines), one per cycle.
-
-### Explicit Policy Config (`--config`)
-
-`analyze` and `watch` can load an explicit TOML policy file. If `--config` is omitted, runtime behavior is unchanged.
-
-Example:
-
-```toml
-required_tags = ["Environment", "Owner", "CostCenter"]
-cost_anomaly_threshold_pct = 75
-
-[regions]
-include = ["us-east-1", "us-west-2"]
-
-[scans]
-security = true
-tagging = true
-cloudwatch = false
-```
-
-Supported policy keys in v1:
-- `required_tags`
-- `cost_anomaly_threshold_pct`
-- `[regions].include`
-- `[regions].exclude`
-- `[scans].cost_anomalies`
-- `[scans].ri_sp_coverage`
-- `[scans].security`
-- `[scans].iam`
-- `[scans].cloudwatch`
-- `[scans].cost_waste`
-- `[scans].tagging`
-
-Precedence rules:
-- CLI flags override config where both affect the run.
-- `--region` overrides config region filters.
-- Snapshot baselines for `--since-last` and `watch` are separated when the effective policy changes.
-
----
-
-### `shell` — The Interactive Agent
-
-Starts a persistent, conversational AI agent powered by LangGraph and your local Ollama model.
-
-```bash
-uv run aws-lighthouse shell
-# or simply:
-uv run aws-lighthouse
-```
-
-The shell maintains **conversation memory** across turns via LangGraph's `MemorySaver` checkpointer — the agent remembers what it found earlier in the session without you repeating context.
-
-**Example prompts:**
-
-```
-❯ scan all my regions for security issues
-❯ which EC2 instances are stopped and costing me money?
-❯ apply Block Public Access to my-public-bucket
-❯ check IAM for over-permissive policies
-❯ show me Lambda functions that haven't been deployed in over 6 months
-❯ what's my RI coverage and where am I wasting committed spend?
-❯ deploy the CUR CloudFormation stack
-❯ parse my ./infra Terraform files and tell me what resources exist
-❯ terminate instance i-0abc1234def567890
-```
-
-The agent always explains its reasoning before calling any tool. Destructive operations require your explicit `y` approval before executing.
-
----
-
-## Dashboard Panels
-
-All panels follow a consistent colour scheme:
-- **Blue** border — inventory / informational
-- **Yellow** border — cost / warnings
-- **Red** border — security / anomalies / high severity
-- **Green** border — all-clear
-
-### Inventory + Cost (side by side)
-
-| Inventory | Cost |
-|---|---|
-| EC2 instance count | Total spend for the period |
-| RDS database count | Per-service breakdown (top 6) |
-| S3 bucket count | Trend arrow vs last scan (▲/▼) |
-| Lambda function count | |
-
-When multiple regions are detected the Inventory title shows `· N regions` and every finding table gains a **Region** column.
-
-### Cost Anomalies
-
-Compares each service's last 7-day spend against the prior 7-day baseline. Services with a >50% increase are flagged with the absolute amounts and percentage change.
-
-### RI / Savings Plan Coverage
-
-| Column | Description |
-|---|---|
-| Coverage | % of eligible hours/spend covered by commitments |
-| Utilization | % of purchased commitment actually consumed |
-| Uncovered Spend | On-demand dollars not protected by any commitment |
-| Idle Cost | Money paid for unused RI/SP capacity |
-
-Coverage and utilization are colour-coded: ≥80% green, 60–80% yellow, <60% red.
-
-> **Note:** A deeper RI/SP analyser backed by 3-year CUR data is planned — see [fixplan.md](fixplan.md).
-
-### Security
-
-Eleven checks run across every enabled region:
-
-| Check | Severity | Scope |
-|---|---|---|
-| Root account MFA | HIGH | Global |
-| IAM users with console access but no MFA | HIGH | Global |
-| IAM access keys older than 90 days | MEDIUM | Global |
-| Open security groups (SSH/RDP from 0.0.0.0/0 or ::/0) | HIGH | Regional |
-| RDS instances with Public Accessibility enabled | HIGH | Regional |
-| S3 buckets missing Block Public Access | HIGH | Global |
-| S3 buckets missing default server-side encryption | MEDIUM | Global |
-| EC2 instances allowing IMDSv2 metadata service bypass | MEDIUM | Regional |
-| EBS volumes not encrypted at rest | MEDIUM | Regional |
-| CloudTrail not configured or not logging | HIGH | Regional |
-| GuardDuty not enabled or disabled | HIGH | Regional |
-
-### IAM Over-Permissive Policies
-
-Scans all users, roles, and groups for dangerous policy statements:
-
-| Severity | Condition |
-|---|---|
-| HIGH | `Action: *` on `Resource: *` (full administrator) |
-| MEDIUM | `Action: <service>:*` on `Resource: *` (service-level wildcard) |
-
-Checks inline policies, customer-managed policies (document fetched and cached), and known dangerous AWS-managed policies (`AdministratorAccess`, `PowerUserAccess`). AWS service-linked roles are skipped.
-
-### CloudWatch Alarm Gaps
-
-Finds resources with no alarm on key metrics:
-
-| Resource | Required metrics |
-|---|---|
-| EC2 | CPUUtilization, StatusCheckFailed |
-| RDS | CPUUtilization, FreeStorageSpace |
-
-### Cost Waste
-
-| Finding | Impact |
-|---|---|
-| Unattached EBS volumes | Paying for storage with no instance |
-| Stopped EC2 instances | EBS volumes still billed |
-| EBS snapshots older than 90 days | Accumulating snapshot storage cost |
-| Unassociated Elastic IPs | ~$0.005/hr per idle address |
-
-### Tagging Compliance
-
-Checks every EC2 instance, RDS database, Lambda function, and S3 bucket for the required tags (`Environment`, `Owner` by default). Lists every missing tag per resource.
-
-### Lambda Inventory
-
-Lists all functions with runtime, memory (MB), code size (MB), last deploy date, and a **Stale** flag for functions not deployed in >180 days.
-
-### One-Click Remediation
-
-After all panels, Lighthouse presents a numbered list of findings that can be fixed automatically:
-
-| Action | Triggered by |
-|---|---|
-| Enable S3 Block Public Access | S3 missing Block Public Access finding |
-| Enable S3 Default Encryption | S3 missing default encryption finding |
-| Enable GuardDuty | GuardDuty not enabled / disabled finding |
-| Start CloudTrail Logging | CloudTrail trail not logging finding |
-| Enforce IMDSv2 | EC2 instance allowing IMDSv1 finding |
-| Delete EBS Volume | Unattached EBS cost-waste finding |
-| Release Elastic IP | Unassociated EIP cost-waste finding |
-
-Each fix requires individual confirmation before it calls the AWS API.
-
----
-
-## Agent Tools Reference
-
-All tools are available to the agent in the interactive shell. Read-only tools bypass the approval prompt automatically.
-
-### Read-Only (no approval required)
-
-| Tool | Description |
-|---|---|
-| `tool_get_enabled_regions(schema)` | List all opted-in AWS regions for this account |
-| `tool_get_ec2_inventory(region, schema)` | EC2 instances and state |
-| `tool_get_rds_inventory(region, schema)` | RDS instances and state |
-| `tool_get_s3_inventory(schema)` | S3 buckets (global) |
-| `tool_get_lambda_inventory(region, schema)` | Lambda functions with staleness flag |
-| `tool_get_ri_sp_coverage(days, schema)` | RI and Savings Plan coverage + utilization |
-| `tool_detect_cost_anomalies(threshold_pct, schema)` | Per-service spend spikes vs prior 7d |
-| `tool_check_tagging_compliance(required_tags, region, schema)` | Missing tags on EC2/RDS/Lambda/S3 |
-| `tool_detect_overpermissive_iam(schema)` | IAM wildcard policy findings |
-| `tool_detect_cloudwatch_gaps(region, schema)` | EC2/RDS resources missing alarms |
-| `parse_terraform_context` | Parse local `.tf` files |
-
-For read-only scan tools, `schema` is optional:
-- `schema="v1"` (default): returns legacy payload only.
-- `schema="v2"`: returns full envelope with `ok`, `data`, and `errors`.
-
-Example:
-```text
-tool_get_ec2_inventory(region="us-east-1", schema="v2")
-```
-
-### Mutative (require explicit approval)
-
-| Tool | Description |
-|---|---|
-| `tool_read_file(filepath)` | Read a local file — requires approval because it can access any path, including credential files; the path blocklist is a secondary defence, not a primary gate |
-| `terminate_ec2(instance_id)` | Terminate an EC2 instance |
-| `delete_ebs(volume_id)` | Delete an EBS volume |
-| `s3_block_public_access(bucket_name)` | Enable Block Public Access on an S3 bucket |
-| `tool_write_file(filepath, content)` | Write to a local file |
-| `tool_execute_bash(command)` | Execute a shell command |
-
-All regional tools accept an optional `region` parameter. When omitted, the session's default region is used. The agent is instructed to call `tool_get_enabled_regions` first when the user asks for a broad analysis, then fan out tool calls per region.
-
----
-
-## Human-in-the-Loop Approval
-
-The LangGraph state machine routes every tool call through one of two paths:
-
-```
-agent ──► should_require_approval?
-              │
-              ├─ read-only tool ──► tools (execute immediately)
-              │
-              ├─ destructive tool ──► approval node ──► [user types y] ──► tools
-              │                                     └─ [user types n] ──► synthetic rejection sent to LLM
-              │
-              └─ no tool call ──► END
-```
-
-When an approval is requested you see:
-- The agent's reasoning for the action
-- Each tool name and the exact JSON arguments it generated
-- A `y/n` prompt — **nothing runs until you type `y`**
-
-If you deny, the agent receives a synthetic `ToolMessage` stating "User explicitly denied execution of this tool" and may propose an alternative approach.
-
----
-
-## AWS Authentication
-
-Authentication follows this priority order:
-
-1. **Implicit credentials** — environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`), `~/.aws/credentials`, `AWS_PROFILE`, or an attached IAM role / instance profile
-2. **Interactive fallback** — if no credentials are found, Lighthouse prompts for an AWS profile name, region, and optional role ARN to assume
-
-A single `boto3.Session` is created once per process (singleton pattern via `AuthManager`) and reused for all service clients. Regional clients are derived from the same session via `get_aws_client_for_region(service, region)` — assumed-role credentials propagate automatically.
-
----
-
-## Local State Database
-
-Lighthouse maintains a SQLite database at `~/.aws-lighthouse/lighthouse.db`.
-
-| Table | Purpose |
-|---|---|
-| `cost_snapshots` | One row per `analyze` run — account ID, date range, total spend, per-service breakdown. Used to compute the ▲/▼ cost trend shown in the dashboard. |
-| `scan_snapshots` | One row per analyze cycle payload (per account + scope key). Used for `--since-last` and `watch` delta computation. Retention is bounded to the latest 500 snapshots per scope. |
-| `audit_log` | Tool execution decision and outcome trail (`approved`, `denied`, `auto_approved`, execution status, error). |
-
-The database is created automatically on first run. No data leaves your machine.
-
----
-
-## Security Considerations
-
-### Shell command restrictions (`execute_bash`)
-
-`execute_bash` enforces a four-layer security model:
-
-1. **Denylist pre-check** — catastrophic patterns (`rm -rf /`, `mkfs`, `dd of=/dev/`, fork bombs, pipe-to-shell) are rejected before any parsing.
-2. **`shlex.split()` parsing** — no shell is invoked; semicolons, pipes, `$(…)`, and `&&` become literal arguments, not shell syntax.
-3. **Allowlist** — only `aws`, `terraform`, `kubectl`, `helm`, `uv`, `git`, `echo`, `ls`, `df`, `find`, `which`, `pwd` may execute. `python3`, `bash`, `curl`, `cat`, `nc`, and all other binaries are blocked.
-4. **`shell=False`** — no shell process is created; metacharacters cannot escape.
-
-### File path blocklist (`read_file` / `write_file`)
-
-Sensitive paths are blocked by three mechanisms:
-
-| Mechanism | Examples |
-|---|---|
-| **Directory prefix** | `~/.aws`, `~/.ssh`, `~/.gnupg`, `~/.config/gcloud`, `~/.kube` |
-| **Exact file** (resolved) | `/etc/shadow`, `/etc/sudoers`, `~/.netrc`, `~/.bashrc`, `~/.zshrc`, `~/.bash_history` |
-| **Basename match** | `.env` (any directory — `.env.example` and `config.env` are allowed) |
-
-**Known scope gaps**: the blocklist applies to the `filepath` argument of `read_file`/`write_file` only. Arguments passed inside a bash command string (e.g., `echo ... > somefile`) are not path-checked by the blocklist — they are governed by the command allowlist instead.
-
-### Audit trail
-
-Every tool invocation is recorded in `~/.aws-lighthouse/lighthouse.db` (`audit_log` table) with:
-- `tool_name` and `args_json` — what the agent requested
-- `decision` — `approved`, `denied`, or `auto_approved` (safe/read-only tools)
-- `execution_status`, `result`, and `error` — the observed execution outcome
-- `timestamp`
-
-**Limitation**: result content is stored as returned by the tool. Approved local file reads or tool outputs may therefore be persisted in the audit log.
-
-### Trust model
-
-The agent is given your AWS credentials and executes with them. Treat the LLM's proposed tool calls with the same scrutiny as any infrastructure change request — the approval prompt exists precisely for this. Do not approve tool calls you do not understand.
-
----
-
-## Architecture
-
-### LangGraph State Machine
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      AgentState                             │
-│  messages: Annotated[Sequence[BaseMessage], add_messages]   │
-└─────────────────────────────────────────────────────────────┘
-         │
-    ┌────▼─────┐    should_require_approval()
-    │  agent   ├──────────────────────────────────────────────────┐
-    │  node    │                                                  │
-    └────┬─────┘   read-only tool?          destructive tool?     │
-         │              │                        │                │
-         │         ┌────▼──────┐          ┌──────▼──────┐        │
-         │         │   tools   │          │  approval   │        │
-         │         │   node    │          │    node     │        │
-         │         └────┬──────┘          └──────┬──────┘        │
-         │              │                        │ (approved)    │
-         └──────────────┴────────────────────────┘               │
-                        │                                        │
-                   (loop back)                             (no tool calls)
-                                                               END
-```
-
-**Key components:**
-
-- **`agent_node`** — invokes the LLM with the full message history; produces either a text response or tool calls
-- **`approval_node`** — human-in-the-loop intercept; shows the proposed plan and waits for `y/n`
-- **`tool_node`** — LangChain `ToolNode` that executes approved tool calls and returns `ToolMessage` results
-- **`MemorySaver` checkpointer** — persists the full message graph in memory across turns; each `shell` session uses `thread_id = "main"`
-- **`SAFE_TOOLS`** — set of read-only tool names that bypass the approval node entirely
-
-### Tool Architecture
-
-Each tool in `tools/` follows the pattern:
-
-1. Pure Python function with typed inputs — testable in isolation, no LangChain dependency
-2. `@tool`-decorated wrapper in `agent.py` — serialises inputs/outputs as JSON strings for the LLM
-3. Regional variants accept `region: str = ""` — empty string coerces to `None` (session default)
-
----
-
-## Project Structure
-
-```
-aws_lighthouse/
-├── cli.py                  # Typer CLI — analyze dashboard + shell REPL
-├── agent.py                # LangGraph state machine, tool bindings, approval node
-├── auth.py                 # AWS credential management (singleton session)
-├── db.py                   # SQLite cost snapshot store
-├── logger.py               # Rich console logger wrapper
-├── templates/              # CloudFormation templates
-│   └── cur.yaml            # Cost & Usage Report setup
-└── tools/
-    ├── bash.py             # File I/O and shell execution (read_file, write_file, execute_bash)
-    ├── cfn_deploy.py       # CloudFormation deployment (CUR stack)
-    ├── cloudwatch_scan.py  # CloudWatch alarm gap detection
-    ├── cost.py             # Cost Explorer monthly summary
-    ├── cost_anomaly.py     # Per-service spend spike detection
-    ├── cost_scan.py        # Cost waste findings (EBS, EC2, snapshots, EIPs)
-    ├── iam_scan.py         # IAM over-permissive policy detection
-    ├── inventory.py        # EC2 / RDS / S3 / Lambda inventory (region-aware)
-    ├── multi_region.py     # get_enabled_regions() helper
-    ├── remediation.py      # Destructive tools: terminate_ec2, delete_ebs
-    ├── remediation_actions.py  # One-click fixes: S3 BPA, delete EBS, release EIP
-    ├── ri_sp_coverage.py   # RI and Savings Plan coverage + utilization
-    ├── security.py         # s3_block_public_access (agent-facing mutative tool)
-    ├── security_scan.py    # Eleven-check security posture scan
-    ├── tagging.py          # Tagging compliance (EC2 / RDS / Lambda / S3)
-    └── terraform.py        # Terraform file parser
-```
-
----
-
-## Development
-
-```bash
-# Install all dependencies including dev extras
-uv sync --all-extras --dev
-
-# CI parity gate (lint + format check + mypy + pytest)
 ./scripts/ci-parity.sh
-
-# Optional dependency audit gate (matches CI dependency-audit job)
-# Exports production requirements then runs pip-audit with --no-deps --disable-pip
-./scripts/dependency-audit.sh
-
-# Lint
-uv run ruff check .
-
-# Auto-fix lint issues
-uv run ruff check --fix .
-
-# Format
-uv run ruff format .
-
-# Type checking
-uv run mypy aws_lighthouse
-
-# Run tests
-uv run pytest
 ```
 
-### Adding a New Tool
+This runs lint, formatting, mypy, the complete test suite, the strict production
+dependency audit, a package build, a clean-wheel install, and an entry-point
+smoke test. Live AWS/Ollama qualification is separately and explicitly gated;
+see [operations](docs/OPERATIONS.md).
 
-1. Add the core logic as a plain Python function in the appropriate `tools/*.py` file
-2. If the tool is regional, accept `region: str | None = None` and use `get_aws_client_for_region(service, region) if region else get_aws_client(service)`
-3. Write a `@tool`-decorated wrapper in `agent.py` that calls the plain function and returns `json.dumps(result)`
-4. If the tool is read-only, add its name to the `SAFE_TOOLS` set in `agent.py`
-5. Add it to the `tools` list in `agent.py`
-6. If it produces findings displayed in the dashboard, add a panel in `cli.py`
+## Safety summary
 
-### CI
+- AWS read tools may run without a prompt; mutations never do.
+- Local Terraform reads, drift reads, file reads/writes, and opportunity-state
+  updates require approval.
+- Generic shell execution is not exposed to the model.
+- Unknown tools fail closed to the approval route.
+- The local database directory is mode `0700`; the database is mode `0600`.
+- The repository ignores common credential, key, Terraform state, and local DB
+  files and scans history with a checksum-verified Gitleaks binary in CI/release.
 
-GitHub Actions runs on every push to `main` and on pull requests:
-- `ruff check` — linting
-- `ruff format --check` — formatting
-- `mypy` — type checking
-- `pytest` — unit tests
+See [SECURITY.md](SECURITY.md) for limitations, IAM guidance, and reporting.
 
-See `.github/workflows/ci.yml` for the full pipeline definition.
+## License
+
+[MIT](LICENSE)
