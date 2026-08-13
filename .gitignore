@@ -79,8 +79,31 @@ ipython_config.py
 # celery beat schedule file
 celerybeat-schedule
 
-# dotenv
+# Secrets and local credentials
 .env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.tfvars
+!*.tfvars.example
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl.bak
+.aws/
+.mcp.json
+.claude/settings.local.json
+
+# Local databases and runtime state
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+.aws-lighthouse/
 .venv
 
 # virtualenv
@@ -113,4 +136,3 @@ logs/
 
 # AWS Lighthouse-specific
 aws_lighthouse/__pycache__/
-
