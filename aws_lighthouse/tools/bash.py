@@ -115,19 +115,12 @@ _DANGEROUS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 # Keep this list narrow — add only when there is a concrete, tested use case.
 _ALLOWED_COMMANDS: frozenset[str] = frozenset(
     {
-        # AWS infrastructure tooling — primary use cases for this agent
-        "aws",
-        "terraform",
-        "kubectl",
-        "helm",
-        # Python / project tooling
-        "uv",
-        "git",
-        # Read-only filesystem inspection (safe; no credential paths exposed here)
+        # Static diagnostics only. Infrastructure CLIs, project tooling, and
+        # find(1) can all dispatch arbitrary code through subcommands, plugins,
+        # aliases, hooks, or -exec and therefore do not belong in this allowlist.
         "echo",
         "ls",
         "df",
-        "find",
         "which",
         "pwd",
     }

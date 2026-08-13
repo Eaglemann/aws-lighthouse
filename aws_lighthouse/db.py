@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .db_schema import initialize_schema
 from .logger import logger
 from .types import (
     Opportunity,
@@ -67,134 +68,13 @@ class DatabaseManager:
         try:
             with sqlite3.connect(DB_PATH) as conn:
                 cursor = conn.cursor()
-
-                # Scans table: records entire environment snapshots
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS scans (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        account_id TEXT,
-                        region TEXT,
-                        scan_type TEXT,
-                        data TEXT
-                    )
-                """)
-
-                # Cost trends table
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS cost_snapshots (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        account_id TEXT,
-                        period_start TEXT,
-                        period_end TEXT,
-                        total_usd REAL,
-                        service_breakdown TEXT
-                    )
-                """)
-                cursor.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_cost_snapshots_account_ts_id
-                    ON cost_snapshots(account_id, timestamp DESC, id DESC)
-                """)
-
-                # Analyze snapshots table for delta mode and watch baselining
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS scan_snapshots (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        account_id TEXT NOT NULL,
-                        scope_key TEXT NOT NULL,
-                        data TEXT NOT NULL
-                    )
-                """)
-                cursor.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_scan_snapshots_account_scope_ts_id
-                    ON scan_snapshots(account_id, scope_key, timestamp DESC, id DESC)
-                """)
-
-                # Audit log: every tool invocation the agent attempts, with decision
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS audit_log (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        tool_call_id TEXT,
-                        tool_name TEXT NOT NULL,
-                        args_json TEXT NOT NULL,
-                        decision TEXT NOT NULL,
-                        execution_status TEXT,
-                        result TEXT,
-                        error TEXT
-                    )
-                """)
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS opportunities (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        account_id TEXT NOT NULL,
-                        fingerprint TEXT NOT NULL,
-                        source_kind TEXT NOT NULL,
-                        title TEXT NOT NULL,
-                        summary TEXT NOT NULL,
-                        severity TEXT,
-                        resource_type TEXT,
-                        resource_id TEXT NOT NULL,
-                        resource_name TEXT,
-                        region TEXT,
-                        payload_json TEXT NOT NULL,
-                        first_seen_at TEXT NOT NULL,
-                        last_seen_at TEXT NOT NULL,
-                        seen_count INTEGER NOT NULL DEFAULT 1,
-                        status TEXT NOT NULL DEFAULT 'open',
-                        owner TEXT,
-                        snooze_until TEXT,
-                        notes TEXT NOT NULL DEFAULT '',
-                        resolution_reason TEXT,
-                        resolution_note TEXT,
-                        resolved_at TEXT,
-                        last_scan_scope TEXT,
-                        UNIQUE(account_id, fingerprint)
-                    )
-                """)
-                cursor.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_opportunities_account_status_seen
-                    ON opportunities(account_id, status, last_seen_at DESC, id DESC)
-                """)
-                cursor.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_opportunities_account_source_region
-                    ON opportunities(account_id, source_kind, region, status)
-                """)
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS opportunity_events (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        account_id TEXT NOT NULL,
-                        fingerprint TEXT NOT NULL,
-                        event_type TEXT NOT NULL,
-                        data_json TEXT NOT NULL
-                    )
-                """)
-                cursor.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_opportunity_events_account_fp_id
-                    ON opportunity_events(account_id, fingerprint, id DESC)
-                """)
-                self._ensure_audit_log_columns(cursor)
+                initialize_schema(cursor)
                 conn.commit()
             DB_PATH.chmod(0o600)  # owner read/write only — contains cost history
             self._clear_health_issue("initialize")
         except (sqlite3.Error, OSError) as e:
             self._record_health_issue("initialize", e)
             logger.error(f"Failed to initialize SQLite database: {e!s}")
-
-    def _ensure_audit_log_columns(self, cursor: sqlite3.Cursor) -> None:
-        """Apply additive audit_log schema migrations for older local DB files."""
-        cols = {
-            row[1] for row in cursor.execute("PRAGMA table_info(audit_log)").fetchall()
-        }
-        if "tool_call_id" not in cols:
-            cursor.execute("ALTER TABLE audit_log ADD COLUMN tool_call_id TEXT")
-        if "execution_status" not in cols:
-            cursor.execute("ALTER TABLE audit_log ADD COLUMN execution_status TEXT")
-        if "error" not in cols:
-            cursor.execute("ALTER TABLE audit_log ADD COLUMN error TEXT")
 
     def _append_opportunity_event(
         self,
@@ -1068,9 +948,9 @@ class DatabaseManager:
         fingerprint: str,
         account_id: str | None = None,
         status: OpportunityStatus | None = None,
-        owner: str | None | object = _UNSET,
-        snooze_until: str | None | object = _UNSET,
-        note: str | None | object = _UNSET,
+        owner: str | object | None = _UNSET,
+        snooze_until: str | object | None = _UNSET,
+        note: str | object | None = _UNSET,
     ) -> Opportunity | None:
         """Update local-only opportunity state such as status, owner, snooze, and notes."""
         if status is not None and status not in _ALL_OPPORTUNITY_STATUSES:

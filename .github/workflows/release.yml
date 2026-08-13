@@ -9,8 +9,8 @@ name: Release
 #      Configure at: https://pypi.org/manage/account/publishing/
 #   5. Create a GitHub Release with the changelog and built artifacts.
 #
-# Version bumping: run `hatch version minor` (or patch/major) locally,
-# commit, then `git tag v$(hatch version) && git push --tags`.
+# Version bumping: run `uv version --bump minor` (or patch/major) locally,
+# commit, then `git tag v$(uv version --short) && git push --tags`.
 
 on:
   push:
@@ -26,17 +26,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0   # full history required by git-cliff
+          persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
 
       - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version-file: ".python-version"
 
@@ -53,6 +54,27 @@ jobs:
 
       - name: Test
         run: uv run pytest
+
+      - name: Dependency audit
+        run: ./scripts/dependency-audit.sh
+
+      - name: Verify tag matches package version
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF_NAME}" = "v$(uv version --short)"
+
+      - name: Install Gitleaks
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/gitleaks.tar.gz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.22.1/gitleaks_8.22.1_linux_x64.tar.gz
+          echo "2f92ab3b8e08319ac30836c32b90818e01519c3a4982771e4f45a7f5607872f7  /tmp/gitleaks.tar.gz" \
+            | sha256sum --check --strict
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo mv /tmp/gitleaks /usr/local/bin/gitleaks
+
+      - name: Scan for secrets with Gitleaks
+        run: gitleaks detect --source . --config .gitleaks.toml --log-opts="--all" --verbose
 
       # Install git-cliff to generate release notes and verify the downloaded
       # binary against upstream SHA256 checksums before executing it.
@@ -89,6 +111,12 @@ jobs:
 
       - name: Build distribution packages
         run: uv build
+
+      - name: Smoke-test built wheel
+        run: |
+          uv venv .venv-release-check
+          uv pip install dist/*.whl --python .venv-release-check/bin/python
+          .venv-release-check/bin/aws-lighthouse --help
 
       # Requires a PyPI trusted publisher configured for this repository.
       # No PYPI_TOKEN secret needed when OIDC is set up.

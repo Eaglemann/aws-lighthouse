@@ -22,6 +22,7 @@ from aws_lighthouse.cli import (
     _section_lambda_detail,
     _section_remediation,
     _section_security,
+    _section_sg_blast_radius,
     _section_tagging,
     _translate_shell_command,
     app,
@@ -85,6 +86,35 @@ _TEST_LOG_PATH = "/Users/tester/.aws-lighthouse/logs/aws-lighthouse.log"
 
 def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
+
+
+def test_sg_blast_radius_groups_identical_ids_by_region():
+    c, _ = _console()
+    security = _ok(
+        [
+            {"resource": "sg-shared", "region": "eu-west-1"},
+            {"resource": "sg-shared", "region": "us-east-1"},
+        ]
+    )
+
+    def _blast_radius(sg_ids, *, region=None):
+        return _ok([{"sg_id": sg_ids[0], "region": region}])
+
+    with patch(
+        "aws_lighthouse.cli.get_sg_blast_radius", side_effect=_blast_radius
+    ) as blast:
+        result = _section_sg_blast_radius(c, security, render=False)
+
+    assert blast.call_args_list == [
+        ((["sg-shared"],), {"region": "eu-west-1"}),
+        ((["sg-shared"],), {"region": "us-east-1"}),
+    ]
+    assert result == _ok(
+        [
+            {"sg_id": "sg-shared", "region": "eu-west-1"},
+            {"sg_id": "sg-shared", "region": "us-east-1"},
+        ]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -425,7 +455,6 @@ class TestSectionRemediation:
             _parse_remediation_selection("1,banana,5", 3)
 
     def test_regional_remediation_passes_region_to_action(self):
-        # delete_ebs_volume is phase 3 (DESTRUCTIVE); approve phase "3" to execute it.
         c, _ = _console()
         sec_findings = [
             {
@@ -438,7 +467,8 @@ class TestSectionRemediation:
             }
         ]
         with (
-            patch("aws_lighthouse.cli.Prompt.ask", return_value="3"),
+            patch("aws_lighthouse.cli.Prompt.ask", return_value="all"),
+            patch("aws_lighthouse.cli.typer.confirm", return_value=True),
             patch(
                 "aws_lighthouse.tools.remediation_actions.delete_ebs_volume",
                 return_value=True,
@@ -461,7 +491,8 @@ class TestSectionRemediation:
             }
         ]
         with (
-            patch("aws_lighthouse.cli.Prompt.ask", return_value="3"),
+            patch("aws_lighthouse.cli.Prompt.ask", return_value="all"),
+            patch("aws_lighthouse.cli.typer.confirm", return_value=True),
             patch("aws_lighthouse.cli.logger.error") as mock_error,
             patch(
                 "aws_lighthouse.tools.remediation_actions.delete_ebs_volume",
@@ -475,7 +506,7 @@ class TestSectionRemediation:
         assert "Missing region for" in mock_error.call_args[0][0]
 
     def test_skipping_phases_blocks_remediation_execution(self):
-        # Answering "none" skips all phases without executing any action.
+        # Answering "none" skips all actions without executing anything.
         c, _ = _console()
         sec_findings = [
             {
@@ -497,6 +528,41 @@ class TestSectionRemediation:
             _section_remediation(c, sec_findings, [])
 
         mock_action.assert_not_called()
+
+    def test_each_selected_remediation_requires_its_own_confirmation(self):
+        c, _ = _console()
+        sec_findings = [
+            {
+                "severity": "HIGH",
+                "resource": "vol-first",
+                "finding": "Unattached EBS volume",
+                "remediation_type": "delete_ebs_volume",
+                "remediation_label": "Delete EBS Volume",
+                "region": "eu-west-1",
+            },
+            {
+                "severity": "HIGH",
+                "resource": "vol-second",
+                "finding": "Unattached EBS volume",
+                "remediation_type": "delete_ebs_volume",
+                "remediation_label": "Delete EBS Volume",
+                "region": "eu-west-1",
+            },
+        ]
+        with (
+            patch("aws_lighthouse.cli.Prompt.ask", return_value="all"),
+            patch(
+                "aws_lighthouse.cli.typer.confirm", side_effect=[True, False]
+            ) as confirm,
+            patch(
+                "aws_lighthouse.tools.remediation_actions.delete_ebs_volume",
+                return_value=True,
+            ) as action,
+        ):
+            _section_remediation(c, sec_findings, [])
+
+        assert confirm.call_count == 2
+        action.assert_called_once_with("vol-first", region="eu-west-1")
 
 
 # ---------------------------------------------------------------------------
@@ -1035,6 +1101,69 @@ class TestAnalyzeJsonOutput:
         assert len(sec_delta["resolved"]) == 1
         assert sec_delta["new"][0]["resource"] == "new-resource"
         assert sec_delta["resolved"][0]["resource"] == "old-resource"
+
+    def test_degraded_scan_preserves_baseline_and_resolution_coverage(self):
+        runner = CliRunner()
+        db_mock = _make_db_mock()
+        db_mock.get_latest_scan_snapshot.return_value = {
+            "recorded_at": "2026-08-12T10:00:00+00:00",
+            "data": {
+                "security_findings": [
+                    {
+                        "severity": "HIGH",
+                        "resource": "sg-still-open",
+                        "finding": "open ssh",
+                        "region": "us-east-1",
+                    }
+                ]
+            },
+        }
+        security_error = _scan_error(
+            code="AccessDeniedException",
+            message="denied",
+            service="ec2",
+            operation="DescribeSecurityGroups",
+            region="us-east-1",
+        )
+        sync_mock = MagicMock(
+            return_value={
+                "created": 0,
+                "reopened": 0,
+                "resolved": 0,
+                "still_open": 1,
+            }
+        )
+        patches = {
+            **_PATCHES,
+            "aws_lighthouse.cli.get_aws_session": _mock_session,
+            "aws_lighthouse.cli.db_manager": db_mock,
+            "aws_lighthouse.cli.run_security_scan": lambda **kwargs: {
+                "ok": False,
+                "data": [],
+                "errors": [security_error],
+            },
+            "aws_lighthouse.cli.sync_opportunities_from_scan": sync_mock,
+        }
+
+        with patch.multiple(
+            "aws_lighthouse.cli",
+            **{key.split(".")[-1]: value for key, value in patches.items()},
+        ):
+            result = runner.invoke(
+                app,
+                ["analyze", "--output", "json", "--json-schema", "v1", "--since-last"],
+            )
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        security_delta = payload["delta"]["sections"]["security_findings"]
+        assert security_delta["resolved"] == []
+        assert security_delta["trusted"] is False
+        persisted = db_mock.record_scan_snapshot.call_args.kwargs["data"]
+        assert persisted["security_findings"][0]["resource"] == "sg-still-open"
+        assert sync_mock.call_args.kwargs["source_errors"] == {
+            "security": [security_error]
+        }
 
     def test_v2_json_schema_returns_envelopes_and_overall(self):
         result = self._run(["--json-schema", "v2"])
@@ -2753,6 +2882,18 @@ class TestAnalyzeSarifOutput:
         ]
         assert "999888777666" in fqn
         assert "my-res" in fqn
+
+    def test_sarif_uses_current_package_identity(self):
+        from importlib.metadata import version
+
+        from aws_lighthouse.cli import _build_sarif_output
+
+        sarif = _build_sarif_output({"v1": {}}, "123456789012")
+        driver = sarif["runs"][0]["tool"]["driver"]
+        assert driver["version"] == version("aws-lighthouse")
+        assert driver["informationUri"] == (
+            "https://github.com/Eaglemann/aws-lighthouse"
+        )
 
 
 # ---------------------------------------------------------------------------

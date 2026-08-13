@@ -44,6 +44,9 @@ _DESTRUCTIVE_TOOLS = {
     "delete_ebs",
     "s3_block_public_access",
     "tool_read_file",  # intentionally removed from SAFE_TOOLS — must require approval
+    "parse_terraform_context",
+    "tool_get_terraform_drift",
+    "tool_update_opportunity",
 }
 
 
@@ -106,6 +109,23 @@ def test_tool_read_file_is_not_in_safe_tools():
         "tool_read_file must NOT be in SAFE_TOOLS. "
         "It can read ~/.aws/credentials and ~/.ssh/id_rsa without restriction."
     )
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "parse_terraform_context",
+        "tool_get_terraform_drift",
+        "tool_update_opportunity",
+    ],
+)
+def test_local_reads_and_mutations_require_approval(name):
+    assert name not in SAFE_TOOLS
+    assert should_require_approval(_state([_tc(name)])) == "approval"
+
+
+def test_generic_shell_execution_is_not_exposed_to_the_model():
+    assert "tool_execute_bash" not in {tool.name for tool in tools}
 
 
 def test_safe_tools_contains_no_destructive_tools():
@@ -298,7 +318,7 @@ def test_check_ollama_runtime_reports_ready_when_model_is_present():
 
     with (
         patch.dict("os.environ", {"OLLAMA_HOST": "http://localhost:11434"}),
-        patch("aws_lighthouse.agent.urlopen", return_value=response),
+        patch("aws_lighthouse.ollama_runtime.urlopen", return_value=response),
     ):
         status = check_ollama_runtime()
 
@@ -315,7 +335,7 @@ def test_check_ollama_runtime_reports_missing_model_when_not_installed():
 
     with (
         patch.dict("os.environ", {"OLLAMA_HOST": "http://localhost:11434"}),
-        patch("aws_lighthouse.agent.urlopen", return_value=response),
+        patch("aws_lighthouse.ollama_runtime.urlopen", return_value=response),
     ):
         status = check_ollama_runtime()
 
@@ -328,7 +348,7 @@ def test_check_ollama_runtime_reports_unavailable_when_runtime_is_down():
     with (
         patch.dict("os.environ", {"OLLAMA_HOST": "http://localhost:11434"}),
         patch(
-            "aws_lighthouse.agent.urlopen",
+            "aws_lighthouse.ollama_runtime.urlopen",
             side_effect=OSError("Connection refused"),
         ),
     ):
@@ -438,14 +458,15 @@ def test_tools_node_repairs_schema_like_args_before_execution():
     mock_error.assert_called_once()
 
 
-def test_local_opportunity_tools_are_safe():
+def test_read_only_local_opportunity_tools_are_safe():
     for name in (
         "tool_list_opportunities",
         "tool_get_opportunity_details",
-        "tool_update_opportunity",
         "tool_plan_opportunities",
     ):
         assert name in SAFE_TOOLS
+
+    assert "tool_update_opportunity" not in SAFE_TOOLS
 
 
 def test_list_opportunities_returns_db_rows_as_json():

@@ -6,6 +6,7 @@ import aws_lighthouse.db as db_module
 from aws_lighthouse.db import DatabaseManager
 from aws_lighthouse.opportunities import (
     TRACKED_SOURCE_KINDS,
+    build_scan_coverage,
     build_scan_opportunities,
     sync_opportunities_from_scan,
 )
@@ -192,6 +193,47 @@ def test_missing_finding_auto_resolves_when_coverage_matches(db):
     assert summary["resolved"] == 1
     assert opportunities[0]["status"] == "resolved"
     assert opportunities[0]["resolution_reason"] == "not_seen_in_scan"
+
+
+def test_regional_scan_error_excludes_only_failed_region_from_resolution_coverage(db):
+    coverage = build_scan_coverage(
+        enabled_source_kinds=["security"],
+        scanned_regions=["us-east-1", "eu-west-1"],
+        source_errors={
+            "security": [
+                {
+                    "code": "AccessDeniedException",
+                    "message": "denied",
+                    "service": "ec2",
+                    "operation": "DescribeSecurityGroups",
+                    "retryable": False,
+                    "region": "eu-west-1",
+                }
+            ]
+        },
+    )
+
+    assert coverage == {"security": {None, "us-east-1"}}
+
+
+def test_global_scan_error_removes_global_resolution_coverage(db):
+    coverage = build_scan_coverage(
+        enabled_source_kinds=["security"],
+        scanned_regions=["us-east-1", "eu-west-1"],
+        source_errors={
+            "security": [
+                {
+                    "code": "AccessDeniedException",
+                    "message": "denied",
+                    "service": "iam",
+                    "operation": "GetCredentialReport",
+                    "retryable": False,
+                }
+            ]
+        },
+    )
+
+    assert coverage == {"security": {"us-east-1", "eu-west-1"}}
 
 
 def test_reappearing_ignored_or_resolved_finding_reopens(db):

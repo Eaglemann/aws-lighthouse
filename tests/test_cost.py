@@ -141,12 +141,22 @@ def test_api_error_returns_envelope_error():
 # ── get_cost_forecast ─────────────────────────────────────────────────────────
 
 
-def _make_forecast_ce(total_amount="55.00", forecast_values=None):
+def _make_forecast_ce(total_amount="110.00", forecast_values=None):
     ce = MagicMock()
-    forecast_values = forecast_values or ["50.00", "60.00"]
+    forecast_values = forecast_values or [
+        ("50.00", "45.00", "55.00"),
+        ("60.00", "55.00", "65.00"),
+    ]
     ce.get_cost_forecast.return_value = {
         "Total": {"Amount": total_amount, "Unit": "USD"},
-        "ForecastResultsByTime": [{"MeanValue": v} for v in forecast_values],
+        "ForecastResultsByTime": [
+            {
+                "MeanValue": mean,
+                "PredictionIntervalLowerBound": lower,
+                "PredictionIntervalUpperBound": upper,
+            }
+            for mean, lower, upper in forecast_values
+        ],
     }
     return ce
 
@@ -157,9 +167,9 @@ def test_forecast_returns_total_usd():
         result = get_cost_forecast()
     payload = _data(result)
     assert result["ok"] is True
-    assert payload["total_usd"] == 55.0
-    assert payload["lower_bound_usd"] == 50.0
-    assert payload["upper_bound_usd"] == 60.0
+    assert payload["total_usd"] == 110.0
+    assert payload["lower_bound_usd"] == 100.0
+    assert payload["upper_bound_usd"] == 120.0
 
 
 def test_forecast_period_keys_present():
@@ -169,11 +179,35 @@ def test_forecast_period_keys_present():
     payload = _data(result)
     assert "forecast_start" in payload
     assert "forecast_end" in payload
-    # Start should be tomorrow (future date)
+    # Cost Explorer requires the forecast to start on the current date.
     from datetime import UTC, datetime, timedelta
 
     today = datetime.now(UTC).date()
-    assert payload["forecast_start"] == (today + timedelta(days=1)).isoformat()
+    assert payload["forecast_start"] == today.isoformat()
+    assert payload["forecast_end"] == (today + timedelta(days=30)).isoformat()
+    ce.get_cost_forecast.assert_called_once_with(
+        TimePeriod={
+            "Start": today.isoformat(),
+            "End": (today + timedelta(days=30)).isoformat(),
+        },
+        Metric="UNBLENDED_COST",
+        Granularity="MONTHLY",
+        PredictionIntervalLevel=80,
+    )
+
+
+def test_forecast_does_not_invent_interval_from_mean_values():
+    ce = MagicMock()
+    ce.get_cost_forecast.return_value = {
+        "Total": {"Amount": "55.00", "Unit": "USD"},
+        "ForecastResultsByTime": [{"MeanValue": "55.00"}],
+    }
+    with patch(f"{MOD}.get_client", return_value=ce):
+        result = get_cost_forecast()
+
+    payload = _data(result)
+    assert payload["lower_bound_usd"] is None
+    assert payload["upper_bound_usd"] is None
 
 
 def test_forecast_api_error_returns_error_envelope():

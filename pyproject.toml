@@ -22,12 +22,9 @@ classifiers = [
 requires-python = ">=3.12"
 dependencies = [
     "boto3>=1.42.56",
-    "langchain-community>=0.4.1",
     "langchain-core>=1.2.16",
-    "langchain-mcp-adapters>=0.2.1",
     "langchain-ollama>=1.0.1",
     "langgraph>=1.0.9",
-    "mcp>=1.26.0",
     "pydantic>=2.12.5",
     "rich>=14.3.3",
     "typer>=0.24.1",
@@ -66,6 +63,7 @@ addopts = "--cov=aws_lighthouse --cov-fail-under=70"
 markers = [
     "unit: fast, pure-Python tests with no AWS calls (use with -m unit)",
     "integration: tests that require real AWS credentials or live infrastructure",
+    "live: opt-in qualification against an explicitly bound sandbox or local service",
     "slow: tests that take more than a few seconds to run",
     "security: tests that validate security-critical code paths",
 ]
@@ -91,7 +89,6 @@ disallow_untyped_defs = true
 # New modules must be fully annotated; adding to this list requires a justification.
 module = [
     "aws_lighthouse.auth",
-    "aws_lighthouse.tools.mcp_client",
     "aws_lighthouse.tools.security_scan",
     "aws_lighthouse.tools.ri_sp_coverage",
     "aws_lighthouse.tools.iam_scan",

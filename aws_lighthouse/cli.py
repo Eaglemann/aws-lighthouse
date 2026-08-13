@@ -1,6 +1,5 @@
 import io
 import json
-import re
 import shlex
 import time
 from collections.abc import Mapping, Sequence
@@ -31,7 +30,40 @@ from .opportunities import (
     is_global_tagging_finding,
     sync_opportunities_from_scan,
 )
+from .output_rendering import (
+    build_sarif_output as _build_sarif_output,
+)
+from .output_rendering import (
+    dollar_text as _dollar,
+)
+from .output_rendering import (
+    percentage_text as _pct_style,
+)
+from .output_rendering import (
+    render_remediation_plan as _render_remediation_plan_panel,
+)
+from .output_rendering import (
+    render_remediation_preview as _render_remediation_preview,
+)
+from .output_rendering import (
+    resource_count as _count,
+)
+from .output_rendering import (
+    scope_label as _display_scope_label,
+)
+from .output_rendering import (
+    severity_text as _severity_text,
+)
 from .policy import PolicyConfigError, ScanPolicy, load_policy_config
+from .reconciliation import (
+    build_delta_payload,
+    build_persistable_snapshot,
+    source_errors_from_section_results,
+)
+from .remediation_executor import (
+    execute_remediation_action,
+    validate_remediation_action,
+)
 from .scan_contract import (
     error_result,
     is_expected_unavailable_scan_error,
@@ -39,6 +71,7 @@ from .scan_contract import (
     ok_result,
     scan_error_reason,
 )
+from .scan_orchestrator import collect_scan_results
 from .tools.cloudtrail_attribution import get_cost_attribution
 from .tools.cloudwatch_scan import detect_cloudwatch_gaps
 from .tools.compute_optimizer import get_compute_optimizer_recommendations
@@ -56,7 +89,7 @@ from .tools.inventory import (
 )
 from .tools.multi_region import get_enabled_regions
 from .tools.notify import build_alert_payload, send_webhook, should_alert
-from .tools.remediation_plan import build_remediation_plan, parse_phase_selection
+from .tools.remediation_plan import build_remediation_plan
 from .tools.ri_sp_advisor import get_ri_recommendations, get_sp_recommendations
 from .tools.ri_sp_coverage import get_ri_sp_coverage
 from .tools.scenario_planner import get_scenario_plan
@@ -69,7 +102,6 @@ from .types import (
     CostFinding,
     OpportunitySourceKind,
     OpportunityStatus,
-    RemediationPlan,
     ScanError,
     ScanResult,
     SecurityFinding,
@@ -92,32 +124,6 @@ def main(ctx: typer.Context) -> None:
 
 # Max parallel region workers — balances throughput against boto3 connection pool
 _MAX_WORKERS = 5
-
-# ── Severity colour map ──────────────────────────────────────────────────────
-_SEV_STYLE = {"HIGH": "bold red", "MEDIUM": "bold yellow", "LOW": "bold blue"}
-_SEV_LABEL = {"HIGH": "● HIGH", "MEDIUM": "● MED ", "LOW": "● LOW "}
-
-
-def _severity_text(sev: str) -> Text:
-    return Text(_SEV_LABEL.get(sev, sev), style=_SEV_STYLE.get(sev, "white"))
-
-
-def _count(lst: list) -> str:
-    """Return resource count."""
-    return str(len(lst))
-
-
-def _pct_style(val: float | None, low: float = 60.0, high: float = 80.0) -> str:
-    """Return a colored percentage string based on thresholds."""
-    if val is None:
-        return "[dim]N/A[/dim]"
-    color = "green" if val >= high else ("yellow" if val >= low else "red")
-    return f"[{color}]{val:.1f}%[/{color}]"
-
-
-def _dollar(val: float | None) -> str:
-    return f"${val:,.2f}" if val is not None else "[dim]N/A[/dim]"
-
 
 _DELTA_SECTION_KEYS = (
     "inventory",
@@ -181,120 +187,6 @@ def _normalize_snapshot_payload(data: dict[str, Any]) -> dict[str, Any]:
         dict[str, Any],
         json.loads(json.dumps(data, sort_keys=True, default=str)),
     )
-
-
-def _canonicalize_for_diff(value: Any) -> str:
-    """Create a stable string identity for list/set diffing."""
-    return json.dumps(value, sort_keys=True, default=str, separators=(",", ":"))
-
-
-def _diff_lists(previous: list[Any], current: list[Any]) -> dict[str, Any]:
-    prev_map = {_canonicalize_for_diff(item): item for item in previous}
-    curr_map = {_canonicalize_for_diff(item): item for item in current}
-    prev_keys = set(prev_map.keys())
-    curr_keys = set(curr_map.keys())
-    new_keys = sorted(curr_keys - prev_keys)
-    resolved_keys = sorted(prev_keys - curr_keys)
-    unchanged_keys = prev_keys & curr_keys
-    return {
-        "new": [curr_map[key] for key in new_keys],
-        "resolved": [prev_map[key] for key in resolved_keys],
-        "unchanged_count": len(unchanged_keys),
-    }
-
-
-def _diff_mappings(previous: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
-    new: list[dict[str, Any]] = []
-    resolved: list[dict[str, Any]] = []
-    unchanged = 0
-    for key in sorted(set(previous.keys()) | set(current.keys())):
-        prev_exists = key in previous
-        curr_exists = key in current
-        if not prev_exists and curr_exists:
-            new.append({"field": key, "value": current[key]})
-            continue
-        if prev_exists and not curr_exists:
-            resolved.append({"field": key, "value": previous[key]})
-            continue
-
-        prev_value = previous[key]
-        curr_value = current[key]
-        if _canonicalize_for_diff(prev_value) == _canonicalize_for_diff(curr_value):
-            unchanged += 1
-            continue
-        new.append({"field": key, "value": curr_value, "previous": prev_value})
-        resolved.append({"field": key, "value": prev_value, "current": curr_value})
-    return {"new": new, "resolved": resolved, "unchanged_count": unchanged}
-
-
-def _build_section_delta(previous: Any, current: Any) -> dict[str, Any]:
-    if isinstance(previous, list) and isinstance(current, list):
-        return _diff_lists(previous, current)
-    if isinstance(previous, dict) and isinstance(current, dict):
-        return _diff_mappings(previous, current)
-
-    same = _canonicalize_for_diff(previous) == _canonicalize_for_diff(current)
-    return {
-        "new": [] if same else [current],
-        "resolved": [] if same else [previous],
-        "unchanged_count": 1 if same else 0,
-    }
-
-
-def _build_delta_payload(
-    *,
-    baseline_snapshot: dict[str, Any] | None,
-    current_sections: dict[str, Any],
-    scope_key: str,
-    overall_errors: list[ScanError],
-) -> dict[str, Any]:
-    baseline_found = baseline_snapshot is not None
-    previous_sections = (
-        cast(dict[str, Any], baseline_snapshot.get("data", {}))
-        if baseline_snapshot
-        else {}
-    )
-
-    section_deltas: dict[str, dict[str, Any]] = {}
-    total_new = 0
-    total_resolved = 0
-    sections_with_new: list[str] = []
-    sections_with_resolved: list[str] = []
-
-    for section in _DELTA_SECTION_KEYS:
-        if baseline_found:
-            section_delta = _build_section_delta(
-                previous_sections.get(section),
-                current_sections.get(section),
-            )
-        else:
-            section_delta = {"new": [], "resolved": [], "unchanged_count": 0}
-
-        section_deltas[section] = section_delta
-        if section_delta["new"]:
-            sections_with_new.append(section)
-        if section_delta["resolved"]:
-            sections_with_resolved.append(section)
-        total_new += len(section_delta["new"])
-        total_resolved += len(section_delta["resolved"])
-
-    summary = {
-        "total_new": total_new,
-        "total_resolved": total_resolved,
-        "sections_with_new": sections_with_new,
-        "sections_with_resolved": sections_with_resolved,
-        "degraded": bool(overall_errors),
-        "error_count": len(overall_errors),
-    }
-    return {
-        "baseline_found": baseline_found,
-        "baseline_recorded_at": baseline_snapshot.get("recorded_at")
-        if baseline_snapshot
-        else None,
-        "scope_key": scope_key,
-        "summary": summary,
-        "sections": section_deltas,
-    }
 
 
 def _load_scan_policy(config_path: Path | None) -> ScanPolicy | None:
@@ -418,10 +310,6 @@ _ERROR_SERVICE_LABELS = {
     "ce": "Cost Explorer",
     "guardduty": "GuardDuty",
 }
-
-
-def _display_scope_label(region: str | None) -> str:
-    return region or "global"
 
 
 def _error_service_label(service: str) -> str:
@@ -1824,7 +1712,6 @@ def _section_security(
     render: bool = True,
 ) -> ScanResult:
     """Run security scan across all regions and render findings panel."""
-    sec_results: list[ScanResult] = []
 
     def _sec_region(args: tuple[str | None, bool]) -> ScanResult:
         reg, include_global = args
@@ -1841,11 +1728,10 @@ def _section_security(
     region_args = [(reg, i == 0) for i, reg in enumerate(regions)]
     with (
         c.status("[cyan]🛡️   Running security checks...[/cyan]", spinner="dots"),
-        ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool,
     ):
-        for result in pool.map(_sec_region, region_args):
-            sec_results.append(result)
-    sec_result = merge_list_results(sec_results)
+        sec_result = collect_scan_results(
+            region_args, _sec_region, max_workers=_MAX_WORKERS
+        )
     if render:
         _render_security_panel(c, sec_result, multi_region=multi_region)
     return sec_result
@@ -1925,18 +1811,25 @@ def _section_sg_blast_radius(
     render: bool = True,
 ) -> ScanResult:
     """Enrich open-SG findings with blast radius data and optionally render."""
-    sg_ids = list(
-        dict.fromkeys(
-            f["resource"]
-            for f in (sec_result.get("data") or [])
-            if str(f.get("resource", "")).startswith("sg-")
-        )
-    )
-    if not sg_ids:
+    ids_by_region: dict[str | None, list[str]] = {}
+    for finding in sec_result.get("data") or []:
+        sg_id = str(finding.get("resource", ""))
+        if not sg_id.startswith("sg-"):
+            continue
+        finding_region = finding.get("region", region)
+        regional_ids = ids_by_region.setdefault(finding_region, [])
+        if sg_id not in regional_ids:
+            regional_ids.append(sg_id)
+
+    if not ids_by_region:
         return ok_result([])
 
     with c.status("[cyan]🔍  Analysing SG blast radius...[/cyan]", spinner="dots"):
-        blast_result = get_sg_blast_radius(sg_ids, region=region)
+        blast_result = collect_scan_results(
+            list(ids_by_region.items()),
+            lambda item: get_sg_blast_radius(item[1], region=item[0]),
+            max_workers=_MAX_WORKERS,
+        )
     if render:
         _render_sg_blast_radius_panel(c, blast_result)
     return blast_result
@@ -1958,7 +1851,6 @@ def _section_cloudwatch(
     render: bool = True,
 ) -> ScanResult:
     """Check CloudWatch alarm coverage across all regions and render panel."""
-    cw_results: list[ScanResult] = []
 
     def _cw_region(reg: str | None) -> ScanResult:
         _cw = detect_cloudwatch_gaps(region=reg)
@@ -1971,11 +1863,8 @@ def _section_cloudwatch(
         c.status(
             "[cyan]📡  Checking CloudWatch alarm coverage...[/cyan]", spinner="dots"
         ),
-        ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool,
     ):
-        for result in pool.map(_cw_region, regions):
-            cw_results.append(result)
-    cw_result = merge_list_results(cw_results)
+        cw_result = collect_scan_results(regions, _cw_region, max_workers=_MAX_WORKERS)
     if render:
         _render_cloudwatch_panel(c, cw_result, multi_region=multi_region)
     return cw_result
@@ -1988,7 +1877,6 @@ def _section_cost_waste(
     render: bool = True,
 ) -> ScanResult:
     """Scan for cost waste across all regions and render findings panel."""
-    cost_results: list[ScanResult] = []
 
     def _cost_region(reg: str | None) -> ScanResult:
         _cost = run_cost_scan(region=reg)
@@ -1999,11 +1887,10 @@ def _section_cost_waste(
 
     with (
         c.status("[cyan]🗑️   Scanning for cost waste...[/cyan]", spinner="dots"),
-        ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool,
     ):
-        for result in pool.map(_cost_region, regions):
-            cost_results.append(result)
-    cost_result = merge_list_results(cost_results)
+        cost_result = collect_scan_results(
+            regions, _cost_region, max_workers=_MAX_WORKERS
+        )
     if render:
         _render_cost_waste_panel(c, cost_result, multi_region=multi_region)
     return cost_result
@@ -2017,7 +1904,6 @@ def _section_tagging(
     render: bool = True,
 ) -> ScanResult:
     """Check tagging compliance across all regions and render panel."""
-    tag_results: list[ScanResult] = []
 
     def _tag_region(args: tuple[str | None, bool]) -> ScanResult:
         reg, include_s3 = args
@@ -2035,11 +1921,10 @@ def _section_tagging(
     tag_args = [(reg, i == 0) for i, reg in enumerate(regions)]
     with (
         c.status("[cyan]🏷️   Checking tag compliance...[/cyan]", spinner="dots"),
-        ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool,
     ):
-        for result in pool.map(_tag_region, tag_args):
-            tag_results.append(result)
-    tag_result = merge_list_results(tag_results)
+        tag_result = collect_scan_results(
+            tag_args, _tag_region, max_workers=_MAX_WORKERS
+        )
     if render:
         _render_tagging_panel(c, tag_result, multi_region=multi_region)
     return tag_result
@@ -2103,6 +1988,8 @@ def _parse_remediation_selection(raw: str, total: int) -> list[int]:
     normalized = raw.strip().lower()
     if not normalized:
         return []
+    if normalized == "none":
+        return []
     if normalized == "all":
         return list(range(total))
     if normalized == "top":
@@ -2131,63 +2018,6 @@ def _parse_remediation_selection(raw: str, total: int) -> list[int]:
     return indices
 
 
-def _render_remediation_plan_panel(c: Console, plan: RemediationPlan) -> None:
-    groups: list[Any] = []
-    for phase in plan["phases"]:
-        color = phase["color"]
-        risk = phase["risk"]
-        count = len(phase["actions"])
-        header = Text(
-            f"  {phase['title']}  ·  {risk}  ({count} action{'s' if count != 1 else ''})",
-            style=f"bold {color}",
-        )
-        phase_table = Table(
-            box=box.SIMPLE_HEAD, show_header=False, padding=(0, 2), show_edge=False
-        )
-        phase_table.add_column("Label", no_wrap=True)
-        phase_table.add_column("Source", style="dim", no_wrap=True)
-        phase_table.add_column("Resource", no_wrap=True)
-        for action in phase["actions"]:
-            phase_table.add_row(action["label"], action["source"], action["resource"])
-        groups.append(header)
-        groups.append(phase_table)
-    c.print(
-        Panel(
-            Group(*groups),
-            title="[bold cyan]🔧 Remediation Plan[/bold cyan]",
-            border_style="cyan",
-            padding=(0, 1),
-        )
-    )
-    c.print()
-
-
-def _render_remediation_preview(c: Console, selections: list[dict[str, Any]]) -> None:
-    preview = Table(
-        box=box.SIMPLE_HEAD, show_header=True, padding=(0, 1), show_edge=False
-    )
-    preview.add_column("Action", style="bold cyan", no_wrap=True)
-    preview.add_column("Source", style="dim", no_wrap=True)
-    preview.add_column("Scope", style="dim", no_wrap=True)
-    preview.add_column("Resource", no_wrap=True)
-    for finding in selections:
-        preview.add_row(
-            str(finding["remediation_label"]),
-            str(finding["_source"]),
-            _display_scope_label(cast(str | None, finding.get("region"))),
-            str(finding["resource"]),
-        )
-    c.print(
-        Panel(
-            preview,
-            title="[bold cyan]Remediation Preview[/bold cyan]",
-            border_style="cyan",
-            padding=(0, 1),
-        )
-    )
-    c.print()
-
-
 def _section_remediation(  # noqa: C901
     c: Console,
     sec_findings: list[SecurityFinding],
@@ -2205,41 +2035,15 @@ def _section_remediation(  # noqa: C901
     if not remediable:
         return
 
-    from .tools.remediation_actions import (
-        apply_s3_block_public_access,
-        apply_s3_default_encryption,
-        delete_ebs_volume,
-        enable_cloudtrail_logging,
-        enable_guardduty,
-        enforce_imdsv2,
-        release_eip,
-    )
-
-    _ACTIONS = {
-        "s3_block_public_access": apply_s3_block_public_access,
-        "delete_ebs_volume": delete_ebs_volume,
-        "release_eip": release_eip,
-        "enable_guardduty": enable_guardduty,
-        "enable_cloudtrail_logging": enable_cloudtrail_logging,
-        "enforce_imdsv2": enforce_imdsv2,
-        "s3_default_encryption": apply_s3_default_encryption,
-    }
-    _REGION_REQUIRED = {
-        "delete_ebs_volume",
-        "release_eip",
-        "enable_guardduty",
-        "enable_cloudtrail_logging",
-        "enforce_imdsv2",
-    }
-
     plan = build_remediation_plan(remediable)
     _render_remediation_plan_panel(c, plan)
 
-    available_phases = [p["phase"] for p in plan["phases"]]
-    phase_labels = " / ".join(str(p) for p in available_phases)
+    available_actions = [
+        action for phase in plan["phases"] for action in phase["actions"]
+    ]
     raw = Prompt.ask(
-        f"  [bold cyan]Approve phases[/bold cyan] "
-        f"[dim](all / {phase_labels} / none, Enter=skip)[/dim]",
+        "  [bold cyan]Select actions to review[/bold cyan] "
+        "[dim](all / 1,2 / top / none, Enter=skip)[/dim]",
         default="",
     )
 
@@ -2248,46 +2052,47 @@ def _section_remediation(  # noqa: C901
         return
 
     try:
-        approved = parse_phase_selection(raw, available_phases)
+        selected_indices = _parse_remediation_selection(raw, len(available_actions))
     except ValueError as exc:
         logger.error(str(exc))
         c.print()
         return
 
-    if not approved:
-        c.print("  [dim]No phases approved. Skipped.[/dim]")
+    if not selected_indices:
+        c.print("  [dim]No actions selected. Skipped.[/dim]")
         c.print()
         return
 
+    selected_actions = [available_actions[index] for index in selected_indices]
+    _render_remediation_preview(c, selected_actions)
+
     applied = 0
     failed = 0
-    for phase in plan["phases"]:
-        if phase["phase"] not in approved:
+    for action in selected_actions:
+        resource = action["resource"]
+        label = action["label"]
+        region = action["region"]
+        validation_error = validate_remediation_action(action)
+        if validation_error:
+            logger.error(validation_error)
+            failed += 1
             continue
-        for action in phase["actions"]:
-            rtype = action["remediation_type"]
-            resource = action["resource"]
-            label = action["label"]
-            fn = _ACTIONS.get(rtype)
-            if not fn:
-                logger.error(f"Unknown remediation type: {rtype}")
-                failed += 1
-                continue
-            region = action["region"]
-            if rtype in _REGION_REQUIRED and not region:
-                logger.error(f"Missing region for {rtype} on {resource}; skipping.")
-                failed += 1
-                continue
-            with c.status(
-                f"[cyan]🔧  Applying {label} on {resource}...[/cyan]", spinner="dots"
-            ):
-                ok = fn(resource, region=region)
-            if ok:
-                logger.success(f"{label} applied to {resource}.")
-                applied += 1
-            else:
-                logger.error(f"Failed to apply {label} on {resource}.")
-                failed += 1
+        scope = region or "global"
+        if not typer.confirm(
+            f"Apply '{label}' to '{resource}' in '{scope}'?",
+            default=False,
+        ):
+            continue
+        with c.status(
+            f"[cyan]🔧  Applying {label} on {resource}...[/cyan]", spinner="dots"
+        ):
+            execution = execute_remediation_action(action)
+        if execution["status"] == "applied":
+            logger.success(f"{label} applied to {resource}.")
+            applied += 1
+        else:
+            logger.error(f"Failed to apply {label} on {resource}.")
+            failed += 1
 
     parts = []
     if applied:
@@ -2339,142 +2144,6 @@ def _section_cur_upsell(
             logger.success("CUR deployment initiated successfully.")
         else:
             logger.error("CUR deployment failed.")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SARIF 2.1.0 output helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def _finding_to_rule_id(text: str) -> str:
-    """Convert a finding description to a kebab-case SARIF rule ID."""
-    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:64]
-
-
-def _rule_id_to_name(rule_id: str) -> str:
-    """Convert a kebab-case rule ID to CamelCase rule name."""
-    return "".join(part.capitalize() for part in rule_id.split("-"))
-
-
-def _severity_to_sarif_level(severity: str | None) -> str:
-    """Map scan severity to SARIF level."""
-    if severity in ("CRITICAL", "HIGH"):
-        return "error"
-    if severity == "MEDIUM":
-        return "warning"
-    if severity == "LOW":
-        return "note"
-    return "warning"
-
-
-def _build_sarif_output(payloads: dict[str, Any], account_id: str) -> dict[str, Any]:  # noqa: C901
-    """Build a SARIF 2.1.0 document from scan payloads."""
-    v1 = payloads.get("v1", {})
-
-    # Collect all (finding_text, resource_id, severity) tuples
-    raw_findings: list[tuple[str, str, str | None]] = []
-    for f in v1.get("security_findings", []):
-        raw_findings.append(
-            (str(f.get("finding", "")), str(f.get("resource", "")), f.get("severity"))
-        )
-    for f in v1.get("iam_findings", []):
-        raw_findings.append(
-            (
-                str(f.get("reason", "")),
-                str(f.get("principal_name", "")),
-                f.get("severity"),
-            )
-        )
-    for f in v1.get("cost_waste", []):
-        raw_findings.append(
-            (str(f.get("finding", "")), str(f.get("resource", "")), None)
-        )
-    for f in v1.get("tagging_findings", []):
-        missing = f.get("missing_tags", [])
-        text = (
-            "Missing tags: " + ", ".join(missing)
-            if missing
-            else "Missing required tags"
-        )
-        raw_findings.append((text, str(f.get("resource_id", "")), None))
-    for f in v1.get("cloudwatch_findings", []):
-        missing = f.get("missing_alarms", [])
-        text = (
-            "Missing alarms: " + ", ".join(missing)
-            if missing
-            else "Missing CloudWatch alarms"
-        )
-        raw_findings.append((text, str(f.get("resource_id", "")), None))
-    for f in v1.get("compute_optimizer", []):
-        text = (
-            f"EC2 rightsizing: {f.get('current_type', '')} -> "
-            f"{f.get('recommended_type', '')} "
-            f"(saves ${f.get('estimated_monthly_savings_usd', 0):.2f}/mo)"
-        )
-        raw_findings.append((text, str(f.get("instance_id", "")), None))
-    for f in v1.get("tag_cost_coverage", []):
-        if f.get("untagged_pct", 0) > 20:
-            text = (
-                f"Tag '{f['tag_key']}' missing on {f['untagged_pct']:.1f}% of spend"
-                f" (${f['untagged_usd']:.2f} untagged)"
-            )
-            raw_findings.append((text, f["tag_key"], None))
-
-    # Build unique rules (dedup by rule_id)
-    seen_rules: dict[str, dict[str, Any]] = {}
-    for finding_text, _, severity in raw_findings:
-        rid = _finding_to_rule_id(finding_text)
-        if rid and rid not in seen_rules:
-            level = _severity_to_sarif_level(severity)
-            seen_rules[rid] = {
-                "id": rid,
-                "name": _rule_id_to_name(rid),
-                "shortDescription": {"text": finding_text},
-                "defaultConfiguration": {"level": level},
-            }
-
-    # Build results
-    results: list[dict[str, Any]] = []
-    for finding_text, resource_id, severity in raw_findings:
-        rid = _finding_to_rule_id(finding_text)
-        if not rid:
-            continue
-        results.append(
-            {
-                "ruleId": rid,
-                "level": _severity_to_sarif_level(severity),
-                "message": {"text": finding_text},
-                "locations": [
-                    {
-                        "logicalLocations": [
-                            {
-                                "name": resource_id,
-                                "kind": "aws-resource",
-                                "fullyQualifiedName": f"aws://{account_id}/{resource_id}",
-                            }
-                        ]
-                    }
-                ],
-            }
-        )
-
-    return {
-        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
-        "version": "2.1.0",
-        "runs": [
-            {
-                "tool": {
-                    "driver": {
-                        "name": "aws-lighthouse",
-                        "version": "0.1.0",
-                        "informationUri": "https://github.com/your-org/aws-lighthouse",
-                        "rules": list(seen_rules.values()),
-                    }
-                },
-                "results": results,
-            }
-        ],
-    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2765,23 +2434,34 @@ def _run_analyze_cycle(  # noqa: C901
                 )
             )
         ]
-        if since_last:
+        baseline_snapshot = None
+        if since_last or all_errors:
             baseline_snapshot = db_manager.get_latest_scan_snapshot(
                 account_id, scope_key
             )
-            delta_data = _build_delta_payload(
+        if since_last:
+            delta_data = build_delta_payload(
                 baseline_snapshot=baseline_snapshot,
-                current_sections=section_payloads,
+                section_results=section_results,
                 scope_key=scope_key,
-                overall_errors=all_errors,
+                delta_section_keys=_DELTA_SECTION_KEYS,
             )
             v1_payload["delta"] = delta_data
             v2_payload["delta"] = error_result(data=delta_data, errors=all_errors)
 
+        persistable_snapshot = build_persistable_snapshot(
+            baseline_snapshot=baseline_snapshot,
+            section_results=section_results,
+        )
         db_manager.record_scan_snapshot(
             account_id=account_id,
             scope_key=scope_key,
-            data=_normalize_snapshot_payload(section_payloads),
+            data=_normalize_snapshot_payload(persistable_snapshot),
+        )
+        source_errors = source_errors_from_section_results(
+            section_results,
+            region_discovery_errors=region_errors,
+            enabled_source_kinds=enabled_opportunity_sources,
         )
         opportunity_summary = sync_opportunities_from_scan(
             db=db_manager,
@@ -2791,6 +2471,7 @@ def _run_analyze_cycle(  # noqa: C901
             section_payloads=section_payloads,
             scanned_regions=regions,
             enabled_source_kinds=enabled_opportunity_sources,
+            source_errors=source_errors,
         )
 
         if not json_mode:
@@ -3390,7 +3071,7 @@ def watch(
 # ─────────────────────────────────────────────────────────────────────────────
 # shell command
 # ─────────────────────────────────────────────────────────────────────────────
-def _new_shell_config() -> dict[str, dict[str, str]]:
+def _new_shell_config() -> dict[str, Any]:
     return {
         "configurable": {"thread_id": datetime.now().strftime("shell-%Y%m%d%H%M%S%f")}
     }
@@ -3879,7 +3560,7 @@ def logs(
 @app.command()
 def shell() -> None:  # noqa: C901
     """Start the interactive AI agent shell."""
-    from langchain_core.messages import HumanMessage, SystemMessage
+    from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
     from .agent import check_ollama_runtime, create_agent_graph
 
@@ -3911,8 +3592,8 @@ def shell() -> None:  # noqa: C901
             "For questions about what changed, what is new, what should be fixed first, "
             "top risks, or requests for a remediation plan, consult the local opportunities "
             "database before running fresh AWS scans.\n"
-            "Use local opportunity tools freely for triage because they only mutate local "
-            "metadata, not AWS resources.\n"
+            "Use read-only local opportunity tools for triage. Updating opportunity "
+            "metadata is a local mutation and requires the user's explicit approval.\n"
             "Before calling any tool, output a concise explanation of what you are about to "
             "do and why. This is shown to the user before they approve.\n"
             "Do not invent a schema_version argument. The only valid schema values are "
@@ -3995,7 +3676,7 @@ def shell() -> None:  # noqa: C901
                     continue
 
             prompt_text = translated_input or user_input
-            messages = (
+            messages: list[BaseMessage] = (
                 [system_prompt, HumanMessage(content=prompt_text)]
                 if first_turn
                 else [HumanMessage(content=prompt_text)]
@@ -4005,7 +3686,7 @@ def shell() -> None:  # noqa: C901
             # Stream agent events
             try:
                 c.print("\n[dim]  phase: reasoning[/dim]")
-                for event in graph.stream({"messages": messages}, config=config):  # type: ignore[arg-type]
+                for event in graph.stream({"messages": messages}, config=config):  # type: ignore[call-overload]
                     if "agent" in event:
                         msg = event["agent"]["messages"][-1]
                         if msg.content:

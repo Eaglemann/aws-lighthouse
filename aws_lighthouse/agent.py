@@ -1,11 +1,7 @@
 # ruff: noqa: E402
 import json
-import os
 from collections.abc import Sequence
 from typing import Annotated, Any, Literal, NotRequired, TypedDict, cast
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
-from urllib.request import urlopen
 
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_core.tools import tool
@@ -15,16 +11,16 @@ from langgraph.graph.message import add_messages
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel, ConfigDict, Field
 
+from .agent_policy import AUTO_APPROVED_TOOL_NAMES, tool_batch_requires_approval
 from .db import db_manager
 from .logger import logger
+from .ollama_runtime import OLLAMA_MODEL_NAME, get_ollama_host
+from .ollama_runtime import check_ollama_runtime as _check_ollama_runtime
 from .opportunities import build_opportunity_plan, default_list_statuses
 from .scan_contract import error_result, ok_result, to_v1_payload, to_v2_payload
 from .tools.bash import execute_bash, read_file, write_file
 from .types import OpportunitySourceKind, OpportunityStatus, ScanResult, Severity
 
-OLLAMA_DEFAULT_HOST = "http://localhost:11434"
-OLLAMA_MODEL_NAME = "gpt-oss:120b-cloud"
-OllamaRuntimeReason = Literal["ok", "unavailable", "invalid_response", "model_missing"]
 _SCHEMA_GUARDED_TOOLS: frozenset[str] = frozenset(
     {
         "tool_get_enabled_regions",
@@ -49,128 +45,9 @@ _SCHEMA_GUARDED_TOOLS: frozenset[str] = frozenset(
 )
 
 
-class OllamaRuntimeStatus(TypedDict):
-    """Health check result for the local Ollama runtime."""
-
-    ok: bool
-    reason: OllamaRuntimeReason
-    host: str
-    model: str
-    detail: str
-
-
-def get_ollama_host() -> str:
-    """Return the effective Ollama host, normalized for URL composition."""
-    return os.getenv("OLLAMA_HOST", OLLAMA_DEFAULT_HOST).rstrip("/")
-
-
-def check_ollama_runtime(timeout_seconds: float = 2.0) -> OllamaRuntimeStatus:
-    """Probe the local Ollama runtime and verify the configured model is present."""
-    host = get_ollama_host()
-    model = OLLAMA_MODEL_NAME
-    parsed_host = urlsplit(host)
-    if parsed_host.scheme not in {"http", "https"}:
-        return {
-            "ok": False,
-            "reason": "unavailable",
-            "host": host,
-            "model": model,
-            "detail": (
-                "OLLAMA_HOST must use http or https; "
-                f"received scheme '{parsed_host.scheme or 'none'}'."
-            ),
-        }
-    try:
-        with urlopen(  # noqa: S310 - scheme is validated against http/https above
-            f"{host}/api/tags",
-            timeout=timeout_seconds,
-        ) as response:
-            status = getattr(response, "status", response.getcode())
-            payload_bytes = response.read()
-    except HTTPError as exc:
-        return {
-            "ok": False,
-            "reason": "unavailable",
-            "host": host,
-            "model": model,
-            "detail": f"HTTP {exc.code}: {exc.reason}",
-        }
-    except URLError as exc:
-        return {
-            "ok": False,
-            "reason": "unavailable",
-            "host": host,
-            "model": model,
-            "detail": str(exc.reason),
-        }
-    except OSError as exc:
-        return {
-            "ok": False,
-            "reason": "unavailable",
-            "host": host,
-            "model": model,
-            "detail": str(exc),
-        }
-
-    if status != 200:
-        return {
-            "ok": False,
-            "reason": "unavailable",
-            "host": host,
-            "model": model,
-            "detail": f"Unexpected HTTP status: {status}",
-        }
-
-    try:
-        payload = json.loads(payload_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        return {
-            "ok": False,
-            "reason": "invalid_response",
-            "host": host,
-            "model": model,
-            "detail": f"Invalid response from Ollama: {exc}",
-        }
-
-    raw_models = payload.get("models")
-    if not isinstance(raw_models, list):
-        return {
-            "ok": False,
-            "reason": "invalid_response",
-            "host": host,
-            "model": model,
-            "detail": "The /api/tags response did not include a models list.",
-        }
-
-    installed_models: list[str] = []
-    for entry in raw_models:
-        if not isinstance(entry, dict):
-            continue
-        model_name = entry.get("name") or entry.get("model")
-        if isinstance(model_name, str):
-            installed_models.append(model_name)
-
-    if model not in installed_models:
-        detail = (
-            "Installed models: " + ", ".join(installed_models[:5])
-            if installed_models
-            else "Ollama is reachable but reported no installed models."
-        )
-        return {
-            "ok": False,
-            "reason": "model_missing",
-            "host": host,
-            "model": model,
-            "detail": detail,
-        }
-
-    return {
-        "ok": True,
-        "reason": "ok",
-        "host": host,
-        "model": model,
-        "detail": "ready",
-    }
+def check_ollama_runtime(timeout_seconds: float = 2.0):
+    """Compatibility facade for callers importing the check from agent."""
+    return _check_ollama_runtime(timeout_seconds)
 
 
 def _default_opportunity_account_id(account_id: str | None = None) -> str | None:
@@ -906,7 +783,6 @@ def tool_plan_opportunities(
 tools = [
     tool_read_file,
     tool_write_file,
-    tool_execute_bash,
     terminate_ec2,
     delete_ebs,
     s3_block_public_access,
@@ -1162,37 +1038,7 @@ def _route_after_approval(state: AgentState) -> str:
 # Only read-only, non-mutative tools belong here.
 # NEVER add a destructive tool — doing so silently removes user approval for that tool.
 # The routing function should_require_approval() consults this set.
-SAFE_TOOLS = {
-    # tool_read_file intentionally excluded: it can access any local path,
-    # including ~/.aws/credentials and ~/.ssh/. Requires approval + path check in bash.py.
-    "parse_terraform_context",
-    "tool_get_enabled_regions",
-    "tool_get_ec2_inventory",
-    "tool_get_rds_inventory",
-    "tool_get_s3_inventory",
-    "tool_get_lambda_inventory",
-    "tool_get_ri_sp_coverage",
-    "tool_get_ri_sp_recommendations",
-    "tool_detect_cost_anomalies",
-    "tool_get_cost_attribution",
-    "tool_get_compute_optimizer",
-    "tool_get_tag_cost_coverage",
-    "tool_get_effective_rates",
-    "tool_get_scenario_plan",
-    "tool_estimate_build_cost",
-    "tool_plan_remediation",
-    "tool_get_sg_blast_radius",
-    "tool_get_terraform_drift",
-    "tool_run_cost_scan",
-    "tool_check_tagging_compliance",
-    "tool_detect_overpermissive_iam",
-    "tool_detect_cloudwatch_gaps",
-    "tool_run_security_scan",
-    "tool_list_opportunities",
-    "tool_get_opportunity_details",
-    "tool_update_opportunity",
-    "tool_plan_opportunities",
-}
+SAFE_TOOLS = set(AUTO_APPROVED_TOOL_NAMES)
 
 # Validate at module load: every name in SAFE_TOOLS must appear in the tools list.
 # This catches renames that would silently remove the approval gate.
@@ -1213,10 +1059,8 @@ def should_require_approval(state: AgentState) -> str:
     if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
         return "end"
 
-    # Only require approval if at least one called tool is destructive
-    for tc in last_message.tool_calls:
-        if tc["name"] not in SAFE_TOOLS:
-            return "approval"
+    if tool_batch_requires_approval(tc["name"] for tc in last_message.tool_calls):
+        return "approval"
 
     # All tools are safe — log as auto_approved before ToolNode runs
     for tc in last_message.tool_calls:

@@ -5,7 +5,13 @@ from collections.abc import Iterable
 from typing import Any, cast
 
 from .db import DatabaseManager
-from .types import Opportunity, OpportunitySourceKind, OpportunityStatus, Severity
+from .types import (
+    Opportunity,
+    OpportunitySourceKind,
+    OpportunityStatus,
+    ScanError,
+    Severity,
+)
 
 TRACKED_SOURCE_KINDS: tuple[OpportunitySourceKind, ...] = (
     "cost_anomaly",
@@ -509,6 +515,7 @@ def build_scan_coverage(
     *,
     enabled_source_kinds: Iterable[OpportunitySourceKind],
     scanned_regions: Iterable[str | None],
+    source_errors: dict[OpportunitySourceKind, list[ScanError]] | None = None,
 ) -> dict[OpportunitySourceKind, set[str | None]]:
     region_tokens = {region for region in scanned_regions}
     if not region_tokens:
@@ -522,6 +529,13 @@ def build_scan_coverage(
             coverage[source_kind] = {None, *region_tokens}
         else:
             coverage[source_kind] = set(region_tokens)
+
+        for error in (source_errors or {}).get(source_kind, []):
+            failed_scope = error.get("region")
+            if failed_scope:
+                coverage[source_kind].discard(failed_scope)
+            else:
+                coverage[source_kind].discard(None)
     return coverage
 
 
@@ -534,6 +548,7 @@ def sync_opportunities_from_scan(
     section_payloads: dict[str, Any],
     scanned_regions: Iterable[str | None],
     enabled_source_kinds: Iterable[OpportunitySourceKind],
+    source_errors: dict[OpportunitySourceKind, list[ScanError]] | None = None,
 ) -> dict[str, int]:
     opportunities = build_scan_opportunities(
         account_id=account_id,
@@ -545,6 +560,7 @@ def sync_opportunities_from_scan(
     coverage = build_scan_coverage(
         enabled_source_kinds=enabled_source_kinds,
         scanned_regions=scanned_regions,
+        source_errors=source_errors,
     )
     return db.sync_opportunities(
         account_id=account_id,
